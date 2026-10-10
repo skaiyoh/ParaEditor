@@ -361,4 +361,226 @@ const objectScenario: Scenario = {
   },
 };
 
-export const scenarios: readonly Scenario[] = [loopScenario, objectScenario];
+
+
+/** Capture real download intent and decode its GIF bytes inside the page. */
+function installLoopCapture(): null {
+  const assert = { equal(a: unknown, b: unknown) { if (a !== b) throw new Error(`GIF decode: ${a} != ${b}`); } };
+  function decodeGif(bytes: Uint8Array) {
+  let p = 0;
+  const byte = () => { const value = bytes[p++]; if (value === undefined) throw new Error('Truncated GIF.'); return value; };
+  const word = () => byte() | byte() << 8;
+  const text = (n: number) => Array.from({ length: n }, byte).map((v) => String.fromCharCode(v)).join('');
+  const signature = text(6); if (signature !== 'GIF89a') throw new Error('No GIF89a header.');
+  const width = word(), height = word(), flags = byte(); byte(); byte();
+  const table = (flags: number) => Uint8Array.from(Array.from({ length: 3 * (1 << ((flags & 7) + 1)) }, byte));
+  const global = flags & 128 ? table(flags) : null;
+  const blocks = () => { const result: number[] = []; for (let n = byte(); n !== 0; n = byte()) for (let i = 0; i < n; i++) result.push(byte()); return result; };
+  const frames: { width: number; height: number; delay: number; rgba: Uint8ClampedArray }[] = [];
+  let delay = 0, loop: number | null = null;
+  for (let marker = byte(); marker !== 0x3b; marker = byte()) {
+    if (marker === 0x21) {
+      const label = byte();
+      if (label === 0xf9) { assert.equal(byte(), 4); byte(); delay = word(); byte(); assert.equal(byte(), 0); }
+      else if (label === 0xff) { const name = text(byte()), data = blocks(); if (name === 'NETSCAPE2.0' && data[0] === 1) loop = (data[1] ?? 0) | (data[2] ?? 0) << 8; }
+      else blocks();
+      continue;
+    }
+    assert.equal(marker, 0x2c); assert.equal(word(), 0); assert.equal(word(), 0);
+    const w = word(), h = word(), local = byte(), palette = local & 128 ? table(local) : global;
+    if (palette === null || local & 64) throw new Error('Missing palette or interlaced frame.');
+    const minimum = byte(), packed = blocks(), clear = 1 << minimum, end = clear + 1;
+    let bit = 0, widthBits = minimum + 1, next = end + 1, previous: number[] | null = null;
+    let dictionary: number[][] = [];
+    const reset = () => { dictionary = Array.from({ length: clear }, (_, i) => [i]); widthBits = minimum + 1; next = end + 1; previous = null; };
+    const pixels: number[] = []; reset();
+    for (;;) {
+      if (bit + widthBits > packed.length * 8) throw new Error('Truncated LZW.');
+      let code = 0;
+      for (let i = 0; i < widthBits; i++, bit++) code |= (((packed[bit >> 3] ?? 0) >> (bit & 7)) & 1) << i;
+      if (code === clear) { reset(); continue; }
+      if (code === end) break;
+      const entry: number[] | undefined = dictionary[code] ?? (code === next && previous !== null ? [...previous, previous[0] ?? 0] : undefined);
+      if (entry === undefined) throw new Error(`Invalid LZW code ${code} at ${next}.`);
+      pixels.push(...entry);
+      if (previous !== null && next < 4096) {
+        dictionary[next++] = [...previous, entry[0] ?? 0];
+        if (next === 1 << widthBits && widthBits < 12) widthBits++;
+      }
+      previous = entry;
+    }
+    assert.equal(pixels.length, w * h);
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (const [i, index] of pixels.entries()) { rgba.set(palette.subarray(index * 3, index * 3 + 3), i * 4); rgba[i * 4 + 3] = 255; }
+    frames.push({ width: w, height: h, delay, rgba });
+  }
+  assert.equal(p, bytes.length);
+  return { signature, width, height, loop, frames };
+}
+
+  const entries: { name: string; blob: Blob }[] = [], progress: string[] = [], blobs = new Map<string, Blob>();
+  const create = URL.createObjectURL, click = HTMLAnchorElement.prototype.click;
+  URL.createObjectURL = (blob) => {
+    const url = create.call(URL, blob); if (blob instanceof Blob) blobs.set(url, blob); return url;
+  };
+  HTMLAnchorElement.prototype.click = function () {
+    const blob = blobs.get(this.href);
+    if (blob === undefined) throw new Error('No loop download blob.');
+    entries.push({ name: this.download, blob });
+  };
+  const observer = new MutationObserver(() => {
+    const text = document.querySelector('[data-testid="preparing"]')?.textContent ?? '';
+    if (text.startsWith('Exporting:') && progress.at(-1) !== text) progress.push(text);
+  });
+  observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+  window.__loopExport = { entries, progress, decode: decodeGif, restore() {
+    observer.disconnect(); URL.createObjectURL = create; HTMLAnchorElement.prototype.click = click;
+    for (const url of blobs.keys()) URL.revokeObjectURL(url);
+    delete window.__loopExport;
+  } };
+  return null;
+}
+
+const exportScenario: Scenario = {
+  id: 'export.loop', title: 'GIF and movie loop downloads, cancellation and phone controls', covers: ['EXP1'], target: 'dev', timeoutMs: 450_000,
+  async run(t) {
+    const { page } = t;
+    await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
+    await page.goto(t.baseUrl);
+    await page.click('[data-testid="try-sample"]');
+    await page.waitFor('sample ready for loop export', z.literal(true), () => {
+      const a = window.__noisyTest?.demo.analysis(); return a?.decoderReady && a.depth && !a.alive.heavy ? true : null;
+    }, { timeoutMs: 180_000 });
+    await page.evaluate(z.null(), async () => {
+      const demo = window.__noisyTest?.demo; if (demo === undefined) throw new Error('No loop test surface.');
+      const size = { width: 128, height: 96 }, mask = new Uint8Array(128 * 96);
+      for (let y = 30; y < 66; y++) for (let x = 40; x < 88; x++) mask[y * 128 + x] = 255;
+      demo.injectMask({ ...size, data: mask }); await demo.requestPlate();
+      demo.setMotion({ enabled: true, loopSeconds: 2 }); await demo.requestPlate();
+      const id = demo.objects()[0]?.id; if (id === undefined) throw new Error('No selected export fixture.');
+      demo.select(id);
+      const motion = document.querySelector('[aria-label="Motion"] .node-disclosure');
+      if (motion instanceof HTMLButtonElement && motion.getAttribute('aria-expanded') === 'false') motion.click();
+      return null;
+    });
+    await page.waitFor('Motion export row', z.literal(true), () => {
+      const button = document.querySelector('[data-testid="export-gif"]');
+      return button instanceof HTMLButtonElement && button.getBoundingClientRect().height > 0 ? true : null;
+    });
+    await page.screenshot('export-row-1440');
+    await page.evaluate(z.null(), installLoopCapture);
+    try {
+      await page.click('[data-testid="export-gif"]');
+      await page.waitFor('GIF progress on the live session', z.literal(true), () => window.__noisyTest?.demo.exportProgress() !== null ? true : null);
+      await page.screenshot('export-progress-1440');
+      await page.waitFor('GIF downloaded', z.literal(true), () => window.__loopExport?.entries.length === 1 ? true : null, { timeoutMs: 120_000 });
+      const gif = await page.evaluate(z.object({ signature: z.string(), loop: z.number().nullable(), width: z.number(), height: z.number(), frames: z.number(), delays: z.array(z.number()), name: z.string(), bytes: z.number(), error: z.number(), selectionIgnored: z.boolean(), progress: z.array(z.string()) }), async () => {
+        const capture = window.__loopExport, demo = window.__noisyTest?.demo;
+        const entry = capture?.entries[0];
+        if (capture === undefined || entry === undefined || demo === undefined) throw new Error('No GIF download.');
+        const decoded = capture.decode(new Uint8Array(await entry.blob.arrayBuffer()));
+        let error = 0;
+        for (const frame of [0, Math.floor(decoded.frames.length / 2), decoded.frames.length - 1]) {
+          const loopFrames = Math.round((demo.document()?.motion.loopSeconds ?? 2) * 30);
+          const expected = demo.exportLoopFrame(Math.floor(frame * loopFrames / decoded.frames.length)), actual = decoded.frames[frame];
+          if (actual === undefined) throw new Error('No decoded GIF frame.');
+          let difference = 0;
+          for (let i = 0; i < expected.data.length; i++) if (i % 4 !== 3) difference += Math.abs((expected.data[i] ?? 0) - (actual.rgba[i] ?? 0));
+          error = Math.max(error, difference / (expected.width * expected.height * 3));
+        }
+        // Equality of the entire animation excludes selection dim on every frame.
+        demo.select(null); await demo.saveLoop('gif');
+        const unselected = capture.entries[1]; if (unselected === undefined) throw new Error('No unselected GIF.');
+        const a = new Uint8Array(await entry.blob.arrayBuffer()), b = new Uint8Array(await unselected.blob.arrayBuffer());
+        return { signature: decoded.signature, loop: decoded.loop, width: decoded.width, height: decoded.height,
+          frames: decoded.frames.length, delays: decoded.frames.map((frame) => frame.delay), name: entry.name, bytes: entry.blob.size,
+          error, selectionIgnored: a.length === b.length && a.every((value, i) => value === b[i]), progress: capture.progress };
+      });
+      t.equal('GIF89a and infinite NETSCAPE loop extension', [gif.signature, gif.loop], ['GIF89a', 0]);
+      const expected = await page.evaluate(z.object({ width: z.number(), height: z.number(), frames: z.number(), seconds: z.number(), title: z.string() }), () => {
+        const doc = window.__noisyTest?.demo.document(); if (doc === null || doc === undefined) throw new Error('No export document.');
+        const size = doc.frame.master.size, scale = 640 / Math.max(size.width, size.height);
+        return { width: Math.round(size.width * scale), height: Math.round(size.height * scale), frames: Math.round(doc.motion.loopSeconds * 15), seconds: doc.motion.loopSeconds, title: doc.title };
+      });
+      t.equal('GIF dimensions, frame count and filename', [gif.width, gif.height, gif.frames, gif.name], [expected.width, expected.height, expected.frames, `${expected.title}-loop.gif`]);
+      t.equal('GIF delays follow 15 fps cumulative rounding for exactly one period', gif.delays, Array.from({ length: expected.frames }, (_, i) => Math.round((i + 1) * expected.seconds * 100 / expected.frames) - Math.round(i * expected.seconds * 100 / expected.frames)));
+      t.ok('first, middle and last GIF frames match exact renderer frames within 12 RGB levels mean error', gif.error < 12, gif.error);
+      t.ok('every GIF byte ignores the selected object dim', gif.selectionIgnored);
+      t.ok('Preparing pill shows per-frame export progress', gif.progress.length > 2, gif.progress.slice(0, 5));
+
+      const movieLabel = await page.evaluate(z.string(), () => {
+        if (window.__loopExport !== undefined) window.__loopExport.progress.length = 0;
+        return document.querySelector('[data-testid="export-movie"]')?.textContent ?? '';
+      });
+      await page.click('[data-testid="export-movie"]');
+      await page.waitFor('movie finished', z.literal(true), () => window.__noisyTest?.demo.exportProgress() === null ? true : null, { timeoutMs: 120_000 });
+      const movie = await page.evaluate(z.object({ type: z.string(), bytes: z.number(), name: z.string(), duration: z.number(), width: z.number(), height: z.number(), status: z.string() }), async () => {
+        const entry = window.__loopExport?.entries[2];
+        if (entry === undefined) return { type: '', bytes: 0, name: '', duration: 0, width: 0, height: 0, status: window.__noisyTest?.demo.scene().status ?? '' };
+        const video = document.createElement('video'), url = URL.createObjectURL(entry.blob);
+        try {
+          video.muted = true; video.src = url;
+          await new Promise<void>((resolve, reject) => { video.onloadedmetadata = () => resolve(); video.onerror = () => reject(new Error('The movie cannot be decoded.')); });
+          // WebM from MediaRecorder may omit its duration header; decode to the end.
+          let duration = video.duration;
+          if (!Number.isFinite(duration)) {
+            await new Promise<void>((resolve, reject) => {
+              video.onended = () => { duration = video.currentTime; resolve(); };
+              void video.play().catch(reject);
+            });
+          }
+          return { type: entry.blob.type, bytes: entry.blob.size, name: entry.name, duration, width: video.videoWidth, height: video.videoHeight, status: window.__noisyTest?.demo.scene().status ?? '' };
+        } finally { video.pause(); video.removeAttribute('src'); video.load(); URL.revokeObjectURL(url); }
+      });
+      const movieProgress = await page.evaluate(z.array(z.string()), () => window.__loopExport?.progress ?? []);
+      t.ok('Movie shows per-frame progress in the Preparing pill', movieProgress.length > 2, movieProgress.slice(0, 5));
+      t.ok('movie saves advertised WebM type above 50 KB', movieLabel.includes('WebM') && movie.type.startsWith('video/webm') && movie.name === `${expected.title}-loop.webm` && movie.bytes > 50_000, { movieLabel, ...movie });
+      t.ok('movie decodes at capped master size and one period within one frame', Math.max(movie.width, movie.height) === 1080 && Math.abs(movie.duration - expected.seconds) < 1 / 30 + .01, movie);
+
+      const lifecycle = await page.evaluate(z.object({ second: z.boolean(), reset: z.boolean(), edit: z.boolean(), imported: z.boolean(), failure: z.boolean(), disabled: z.boolean() }), async () => {
+        const demo = window.__noisyTest?.demo, capture = window.__loopExport;
+        if (demo === undefined || capture === undefined) throw new Error('No cancellation surface.');
+        let count = capture.entries.length;
+        const first = demo.saveLoop('gif'), second = demo.saveLoop('gif'); await Promise.all([first, second]);
+        const secondOnly = capture.entries.length === count + 1; count = capture.entries.length;
+        const resetting = demo.saveLoop('gif'); demo.reset(); await resetting;
+        const reset = capture.entries.length === count && demo.exportProgress() === null;
+        demo.setMotion({ enabled: true });
+        const editing = demo.saveLoop('gif'); demo.setFry(.4); await editing;
+        const edit = capture.entries.length === count && demo.exportProgress() === null;
+        const documentBefore = JSON.stringify(demo.document()), originalWorker = window.Worker;
+        try {
+          window.Worker = class extends originalWorker { constructor(url: string | URL, options?: WorkerOptions) { super(url, options); this.terminate(); throw new Error('Encoder unavailable.'); } };
+          await demo.saveLoop('gif');
+        } finally { window.Worker = originalWorker; }
+        const failure = capture.entries.length === count && demo.exportProgress() === null && JSON.stringify(demo.document()) === documentBefore && demo.scene().status === 'GIF export failed: Encoder unavailable.';
+        const recorder = window.MediaRecorder;
+        Reflect.deleteProperty(window, 'MediaRecorder');
+        demo.setMotion({ orbit: .51 }); await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const button = document.querySelector('[data-testid="export-movie"]');
+        const disabled = button instanceof HTMLButtonElement && button.disabled && button.title.includes('unavailable');
+        window.MediaRecorder = recorder;
+        const importing = demo.saveLoop('gif');
+        const response = await fetch('/assets-static/sample.jpg'), blob = await response.blob();
+        await demo.importFile(new File([blob], 'replacement.jpg', { type: blob.type })); await importing;
+        const imported = capture.entries.length === count && demo.exportProgress() === null;
+        return { second: secondOnly, reset, edit, imported, failure, disabled };
+      });
+      for (const [name, passed] of Object.entries(lifecycle)) t.ok(`export lifecycle: ${name}`, passed);
+      await page.emulate({ width: 402, height: 874, mobile: true, deviceScaleFactor: 1, colorScheme: 'dark' });
+      await page.evaluate(z.null(), () => { window.__noisyTest?.demo.setMotion({ enabled: true }); return null; });
+      await page.waitFor('phone Motion export row', z.literal(true), () => {
+        const row = document.querySelector('.phone-sheet .motion-export'); return row !== null && row.getBoundingClientRect().height > 0 ? true : null;
+      });
+      const phone = await page.evaluate(z.boolean(), () => {
+        const buttons = [...document.querySelectorAll('.phone-sheet .motion-export button')];
+        return buttons.length === 2 && buttons.every((button) => { const r = button.getBoundingClientRect(); return r.height >= 44 && r.width >= 44 && r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; });
+      });
+      t.ok('phone sheet shows both exports at 402 x 874 with 44 px targets', phone);
+      await page.screenshot('export-phone-402');
+      await t.file('export-loop.json', JSON.stringify({ gif, movieLabel, movie, movieProgress, lifecycle, phone }, null, 2));
+    } finally { await page.evaluate(z.null(), () => { window.__loopExport?.restore(); return null; }); }
+  },
+};
+
+export const scenarios: readonly Scenario[] = [loopScenario, objectScenario, exportScenario];

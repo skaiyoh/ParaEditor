@@ -31,6 +31,9 @@ export type DemoTestSurface = {
   frame(): number;
   renderFrameAt(frame: number): Promise<void>;
   exportFrame(frame: number): Promise<Blob>;
+  exportLoopFrame(frame: number, edge?: number): ImageData;
+  saveLoop(kind: 'gif' | 'movie'): Promise<void>;
+  exportProgress(): string | null;
   setMotion(patch: Partial<SceneDocument['motion']>): void;
   document(): SceneDocument | null;
   refinement(): ReturnType<DemoSession['refinementProbe']>;
@@ -94,6 +97,9 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
       return Array.from(plate.data.subarray(i, i + 3));
     },
     frame: () => session.frame(),
+    exportLoopFrame: (frame, edge) => session.exportLoopFrame(frame, edge),
+    saveLoop: (kind) => session.saveLoop(kind),
+    exportProgress: () => session.snapshot().exportProgress,
     async renderFrameAt(frame) { session.renderFrameAt(frame); },
     async exportFrame(frame) {
       const debug = session.renderer()?.debug;

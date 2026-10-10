@@ -54,6 +54,7 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
           <section class="node" aria-label="Fry">
             <RangeControl id="style-fry" label="Fry" min={0} max={1} step={0.01} value={scene.doc.style.fry} onInput={(value) => session.setFry(value)} />
           </section>
+          {scene.doc.motion.enabled && <section class="node" aria-label="Motion"><MotionExport session={session} /></section>}
           <ParallaxNode enabled={parallaxEnabled} available={modelsReady} onParallax={onParallax} debug={debug} onDebug={onDebug} />
           {selected !== undefined && <ObjectInspector key={selected.id} object={selected} session={session} />}
           <Layers scene={scene} session={session} />
@@ -84,4 +85,16 @@ export function ParallaxNode({ enabled, available, onParallax, debug, onDebug }:
     <div class="parallax-actions"><button type="button" data-testid="parallax-debug-toggle" aria-pressed={debug}
       aria-controls="parallax-debug-panel" onClick={onDebug}>Debug</button></div>
   </Node>;
+}
+
+/** One export row shared by the inspector and the phone's Motion node. */
+export function MotionExport({ session }: { readonly session: DemoSession }) {
+  const format = session.movieFormat();
+  return <div class="motion-export" role="group" aria-label="Export loop">
+    <span>Export</span>
+    <button type="button" data-testid="export-gif" onClick={() => { void session.saveLoop('gif'); }}>GIF</button>
+    <button type="button" data-testid="export-movie" disabled={format === null}
+      title={format === null ? 'Movie recording is unavailable in this browser.' : `Export one loop as ${format.label}`}
+      onClick={() => { void session.saveLoop('movie'); }}>Movie{format === null ? '' : ` (${format.label})`}</button>
+  </div>;
 }

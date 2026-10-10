@@ -40,6 +40,9 @@ declare global {
         frame(): number;
         renderFrameAt(frame: number): Promise<void>;
         exportFrame(frame: number): Promise<Blob>;
+        exportLoopFrame(frame: number, edge?: number): ImageData;
+        saveLoop(kind: 'gif' | 'movie'): Promise<void>;
+        exportProgress(): string | null;
         setMotion(patch: Partial<SceneDocument['motion']>): void;
         document(): SceneDocument | null;
         refinement(): {
@@ -80,6 +83,12 @@ declare global {
     /** Temporary download capture installed and restored by export.stereo. */
     __stereoDownloads?: {
       readonly entries: { readonly name: string; readonly blob: Blob }[];
+      restore(): void;
+    };
+    __loopExport?: {
+      readonly entries: { name: string; blob: Blob }[];
+      readonly progress: string[];
+      decode(bytes: Uint8Array): { signature: string; width: number; height: number; loop: number | null; frames: { width: number; height: number; delay: number; rgba: Uint8ClampedArray }[] };
       restore(): void;
     };
     /** The memory harness page's surface (src/dev/harness/memory.ts). */

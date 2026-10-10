@@ -223,3 +223,8 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bo
   .phone-toolbar .primary-action:active:not(:disabled) { filter: brightness(.9); }
   .phone-toolbar .primary-action:disabled { background: var(--raised); color: var(--secondary); }
 }
+
+.motion-export { display: flex; align-items: center; gap: 8px; padding: 4px 12px; }
+.motion-export > span { flex: 1; color: var(--secondary); font-size: var(--type-label); }
+.motion-export button { background: var(--raised); padding-inline: 12px; white-space: nowrap; }
+.motion-export button:hover:not(:disabled) { background: var(--hairline); }

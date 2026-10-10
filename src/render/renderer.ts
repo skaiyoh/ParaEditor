@@ -42,7 +42,14 @@ type Buffers = { readonly grid: Grid; readonly simplified: Target; readonly quan
 type CrunchBuffers = { readonly y: readonly [Target, Target]; readonly c: readonly [Target, Target] };
 type CellBuffers = { readonly variant: Target; readonly cells: Target; readonly decisions: Target; readonly size: number };
 
-export function createRenderer(canvas: HTMLCanvasElement): Renderer {
+/** Offline frames share the still export's selection-free draw and restoration. */
+export type LoopCapture = { readonly frame: number; readonly canvas: HTMLCanvasElement };
+type ExportRenderer = Omit<Renderer, 'exportStill'> & {
+  exportStill(): Promise<Blob>;
+  exportStill(capture: LoopCapture): void;
+};
+
+export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   const gpu = createGl(canvas);
   const { gl } = gpu;
   let lost = false;
@@ -651,22 +658,31 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       }, 'image/png'));
     } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera); }
   }
+  function exportStill(): Promise<Blob>;
+  function exportStill(capture: LoopCapture): void;
+  function exportStill(capture?: LoopCapture): Promise<Blob> | void {
+    checkLive();
+    const restore = lastRender;
+    try {
+      if (capture === undefined) renderStill(false);
+      else renderFrame(capture.frame, false);
+      if (capture !== undefined) {
+        const context = capture.canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+        if (context === null) throw new Error('The loop export canvas could not be created.');
+        context.drawImage(canvas, 0, 0, capture.canvas.width, capture.canvas.height);
+        return;
+      }
+      // toBlob snapshots at invocation; restore before the browser paints.
+      return new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => {
+        if (blob === null) reject(new Error('The rendered PNG could not be encoded.'));
+        else resolve(blob);
+      }, 'image/png'));
+    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera); }
+  }
   return {
     setScene, renderStill,
     renderFrame, renderView, exportView,
-    async exportStill(): Promise<Blob> {
-      checkLive();
-      // toBlob snapshots at invocation, so concurrent exports or later edits
-      // cannot replace this still while the browser encodes its PNG.
-      const restore = lastRender;
-      renderStill(false);
-      try {
-        return new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => {
-          if (blob === null) reject(new Error('The rendered PNG could not be encoded.'));
-          else resolve(blob);
-        }, 'image/png'));
-      } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera); }
-    },
+    exportStill,
     dispose(): void {
       if (disposed) return;
       disposed = true;

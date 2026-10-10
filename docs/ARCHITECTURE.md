@@ -50,7 +50,9 @@ src/
     connection.ts              StoreError, StoreEvent, and the connection every store operation runs through
     idb.ts                     the database's name, version, and schema, the IndexedDB opener, requestDone, and transactionDone
     lock.ts                    the scene lock over Web Locks
-  export/gif-worker.ts         worker entry, a stub
+  export/gif.ts                pure palette quantization, GIF89a/LZW encoding and worker protocol
+  export/gif-worker.ts         worker entry, incremental GIF frame encoding
+  export/movie.ts              browser movie format selection and canvas MediaRecorder
   index.html                 page template; the build fills in the app script
   manifest.webmanifest       web app manifest, copied as is
   icon.svg                   icon for the page and the manifest, copied as is
@@ -231,7 +233,7 @@ The browser scenarios under `test/browser/` are not `node:test` files and the gl
 
 `tools/build.mjs` bundles four entries with esbuild: the app `src/main.tsx` and the three workers `src/analysis/sequence-worker.ts`, `src/analysis/decode-worker.ts`, and `src/export/gif-worker.ts`.
 The workers are built first, so the app can be given their content-hashed URLs.
-The gif worker entry is a stub for now: it answers every message with `{ kind: 'stub', worker, buildId }`; the sequence and decode workers are built (see "The sequence worker" and "The decode worker").
+The gif worker encodes loop frames incrementally (see "Loop exports"); the sequence and decode workers are built (see "The sequence worker" and "The decode worker").
 The manifest, copied as is, sets `display: standalone`.
 In both modes it also copies the vendored model runtime (see "Vendored model runtime"), and in dev mode it builds the dev pages (see "Dev pages").
 
@@ -1990,6 +1992,44 @@ objectMotionBound(doc: SceneDocument, id: ObjectId): Vec2;
 The renderer is not built yet.
 The functions over plain numbers, `cycleTurn`, `cameraOffset`, `parallaxReach`, `parallaxDisplacement`, `bobOffset`, `swayAngle`, `swayDisplacement`, and `wobbleDisplacement`, with `objectDisplacement`'s choice among them, are the formulas the geometry pass and object motion are to evaluate on the GPU and test their shaders against.
 `frameCount`, `loopPhase`, `parallaxClamp`, `cameraRadius`, and `objectMotionBound` are computed once per frame or per scene on the CPU and are to reach the shaders as inputs.
+
+### Loop exports
+
+With Motion enabled, the Motion node and phone sheet offer `export-gif` and `export-movie`.
+`session/scene.ts` owns the export job and its progress, separate from analysis and document state.
+The existing Preparing pill prioritizes `exportProgress` on desktop and phone.
+A new export, import intent (including project open), Reset, document edit, refinement or renderer teardown aborts the job.
+Only the current job for the same document can save a file or clear its progress.
+An export failure becomes one status sentence and keeps the document intact.
+
+The existing renderer `exportStill` accepts an optional `{ frame, canvas }` capture.
+It renders the exact integer loop frame without selection, synchronously copies the stage to the output canvas, and restores its previous frame and camera in `finally` before the next paint.
+The output is scaled from the master's render into a canvas at 640 px long-edge for GIF and capped at 1080 px for movie; the master-sized render targets and all shader math stay unchanged.
+Live Parallax, selection dim, Debug and UI overlays do not enter these frames.
+Movie uses the loop's 30 fps; GIF samples the whole period at a nominal 15 fps, excluding the duplicate endpoint.
+For a period with a fractional GIF frame count, the rounded frame count is distributed uniformly over the existing loop frames and its delays preserve the exact period.
+
+`session/loop.ts` transfers one `ImageData` buffer per frame to a dedicated gif worker and waits for its acknowledgement before drawing another.
+The worker's Zod-validated protocol is `start`, `frame`, `finish`, with `ready`, `progress`, `done` and `failed` replies.
+Worker errors, invalid replies and a 30-second response timeout fail the job; every exit terminates the worker.
+`export/gif.ts` retains exact colors up to 256, otherwise uses a bounded RGB histogram and weighted median-cut palette for each frame.
+The pure encoder writes GIF89a, local 256-entry palettes, LZW with dictionary reset, opaque full-frame disposal, and the NETSCAPE infinite-loop extension.
+GIF frame delays use cumulative centisecond rounding with 6 and 7 centisecond delays, preserving the period at its reduced frame rate.
+The resulting file is `<title>-loop.gif`.
+
+Movies prepare exact frames as PNG blobs, with a 128 MiB compressed-memory ceiling, before starting `MediaRecorder` on a separate canvas populated from the stage exports.
+This keeps renderer cost out of the recording clock and prevents selection or preview redraws entering the stream.
+At most three decoded frames are held as bitmaps; all bitmaps and stream tracks are released on success, cancellation or failure.
+Continuous Motion and Parallax preview draws pause only during recording; document edits abort recording and normal draws resume immediately.
+Recording requests capture frames explicitly when the browser supports it and uses absolute wall-clock deadlines, holds the final available frame until the period ends and skips to the current loop time when capture falls behind.
+An independent timer stops the recording at the period boundary even when a frame decode remains pending; skipped bitmaps close when their decode resolves.
+MediaRecorder is a real-time API, so browser scheduling and codec timestamps remain a limit; this is not an offline muxer.
+Safari prefers supported MP4/H.264, Chromium prefers supported WebM/VP9 then VP8, with the other supported container as fallback.
+The button names the selected container and disables with an explanatory title when recording is unavailable.
+The file is `<title>-loop.mp4` or `<title>-loop.webm`.
+
+`test/gif.test.ts` decodes exact small frames and stresses LZW growth/reset, quantization and loop delays.
+`export.loop` captures actual download blobs, decodes the GIF in-page, compares selected and unselected animation bytes, checks movie decoding and duration, exercises cancellation/failure paths and captures the desktop and phone export row.
 
 ### Live Parallax
 

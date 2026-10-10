@@ -18,14 +18,15 @@ import { applyEdit, applyEdits } from '../core/reduce.ts';
 import { EMPTY_HISTORY, coalesceKey, push, undo, redo, type History, type HistoryEntry } from '../core/history.ts';
 import type { Edit, StylePatch } from '../core/edits.ts';
 import { createRenderer } from '../render/renderer.ts';
-import type { Renderer } from '../render/types.ts';
 import { renderPng } from '../export/png.ts';
 import { labelAt, plateNeeded } from '../core/derive.ts';
 import { bundledLock } from '../analysis/bundled-lock.ts';
 import { maskedDepth, objectProduced } from './objects.ts';
-import { createLoopStepper, loopTapPoint } from './loop.ts';
+import { createLoopStepper, loopTapPoint, loopCanvas, encodeLoopGif } from './loop.ts';
 import { frameCount, effectiveOrbit, loopZoom, type Vec2 } from '../core/motion.ts';
 import { LOOP_FPS } from '../render/loop.ts';
+import { movieFormat, recordMovie, exportWait } from '../export/movie.ts';
+import { GIF_FPS, GIF_LONG_EDGE } from '../export/gif.ts';
 import { createWindowSource } from './window.ts';
 import { createTiltSource, type Orientation } from './tilt.ts';
 import { createViewDriver, type ViewHost } from './view-driver.ts';
@@ -45,6 +46,7 @@ export type DemoScene = {
   readonly selected: ObjectId | null;
 };
 export type DemoState = {
+  readonly exportProgress: string | null;
   readonly status: string; readonly scene: DemoScene | null;
   readonly analysisStatus: string; readonly analysisTiming: { readonly stage: string; readonly ms: number } | null;
   readonly parallaxEnabled: boolean;
@@ -88,7 +90,7 @@ async function importScene(file: File): Promise<DemoScene> {
 }
 
 export function createDemoSession() {
-  let state: DemoState = { status: 'Drop a photo', scene: null, analysisStatus: 'Fetching models 0%', analysisTiming: null, parallaxEnabled: false, refiningObject: null, refinementSize: null };
+  let state: DemoState = { exportProgress: null, status: 'Drop a photo', scene: null, analysisStatus: 'Fetching models 0%', analysisTiming: null, parallaxEnabled: false, refiningObject: null, refinementSize: null };
   const products = createProducts();
   let history: History = EMPTY_HISTORY;
   let generation = 0;
@@ -115,20 +117,32 @@ export function createDemoSession() {
     tapControllers.clear(); pendingMask = Promise.resolve();
   };
   let pendingMask = Promise.resolve();
-  let renderer: Renderer | null = null;
+  let renderer: ReturnType<typeof createRenderer> | null = null;
+  let exportJob: AbortController | null = null;
+  let recordingJob: AbortController | null = null;
+  function cancelExport(): void {
+    exportJob?.abort(); exportJob = null; recordingJob = null;
+    state = { ...state, exportProgress: null };
+  }
+  function exportProgress(controller: AbortController, text: string | null): void {
+    if (exportJob !== controller) return;
+    state = { ...state, exportProgress: text };
+    for (const listener of listeners) listener(state);
+  }
   const projects = createProjectSession(() => {
     if (renderer === null) throw new Error('The photo renderer is unavailable.');
     return renderPng(renderer);
   });
   let renderError: unknown = null;
   let stageCanvas: HTMLCanvasElement | null = null;
-  const loop = createLoopStepper((frame) => { renderer?.renderFrame(frame); }, (error) => {
+  const loop = createLoopStepper((frame) => { if (recordingJob === null) renderer?.renderFrame(frame); }, (error) => {
     renderError = error;
     state = { ...state, status: error instanceof Error ? error.message : String(error) };
     for (const listener of listeners) listener(state);
   });
   const listeners = new Set<(state: DemoState) => void>();
   const publish = (next: Pick<DemoState, 'status' | 'scene'>, refuseOnRenderError = false): void => {
+    if (next.scene?.doc !== state.scene?.doc) cancelExport();
     const scene = next.scene === null ? null : { ...next.scene, ...products.forScene(next.scene.doc) };
     let status = next.status;
     if (status === 'Still analyzing…' && analysis.snapshot().decoderReady) status = 'Ready';
@@ -140,7 +154,7 @@ export function createDemoSession() {
       if (refuseOnRenderError) throw error;
       status = error instanceof Error ? error.message : String(error);
     }
-    state = { status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), parallaxEnabled: view.enabled(), refiningObject: refinement?.id ?? null, refinementSize: refinement?.size ?? null };
+    state = { exportProgress: state.exportProgress, status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), parallaxEnabled: view.enabled(), refiningObject: refinement?.id ?? null, refinementSize: refinement?.size ?? null };
     if (scene !== null && readyScene?.generation === generation) projects.observe(scene.doc, products.masks);
     for (const listener of listeners) listener(state);
   };
@@ -192,7 +206,7 @@ export function createDemoSession() {
   const viewHost = {
     read: () => state.scene?.doc ?? null,
     generation: () => generation,
-    draw: (camera, frame) => renderer?.renderView(camera, frame),
+    draw: (camera, frame) => { if (recordingJob === null) renderer?.renderView(camera, frame); },
     changed: () => publish({ ...state, status: view.status() }),
     failed: (status) => publish({ ...state, status }),
   } satisfies ViewHost;
@@ -393,6 +407,7 @@ export function createDemoSession() {
     });
   }
   function beginRefinement(id: ObjectId): boolean {
+    cancelExport();
     cancelRefinement();
     const scene = state.scene, decoder = analysis.decoder();
     const object = scene?.doc.objects.find((entry) => entry.id === id);
@@ -469,6 +484,7 @@ export function createDemoSession() {
   async function importSource(source: (signal: AbortSignal) => Promise<{
     readonly file: File; readonly project: LoadedProject | null;
   }>): Promise<boolean> {
+    cancelExport();
     projects.suspend();
     loop.stop(); stopView(); readyScene = null;
     importController?.abort();
@@ -505,8 +521,78 @@ export function createDemoSession() {
     if (renderer === null) throw new Error('The photo renderer is unavailable.');
     return renderStereo(renderer, scene.doc, size);
   }
+  function exportLoopFrame(frame: number, edge = GIF_LONG_EDGE): ImageData {
+    if (renderer === null || state.scene === null) throw new Error('Open a photo before exporting a loop.');
+    const canvas = loopCanvas(state.scene.master, edge, true);
+    renderer.exportStill({ frame, canvas });
+    const context = canvas.getContext('2d');
+    if (context === null) throw new Error('The loop export canvas is unavailable.');
+    return context.getImageData(0, 0, canvas.width, canvas.height);
+  }
+  async function saveLoop(kind: 'gif' | 'movie'): Promise<void> {
+    cancelExport();
+    const controller = new AbortController(); exportJob = controller;
+    const { signal } = controller;
+    const scene = state.scene, activeRenderer = renderer;
+    try {
+      if (scene === null || activeRenderer === null) throw new Error('Open a photo before exporting a loop.');
+      if (!scene.doc.motion.enabled) throw new Error('Turn Motion on before exporting a loop.');
+      if (refinement !== null) throw new Error('Finish the selection adjustment before exporting a loop.');
+      if (plateNeeded(scene.doc) || (scene.doc.analysis.plate !== null && scene.plate === null)) throw new Error('The loop background is still preparing; try Export again when it is ready.');
+      const loopFrames = frameCount(scene.doc.motion, LOOP_FPS);
+      const frames = frameCount(scene.doc.motion, kind === 'gif' ? GIF_FPS : LOOP_FPS);
+      const canvas = loopCanvas(scene.master, kind === 'gif' ? GIF_LONG_EDGE : 1080, kind === 'gif');
+      const progress = (completed: number) => exportProgress(controller, `Exporting: ${completed} of ${frames} frames`);
+      const render = (frame: number) => {
+        signal.throwIfAborted();
+        activeRenderer.exportStill({ frame: Math.floor(frame * loopFrames / frames), canvas });
+      };
+      progress(0);
+      let blob: Blob, extension: string;
+      if (kind === 'gif') {
+        extension = 'gif';
+        blob = await encodeLoopGif({ canvas, frames, fps: frames * LOOP_FPS / loopFrames, signal, render, progress });
+      } else {
+        const format = movieFormat();
+        if (format === null) throw new Error('This browser does not support movie recording.');
+        extension = format.extension;
+        const prepared: Blob[] = [];
+        let bytes = 0;
+        for (let frame = 0; frame < frames; frame++) {
+          render(frame);
+          const png = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => {
+            if (value === null) reject(new Error('A movie frame could not be prepared.')); else resolve(value);
+          }, 'image/png'));
+          signal.throwIfAborted(); bytes += png.size;
+          if (bytes > 128 * 1024 * 1024) throw new Error('This movie needs too much memory; shorten the loop and try again.');
+          prepared.push(png); progress(frame + 1);
+          await exportWait(0, signal);
+        }
+        recordingJob = controller;
+        blob = await recordMovie({ canvas, frames: prepared, fps: LOOP_FPS, format, signal, progress });
+      }
+      signal.throwIfAborted();
+      if (exportJob !== controller || state.scene?.doc !== scene.doc) return;
+      const url = URL.createObjectURL(blob), link = document.createElement('a');
+      link.href = url; link.download = `${scene.doc.title}-loop.${extension}`; link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      if (!signal.aborted && exportJob === controller) {
+        const detail = error instanceof Error ? error.message : 'The browser could not encode this loop.';
+        publish({ ...state, status: `${kind === 'gif' ? 'GIF' : 'Movie'} export failed: ${detail}` });
+      }
+    } finally {
+      if (recordingJob === controller) {
+        recordingJob = null;
+        if (state.scene !== null) {
+          try { draw(state.scene); } catch (error) { publish({ ...state, status: error instanceof Error ? error.message : String(error) }); }
+        }
+      }
+      if (exportJob === controller) { exportProgress(controller, null); exportJob = null; }
+    }
+  }
   return {
-    products, projects,
+    products, projects, saveLoop, movieFormat, exportLoopFrame,
     tap, select, objectAt, beginRefinement, moveRefinement, commitRefinement, cancelRefinement,
     historyState: () => ({ canUndo: history.undo.length > 0, canRedo: history.redo.length > 0 }),
     undo: (): void => stepHistory('undo'),
@@ -531,6 +617,7 @@ export function createDemoSession() {
       edit({ kind: 'object.set', id, patch: { recolor: color === null ? { kind: 'none' } : { kind: 'target', color } } });
     },
     reset(): void {
+      cancelExport();
       const scene = state.scene;
       if (scene === null || baseline === null || baseline.id !== scene.doc.id) return;
       stopView();
@@ -567,6 +654,7 @@ export function createDemoSession() {
       });
     },
     async openProject(id: SceneId): Promise<boolean> {
+      cancelExport();
       importController?.abort();
       const controller = new AbortController(); importController = controller;
       const expected = generation;
@@ -690,8 +778,9 @@ export function createDemoSession() {
       if (renderer === null) throw new Error('Open a photo before rendering.');
       renderer.renderFrame(frame);
     },
-    renderer: (): Renderer | null => renderer,
+    renderer: (): ReturnType<typeof createRenderer> | null => renderer,
     attachCanvas(canvas: HTMLCanvasElement): () => void {
+      cancelExport();
       loop.stop(); stopView(); renderer?.dispose(); renderer = null; renderError = null; stageCanvas = canvas;
       try {
         renderer = createRenderer(canvas);
@@ -702,6 +791,7 @@ export function createDemoSession() {
       }
       return () => {
         if (stageCanvas !== canvas) return;
+        cancelExport();
         loop.stop(); stopView(); renderer?.dispose(); renderer = null; renderError = null; stageCanvas = null;
       };
     },

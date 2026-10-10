@@ -58,7 +58,7 @@ Start or restart both processes from the instance:
 From this Mac worktree, the current one-line restart is:
 
 ```sh
-ssh -o UserKnownHostsFile=.local/gpu/GP0/known_hosts -o StrictHostKeyChecking=accept-new -i ~/.ssh/radeon_cloud_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 -p 31109 root@36.150.116.206 '/opt/venv/bin/python /workspace/gp2/start.py'
+ssh -o UserKnownHostsFile=.local/gpu/GP0/known_hosts -o StrictHostKeyChecking=accept-new -i ~/.ssh/radeon_cloud_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 -p <port> root@<instance-address> '/opt/venv/bin/python /workspace/gp2/start.py'
 ```
 
 `start.py` serializes restarts, stops only its recorded processes after checking their commands, waits for the models/health endpoint, and starts the connector.

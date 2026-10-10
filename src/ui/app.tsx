@@ -5,7 +5,7 @@ import { applyEdit } from '../core/reduce.ts';
 import { RANGES } from '../core/ranges.ts';
 import { EnableSwitch, Node, RangeControl } from './controls.tsx';
 import { Layers, ObjectInspector } from './layers.tsx';
-import { ParallaxNode, PhoneFrame } from './phone.tsx';
+import { MotionExport, ParallaxNode, PhoneFrame } from './phone.tsx';
 import { Projects } from './projects.tsx';
 
 const PHONE_QUERY = '(max-width: 760px), (max-height: 500px), (max-width: 1100px) and (orientation: portrait)';
@@ -261,6 +261,7 @@ function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, d
         <RangeControl id="motion-parallax" label="Parallax" min={RANGES['motion.parallax'].min} max={RANGES['motion.parallax'].max} step={0.1}
           value={scene.doc.motion.parallax} onInput={(parallax) => session.setMotion({ parallax })} />
         <RangeControl id="motion-loopSeconds" label="Loop seconds" min={2} max={6} step={0.1} value={scene.doc.motion.loopSeconds} onInput={(loopSeconds) => session.setMotion({ loopSeconds })} />
+        {scene.doc.motion.enabled && <MotionExport session={session} />}
       </Node>
       <ParallaxNode enabled={parallaxEnabled} available={modelsReady} onParallax={onParallax} debug={debug} onDebug={onDebug} />
       <Node name="Symbols" expanded={expanded.Symbols} onExpand={() => expand('Symbols')}
@@ -344,12 +345,12 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   const tapUnavailable = state.analysisStatus.startsWith('Tapping ');
   const status = bootError ?? (state.parallaxEnabled && state.analysisStatus === 'preparing' ? `${state.status} - preparing` :
     tapUnavailable || state.status === 'Ready' || state.status === 'Drop a photo' ? state.analysisStatus : state.status);
-  const preparing = scene === null ? null : tapUnavailable ? state.analysisStatus
+  const preparing = state.exportProgress ?? (scene === null ? null : tapUnavailable ? state.analysisStatus
     : state.analysisStatus === 'Analyzing: inpaint' ? 'Preparing: background'
     : state.analysisStatus.startsWith('Analyzing: ') ? state.analysisStatus.replace('Analyzing: ', 'Preparing: ')
     : state.analysisStatus === 'preparing' ? 'Preparing: background'
     : state.analysisStatus === 'Warming decoder' ? state.analysisStatus
-    : !analysis.decoderReady ? state.analysisStatus : null;
+    : !analysis.decoderReady ? state.analysisStatus : null);
   const touch = navigator.maxTouchPoints > 0;
   const toggleMotion = (): void => { if (scene !== null) session.setMotion({ enabled: !scene.doc.motion.enabled }); };
   const toggleSymbols = (): void => { if (scene !== null) editSymbols(session, { enabled: !scene.doc.symbols.enabled }); };
