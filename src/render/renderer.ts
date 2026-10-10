@@ -88,6 +88,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
   const atlas = gpu.texture(ATLAS_SIZE * GLYPHS.length, ATLAS_SIZE, 'r8', glyphAtlas(), true);
   const symbolModes = new Float32Array(33);
   let finalTarget: Target | null = null;
+  let selectionSource: Target | null = null;
   let depth: Texture | null = null;
   let depthRange = 0;
   let profiling = false;
@@ -132,7 +133,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
   }
   const probe = NOISY_DEV ? createRenderProbe({
     readPatch, finish: () => { if (finalTarget !== null) complete(finalTarget); }, profileCamera, hashCells, readCellTable,
-    exportFrame, geometryEdgesCovered, geometryPixel,
+    exportFrame, geometryEdgesCovered, geometryPixel, selectionPixel,
   }) : null;
 
   function readCellTable(cx: number, cy: number): CellReadback {
@@ -190,7 +191,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
   function releaseBuffers(): void {
     releaseCells();
     if (crunchBuffers !== null) for (const target of [...crunchBuffers.y, ...crunchBuffers.c]) gpu.release(target);
-    crunchBuffers = null; finalTarget = null;
+    crunchBuffers = null; finalTarget = null; selectionSource = null;
     if (buffers !== null) {
       for (const target of Object.values(buffers.grid)) gpu.release(target);
       gpu.release(buffers.simplified); gpu.release(buffers.quantized); gpu.release(buffers.final);
@@ -384,7 +385,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     }
   }
 
-  function geometryInputs(offset: Vec2): { color: Texture; label: Texture; depth: Texture } {
+  function geometryInputs(offset: Vec2, zoom: number): { color: Texture; label: Texture; depth: Texture } {
     if (scene === null || buffers === null) throw new Error('Open a photo before rendering.');
     if (gbuffer === null) {
       gbuffer = { color: gpu.target(canvas.width, canvas.height), label: gpu.target(canvas.width, canvas.height), depth: gpu.target(canvas.width, canvas.height, 'r16f') };
@@ -396,7 +397,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     const lo = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(offset, 0, anchor);
     const hi = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(offset, 1, anchor);
     const displacement = { displacementX: { kind: 'vec3', value: [lo.x, hi.x, 0] },
-      displacementY: { kind: 'vec3', value: [lo.y, hi.y, 0] }, zoom: float(loopZoom(scene.doc.motion.parallax)) } satisfies Record<string, Uniform>;
+      displacementY: { kind: 'vec3', value: [lo.y, hi.y, 0] }, zoom: float(zoom) } satisfies Record<string, Uniform>;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.color.framebuffer);
     gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0, 0, 0, 0]));
     gl.clearBufferfv(gl.COLOR, 1, new Float32Array(4)); gl.clearBufferfv(gl.COLOR, 2, new Float32Array(4));
@@ -471,7 +472,8 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       backDirty = false;
     }
     const drawCamera = moving ? camera ?? cameraOffset(cameraRadius(scene.doc), loopPhase(index, frameCount(scene.doc.motion, LOOP_FPS))) : { x: 0, y: 0 };
-    const inputs = moving ? geometryInputs(drawCamera) :
+    const hiding = plate !== null && scene.doc.objects.some((object) => object.hidden);
+    const inputs = moving || hiding ? geometryInputs(drawCamera, moving ? loopZoom(scene.doc.motion.parallax) : 1) :
       { color: buffers.simplified, label, depth: depth ?? label };
     const cells = scene.doc.symbols.enabled ? ensureCells(canvas.width, canvas.height, scene.doc.symbols.cellSize) : null;
     if (cells !== null) gpu.attach(buffers.quantized, cells.variant);
@@ -543,6 +545,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     }
     const selectedId = scene.selected;
     const selected = selectedId === null ? -1 : scene.doc.objects.findIndex((object) => object.id === selectedId);
+    selectionSource = output;
     if (showSelection && selected >= 0) {
       const box = canvas.getBoundingClientRect();
       // Camera passes swap these targets; never sample the selection target.
@@ -562,6 +565,24 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     }
     if (probe !== null) probe.end(start, loop ? index : null);
     lastRender = { frame: index, loop, camera, showSelection };
+  }
+  function selectionPixel(x: number, y: number) {
+    checkLive();
+    if (![x, y].every(Number.isInteger) || x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) {
+      throw new Error('The selection pixel is outside the master.');
+    }
+    // Offscreen targets survive the browser clearing its default framebuffer.
+    if (finalTarget === null || selectionSource === null) throw new Error('Open a photo before reading the selection.');
+    const read = (target: Target): readonly number[] => {
+      const bytes = new Uint8Array(4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
+      gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+      return Array.from(bytes.subarray(0, 3));
+    };
+    const color = read(finalTarget), undimmed = read(selectionSource);
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) throw new Error(`The selection readback failed (WebGL 0x${error.toString(16)}).`);
+    return { color, undimmed };
   }
   function geometryPixel(x: number, y: number): { readonly color: readonly number[]; readonly label: number } {
     checkLive();
@@ -650,7 +671,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       if (disposed) return;
       disposed = true;
       canvas.removeEventListener('webglcontextlost', onContextLost);
-      gpu.dispose(); scene = null; buffers = null; cellBuffers = null; crunchBuffers = null; finalTarget = null; master = null; plate = null; depth = null; lut = null; palette = null;
+      gpu.dispose(); scene = null; buffers = null; cellBuffers = null; crunchBuffers = null; finalTarget = null; selectionSource = null; master = null; plate = null; depth = null; lut = null; palette = null;
     },
     debug: probe === null ? null : { ...probe.debug, readGeometryPatch },
   };

@@ -61,10 +61,10 @@ const loopScenario: Scenario = {
       const noObjects = demo.objects().length === 0;
       const stillOff = await bytes(await demo.downloadPng());
       const parallaxInput = document.querySelector('#motion-parallax');
-      const inputs = Array.from(document.querySelectorAll('.inspector input[type="range"]'));
+      const inputs = Array.from(document.querySelectorAll('.inspector .node[aria-label="Motion"] input[type="range"]'));
       const orbitIndex = inputs.findIndex((input) => input.id === 'motion-orbit');
       const parallaxControl = parallaxInput instanceof HTMLInputElement && parallaxInput.min === '0.5' && parallaxInput.max === '3' &&
-        parallaxInput.step === '0.1' && parallaxInput.value === '1' && parallaxInput.labels?.[0]?.textContent?.includes('Parallax') === true &&
+        parallaxInput.step === '0.1' && parallaxInput.value === '2' && parallaxInput.labels?.[0]?.textContent?.includes('Parallax') === true &&
         orbitIndex >= 0 && inputs[orbitIndex + 1] === parallaxInput && inputs[orbitIndex + 2]?.id === 'motion-loopSeconds';
       const toggle = document.querySelector('[data-testid="motion-enabled"]');
       if (!(toggle instanceof HTMLInputElement)) throw new Error('No Motion toggle.');
@@ -231,7 +231,7 @@ const loopScenario: Scenario = {
     context.ok('motion leaves the still export untouched', result.still);
     context.ok('landscape and portrait borders are covered', result.edges);
     context.ok('Motion controls edit the document', result.controls);
-    context.ok('desktop Parallax row follows Orbit, defaults to 1 and ranges from 0.5 to 3 by 0.1', result.parallaxControl);
+    context.ok('desktop Parallax row follows Orbit in Motion, defaults to 2 and ranges from 0.5 to 3 by 0.1', result.parallaxControl);
     for (const check of result.parallax) {
       context.ok(`${check.orientation}: Parallax 2 doubles the near object's frame-space displacement at frame 0`,
         Math.abs(check.one.x) > 10 && Math.abs(check.two.x - 2 * check.one.x) < 2 && Math.abs(check.one.y) < 1 && Math.abs(check.two.y) < 1, check);

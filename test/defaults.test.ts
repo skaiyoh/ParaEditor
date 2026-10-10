@@ -49,7 +49,7 @@ test('symbols and motion start off, and lighting starts bright', () => {
   const doc = newScene();
   assert.deepEqual(doc.symbols, { enabled: false, cellSize: 12, amount: 0.3 });
   assert.deepEqual(doc.surface, { enabled: false, pattern: 'bars', relief: 0.5, refraction: 0.5, shine: 0.5, scale: 0.5 });
-  assert.deepEqual(doc.motion, { enabled: false, orbit: 0.6, parallax: 1, loopSeconds: 3, focus: null });
+  assert.deepEqual(doc.motion, { enabled: false, orbit: 0.6, parallax: 2, loopSeconds: 3, focus: null });
   assert.deepEqual(doc.lighting, { ambient: 0.7, relief: 1 });
 });
 
@@ -71,6 +71,7 @@ test('a new object takes its defaults and the first free name, and a scene holdi
   assert.deepEqual(object, {
     id: OBJECT_IDS[1],
     name: 'Object 1',
+    hidden: false,
     subject: false,
     recolor: { kind: 'none' },
     symbols: 'slider',
@@ -105,4 +106,19 @@ test('nextObjectName takes the smallest N whose "Object N" is free', () => {
 test('core/defaults.ts names no clock, random source, or id minting', async () => {
   const source = await readFile(path.join(REPO, 'src/core/defaults.ts'), 'utf8');
   for (const pattern of [/\bDate\b/, /\bMath\.random\b/, /\bcrypto\b/, /\brandomUUID\b/, /\bperformance\b/]) assert.doesNotMatch(source, pattern);
+});
+
+test('Parallax amount 2 belongs to new documents; saved amounts and legacy amount 1 survive loading', () => {
+  assert.equal(newScene().motion.parallax, 2);
+  for (const parallax of [1, 1.7, 3]) {
+    const doc = newScene();
+    const result = parseDocument({ ...doc, motion: { ...doc.motion, parallax } });
+    assert.ok(result.ok);
+    assert.equal(result.value.motion.parallax, parallax);
+  }
+  const doc = newScene();
+  const { parallax: _parallax, ...motion } = doc.motion;
+  const legacy = parseDocument({ ...doc, version: 1, motion });
+  assert.ok(legacy.ok);
+  assert.equal(legacy.value.motion.parallax, 1);
 });

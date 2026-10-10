@@ -123,6 +123,7 @@ const TARGET_COLOR = color('style.paletteTargets[].color.l', 'style.paletteTarge
 
 const OBJECT: Coercers<ObjectPatch> = {
   name: keep,
+  hidden: keep,
   subject: keep,
   recolor: fields({ color: color('objects[].recolor.color.l', 'objects[].recolor.color.c', 'objects[].recolor.color.h') }),
   symbols: keep,
@@ -292,6 +293,25 @@ function reduce(doc: SceneDocument, edit: Edit): Result<Reduced, Refusal> {
       return reducePaletteTarget(doc, edit);
     case 'object.add':
       return reduceObjectAdd(doc, edit);
+    case 'object.rename': {
+      const found = findIndexById(doc.objects, edit.id, 'object');
+      if (!found.ok) return found;
+      const { index, item } = found.value;
+      if (typeof edit.name !== 'string' || edit.name.trim().length === 0) return err({ reason: 'invalid', detail: 'Enter a layer name.' });
+      const checked = parseWith(sceneObjectSchema, { ...item, name: edit.name }, `objects[${index}]`);
+      if (!checked.ok) return checked;
+      if (checked.value.name === item.name) return UNCHANGED;
+      return reduced({ ...doc, objects: replaceAt(doc.objects, index, { ...item, name: checked.value.name }) }, [{ kind: 'object.set', id: item.id, patch: { name: item.name } }]);
+    }
+    case 'object.hide':
+    case 'object.show': {
+      const found = findIndexById(doc.objects, edit.id, 'object');
+      if (!found.ok) return found;
+      const { index, item } = found.value;
+      const hidden = edit.kind === 'object.hide';
+      if (item.hidden === hidden) return UNCHANGED;
+      return reduced({ ...doc, objects: replaceAt(doc.objects, index, { ...item, hidden }) }, [{ kind: hidden ? 'object.show' : 'object.hide', id: item.id }]);
+    }
     case 'object.set': {
       const found = findIndexById(doc.objects, edit.id, 'object');
       if (!found.ok) return found;

@@ -88,7 +88,7 @@ async function exportedPair(): Promise<unknown> {
       attributes, sizes, offsets, base, segmentBytes, secondSoi: bytes[second] === 255 && bytes[second + 1] === 216, mpfSegments } };
 }
 
-async function exportThroughSession(t: ScenarioContext) {
+export async function exportThroughSession(t: ScenarioContext) {
   await t.page.evaluate(z.null(), captureDownloads);
   try {
     await t.page.evaluate(z.null(), async () => { await window.__noisyTest!.demo.saveStereo(); return null; });
@@ -153,6 +153,15 @@ const stereoScenario: Scenario = {
     const fixture = await exportThroughSession(t);
     t.ok('both JPEGs contain the foreground object', fixture.left.count > 100 && fixture.right.count > 100, { left: fixture.left, right: fixture.right });
     t.ok('foreground centroid shifts horizontally between the two cameras', Math.abs(fixture.left.centroid - fixture.right.centroid) > 1, { left: fixture.left.centroid, right: fixture.right.centroid });
+    await t.page.evaluate(z.null(), () => {
+      const demo = window.__noisyTest?.demo, id = demo?.objects()[0]?.id;
+      if (demo === undefined || id === undefined) throw new Error('Missing stereo selection.');
+      demo.select(id); return null;
+    });
+    const selectedFixture = await exportThroughSession(t);
+    t.equal('stereo left JPEG bytes ignore screen selection', selectedFixture.leftBytes, fixture.leftBytes);
+    t.equal('stereo right JPEG bytes ignore screen selection', selectedFixture.rightBytes, fixture.rightBytes);
+    t.equal('complete MPO bytes ignore screen selection', selectedFixture.mpoBytes, fixture.mpoBytes);
     // A portrait master must stay portrait inside the landscape 3DS file.
     await t.page.evaluate(z.null(), async () => {
       const demo = window.__noisyTest?.demo; if (demo === undefined) throw new Error('No stereo demo.');

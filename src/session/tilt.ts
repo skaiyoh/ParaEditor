@@ -1,4 +1,4 @@
-import { createViewDriver, type ViewHost } from './view-driver.ts';
+import type { ViewSource } from './view-driver.ts';
 import type { Vec2 } from '../core/motion.ts';
 
 export type Orientation = Pick<DeviceOrientationEvent, 'beta' | 'gamma'>;
@@ -6,21 +6,28 @@ const TRAVEL_DEGREES = 20;
 const FIRST_EVENT_MS = 2000;
 let injectedScreenAngle: number | null = null;
 
-/** Device tilt in screen axes, with exact quarter turns to preserve portrait travel. */
-export function screenTilt(beta: number, gamma: number, angle: number): Vec2 {
-  switch ((angle % 360 + 360) % 360) {
-    case 90: return { x: beta, y: -gamma };
-    case 180: return { x: -gamma, y: -beta };
-    case 270: return { x: -beta, y: gamma };
-    default: return { x: gamma, y: beta };
-  }
+type Axes = readonly [number, number, number, number];
+// PH3's angle mapping is identical for all orientation types until measured on the iPad.
+const PH3_AXES: Readonly<Record<number, Axes>> = {
+  0: [0, 1, 1, 0], 90: [1, 0, 0, -1], 180: [0, -1, -1, 0], 270: [-1, 0, 0, 1],
+};
+const SCREEN_TILT_MAPPING: Readonly<Record<OrientationType, Readonly<Record<number, Axes>>>> = {
+  'portrait-primary': PH3_AXES, 'portrait-secondary': PH3_AXES,
+  'landscape-primary': PH3_AXES, 'landscape-secondary': PH3_AXES,
+};
+
+/** Pure device-to-screen mapping; rows can be corrected from the iPad readings. */
+export function screenTilt(beta: number, gamma: number, angle: number, type: OrientationType = 'portrait-primary'): Vec2 {
+  const [xb, xg, yb, yg] = SCREEN_TILT_MAPPING[type][(angle % 360 + 360) % 360] ?? [0, 1, 1, 0];
+  return { x: xb * beta + xg * gamma, y: yb * beta + yg * gamma };
 }
 
-function screenAngle(): number {
-  if (NOISY_DEV && injectedScreenAngle !== null) return injectedScreenAngle;
-  const angle = window.screen.orientation?.angle;
-  if (Number.isFinite(angle)) return angle;
-  return typeof window.orientation === 'number' && Number.isFinite(window.orientation) ? window.orientation : 0;
+export function screenOrientation() {
+  const native = window.screen.orientation;
+  const angle = Number.isFinite(native?.angle) ? native.angle : null;
+  const legacy = typeof window.orientation === 'number' && Number.isFinite(window.orientation) ? window.orientation : null;
+  const effectiveAngle = NOISY_DEV && injectedScreenAngle !== null ? injectedScreenAngle : angle ?? legacy ?? 0;
+  return { type: native?.type ?? null, effectiveType: native?.type ?? 'portrait-primary', angle, legacy, effectiveAngle };
 }
 
 /** Dev-only screen rotation override; null restores the device's angle. */
@@ -30,9 +37,11 @@ export function injectScreenAngle(angle: number | null): void {
   injectedScreenAngle = angle;
 }
 
-export function createTiltDriver(host: ViewHost) {
+export function createTiltSource() {
   let inject: ((orientation: Orientation) => void) | null = null;
-  const view = createViewDriver(host, async (attempt) => {
+  let raw: Orientation = { beta: null, gamma: null };
+  const source: ViewSource = async (attempt) => {
+    raw = { beta: null, gamma: null };
     try {
       const orientation = typeof DeviceOrientationEvent === 'undefined' ? null : DeviceOrientationEvent;
       if (orientation !== null && 'requestPermission' in orientation && typeof orientation.requestPermission === 'function') {
@@ -43,19 +52,16 @@ export function createTiltDriver(host: ViewHost) {
       }
       if (!attempt.valid()) return () => {};
       await new Promise<void>((resolve) => {
-        let rest: Vec2 | null = null;
-        let restAngle = 0;
+        let rest: { beta: number; gamma: number } | null = null;
         const clamp = (delta: number): number => Math.max(0, Math.min(1, .5 + delta / (2 * TRAVEL_DEGREES)));
         const timer = window.setTimeout(() => attempt.failed('Tilt unavailable'), FIRST_EVENT_MS);
         const receive = ({ beta, gamma }: Orientation): void => {
           if (!attempt.valid() || beta === null || gamma === null || !Number.isFinite(beta) || !Number.isFinite(gamma)) return;
-          const angle = screenAngle(), tilt = screenTilt(beta, gamma, angle);
-          if (rest === null) { rest = tilt; restAngle = angle; clearTimeout(timer); resolve(); }
-          else if (angle !== restAngle) {
-            // Keep the captured physical rest in the current screen basis after a rotation.
-            rest = screenTilt(rest.y, rest.x, angle - restAngle); restAngle = angle;
-          }
-          attempt.target({ x: clamp(tilt.x - rest.x), y: clamp(tilt.y - rest.y) });
+          raw = { beta, gamma };
+          const screen = screenOrientation();
+          if (rest === null) { rest = { beta, gamma }; clearTimeout(timer); resolve(); }
+          const delta = screenTilt(beta - rest.beta, gamma - rest.gamma, screen.effectiveAngle, screen.effectiveType);
+          attempt.target({ x: clamp(delta.x), y: clamp(delta.y) });
         };
         inject = receive;
         window.addEventListener('deviceorientation', receive);
@@ -67,9 +73,10 @@ export function createTiltDriver(host: ViewHost) {
       });
       return () => {};
     } catch { attempt.failed('Tilt unavailable'); return () => {}; }
-  });
+  };
   return {
-    ...view,
+    source,
+    readings: () => ({ ...raw, ...screenOrientation() }),
     injectOrientation(orientation: Orientation): void {
       if (!NOISY_DEV) throw new Error('Orientation injection is available only in dev builds.');
       if (![orientation.beta, orientation.gamma].every((v) => v === null || Number.isFinite(v))) throw new Error('Invalid injected orientation.');

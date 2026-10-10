@@ -257,6 +257,43 @@ const Products = z.object({
   plateSize: z.object({ width: z.number(), height: z.number() }).nullable(),
   guideSize: z.object({ width: z.number(), height: z.number() }).nullable(), plateNeeded: z.boolean(),
 });
+const Preparing = z.object({
+  text: z.string().nullable(), font: z.string(), color: z.string(), background: z.string(), radius: z.string(),
+  padding: z.string(), shadow: z.string(), x: z.number(), y: z.number(), withinStage: z.boolean(),
+});
+
+function readPreparing(): unknown {
+  const pill = document.querySelector<HTMLElement>('[data-testid=preparing]');
+  const stage = document.querySelector('.phone-stage, .stage-area');
+  const style = pill === null ? null : getComputedStyle(pill);
+  const p = pill?.getBoundingClientRect(), s = stage?.getBoundingClientRect();
+  return { text: pill?.textContent ?? null, font: style?.fontSize ?? '', color: style?.color ?? '',
+    background: style?.backgroundColor ?? '', radius: style?.borderRadius ?? '', padding: style?.padding ?? '', shadow: style?.boxShadow ?? '',
+    x: p !== undefined && s !== undefined ? p.left - s.left : -1, y: p !== undefined && s !== undefined ? p.top - s.top : -1,
+    withinStage: p !== undefined && s !== undefined && p.right <= s.right && p.bottom <= s.bottom };
+}
+
+const WorkerOrder = z.object({ decoders: z.number(), maxDecoders: z.number(), overlap: z.boolean(), underflow: z.boolean(),
+  opens: z.array(z.number()), releases: z.array(z.number()) });
+
+/** Service events count workers from spawn to terminate; DevTools detaches later. */
+function workerOrder(): unknown {
+  const events = window.__noisyTest?.demo.analysisDiagnostics().events ?? [];
+  let decoders = 0, sequence = 0, maxDecoders = 0, overlap = false, underflow = false;
+  const opens: number[] = [], releases: number[] = [];
+  for (const event of events) {
+    if (event.event !== 'worker.spawn' && event.event !== 'worker.terminate') continue;
+    const delta = event.event === 'worker.spawn' ? 1 : -1;
+    if (event.worker === 'decode') {
+      decoders += delta;
+      if (delta === 1) opens.push(event.t); else releases.push(event.t);
+    } else if (event.worker === 'sequence') sequence += delta;
+    maxDecoders = Math.max(maxDecoders, decoders);
+    underflow ||= decoders < 0 || sequence < 0;
+    overlap ||= decoders > 0 && sequence > 0;
+  }
+  return { decoders, maxDecoders, overlap, underflow, opens, releases };
+}
 const DriverView = z.object({
   analysis: Analysis, products: Products, depthDocument: z.boolean(), sceneId: z.string().nullable(),
   masterAsset: z.string().nullable(), masterSize: z.object({ width: z.number(), height: z.number() }).nullable(),
@@ -304,6 +341,14 @@ function traceDriver(): true | null {
   };
   record();
   new MutationObserver(record).observe(line, { childList: true, characterData: true, subtree: true });
+  const pills: string[] = [];
+  const frames: { width: number; text: string }[] = [];
+  new MutationObserver(() => {
+    const text = document.querySelector('[data-testid=preparing]')?.textContent;
+    if (text && pills.at(-1) !== text) { pills.push(text); frames.push({ width: innerWidth, text }); }
+    document.body.dataset['preparingStatuses'] = JSON.stringify(pills);
+    document.body.dataset['preparingFrames'] = JSON.stringify(frames);
+  }).observe(document.querySelector('main') ?? document.body, { childList: true, characterData: true, subtree: true });
   return true;
 }
 
@@ -348,9 +393,10 @@ async function replaceDriverTwice(): Promise<unknown> {
 
 const analysisScenarios: readonly Scenario[] = [
   {
-    id: 'driver.import', title: 'real depth, encoder and warmed decoder survive immediate import replacement with one generation of products',
-    target: 'dev', covers: [], timeoutMs: 300_000,
+    id: 'driver.import', title: 'repeated imports keep one decoder, ordered heaps and preparation pills on both frames',
+    target: 'dev', covers: [], timeoutMs: 600_000,
     async run(t) {
+      await t.page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
       await t.page.goto('/');
       await t.page.waitFor('analysis hooks and status trace', z.literal(true), traceDriver);
       const boot = await t.page.waitFor('all four model operations fetched and verified', Analysis, () => {
@@ -358,6 +404,13 @@ const analysisScenarios: readonly Scenario[] = [
       }, { timeoutMs: 120_000 });
       t.equal('models ready before analysis', boot.modelsReady, true);
       await t.page.evaluate(z.literal(true), driverImport, 4032, 3024, 0);
+      await t.page.waitFor('depth preparation pill', z.literal(true), () => document.querySelector('[data-testid=preparing]')?.textContent === 'Preparing: depth' ? true : null);
+      const desktopPill = await t.page.evaluate(Preparing, readPreparing);
+      t.equal('quiet pill uses the pinned tokens, padding and position', desktopPill, {
+        text: 'Preparing: depth', font: '13px', color: 'rgb(230, 230, 230)', background: 'rgb(38, 38, 38)',
+        radius: '4px', padding: '8px 12px', shadow: 'none', x: 12, y: 12, withinStage: true,
+      });
+      await t.page.screenshot('preparing-1440');
       await t.page.waitFor('depth in the scene document', z.literal(true), () => {
         const d = window.__noisyTest?.demo; return d?.analysis().depth && d.document()?.analysis.depth !== null ? true : null;
       }, { timeoutMs: 60_000 });
@@ -367,6 +420,9 @@ const analysisScenarios: readonly Scenario[] = [
         const a = window.__noisyTest?.demo.analysis(); return a?.decoderReady && a.alive.decoder && !a.alive.heavy ? true : null;
       }, { timeoutMs: Math.max(1, 150_000 - depth.elapsedMs) });
       const ready = await t.page.evaluate(DriverView, readDriver);
+      t.equal('preparation pill leaves at Ready to tap', (await t.page.evaluate(Preparing, readPreparing)).text, null);
+      const prepared = await t.page.evaluate(z.array(z.string()), () => JSON.parse(document.body.dataset['preparingStatuses'] ?? '[]'));
+      for (const sentence of ['Preparing: depth', 'Preparing: encoder', 'Warming decoder']) t.ok(`pill passed through ${sentence}`, prepared.includes(sentence), prepared);
       t.ok('decoder ready within 150 seconds', ready.elapsedMs <= 150_000, ready);
       t.ok('warm-up timing is recorded', Number.isFinite(ready.analysis.timings['warmup']) && (ready.analysis.timings['warmup'] ?? -1) >= 0, ready.analysis.timings);
       t.equal('one depth product and one decoder, no heavy worker', [ready.products.depth, ready.products.masks, ready.products.plates, ready.analysis.alive], [1, 0, 0, { heavy: false, decoder: true }]);
@@ -393,6 +449,28 @@ const analysisScenarios: readonly Scenario[] = [
       // The browser driver also enforces same-origin requests and zero page/server CSP violations.
       await t.file('driver-replacement-timeline.json', JSON.stringify({ replacements, final }, null, 2));
       await t.page.screenshot('driver-replaced');
+      // Three complete imports in one session, including the phone frame.
+      for (const variant of [1, 2]) {
+        if (variant === 2) await t.page.emulate({ width: 402, height: 874, deviceScaleFactor: 3, mobile: true, colorScheme: 'dark' });
+        await t.page.evaluate(z.literal(true), driverImport, 2048, 1536, variant);
+        if (variant === 2) {
+          await t.page.waitFor('phone depth preparation pill', z.literal(true), () => document.querySelector('.phone-stage [data-testid=preparing]')?.textContent === 'Preparing: depth' ? true : null);
+          const phonePill = await t.page.evaluate(Preparing, readPreparing);
+          t.equal('phone pill is 12 px under the strip inside the stage', [phonePill.text, phonePill.x, phonePill.y, phonePill.withinStage], ['Preparing: depth', 12, 12, true]);
+          await t.page.screenshot('preparing-phone-402');
+        }
+        await t.page.waitFor('replacement Ready to tap', z.literal(true), () => {
+          const a = window.__noisyTest?.demo.analysis();
+          return a?.decoderReady && a.status === 'Ready to tap' && document.querySelector('[data-testid=preparing]') === null ? true : null;
+        }, { timeoutMs: 150_000 });
+      }
+      const order = await t.page.evaluate(WorkerOrder, workerOrder);
+      const pillFrames = await t.page.evaluate(z.array(z.object({ width: z.number(), text: z.string() })), () => JSON.parse(document.body.dataset['preparingFrames'] ?? '[]'));
+      const phoneSentences = pillFrames.filter((frame) => frame.width === 402).map((frame) => frame.text);
+      for (const sentence of ['Preparing: depth', 'Preparing: encoder', 'Warming decoder']) t.ok(`phone pill passed through ${sentence}`, phoneSentences.includes(sentence), phoneSentences);
+      t.equal('all imports have at most one live decoder and no import heap overlap', [order.decoders, order.maxDecoders, order.overlap, order.underflow], [1, 1, false, false]);
+      t.equal('four completed imports each opened one decoder', order.opens.length, 4);
+      await t.file('driver-heap-order.json', JSON.stringify(order, null, 2));
     },
   },
   {
@@ -410,6 +488,7 @@ const analysisScenarios: readonly Scenario[] = [
       };
       try {
         await t.page.goto('/');
+        await t.page.waitFor('analysis hooks and preparation trace', z.literal(true), traceDriver);
         await record('before-models-ready');
         await t.page.waitFor('models ready', Analysis, () => { const a = window.__noisyTest?.demo.analysis(); return a?.modelsReady ? a : null; }, { timeoutMs: 120_000 });
         await t.page.evaluate(z.literal(true), driverImport, 4032, 3024, 0);
@@ -450,6 +529,9 @@ const analysisScenarios: readonly Scenario[] = [
         t.ok('plate lands within 90 seconds', plate.elapsedMs <= 90_000, plate);
         t.equal('plate is at the master size', plate.products?.plateSize, plate.masterSize);
         t.equal('plate is fresh and the inpaint worker has terminated', [plate.plateNeeded, plate.analysis?.alive], [false, { heavy: false, decoder: true }]);
+        const prepared = await t.page.evaluate(z.array(z.string()), () => JSON.parse(document.body.dataset['preparingStatuses'] ?? '[]'));
+        t.ok('background analysis names its preparation on the picture', prepared.includes('Preparing: background'), prepared);
+        t.equal('background preparation pill leaves when the plate is ready', (await t.page.evaluate(Preparing, readPreparing)).text, null);
         t.ok('inpaint timing recorded', (plate.analysis?.timings['inpaint'] ?? -1) >= 0, plate.analysis?.timings);
         await t.page.screenshot('driver-plate');
       } catch (error) {
@@ -461,8 +543,8 @@ const analysisScenarios: readonly Scenario[] = [
     },
   },
   {
-    id: 'driver.failure', title: 'a corrupt model served through the dev fault grammar reports the fetch failure without starting workers',
-    target: 'dev', covers: [], timeoutMs: 120_000,
+    id: 'driver.failure', title: 'fault grammar covers model failure, one decoder startup retry and the reload sentence with usable controls',
+    target: 'dev', covers: [], timeoutMs: 600_000,
     async run(t) {
       // This example page constructs a service but does not fetch until Run.
       await t.page.goto('/dev/service.html');
@@ -484,6 +566,54 @@ const analysisScenarios: readonly Scenario[] = [
       } finally {
         await t.page.evaluate(z.boolean(), async () => (await fetch('/dev/fault', { method: 'DELETE' })).ok);
       }
+      await t.page.goto('/');
+      await t.page.waitFor('models ready after clearing corrupt fault', z.literal(true), () => window.__noisyTest?.demo.analysis().modelsReady ? true : null, { timeoutMs: 120_000 });
+      // Fault the wasm startup in a fresh decoder, after the sequence runtime loaded.
+      const armDecoderFault = async (variant: number, once: boolean): Promise<void> => {
+        await t.page.evaluate(z.literal(true), driverImport, 2048, 1536, variant);
+        await t.page.waitFor('encoder uses the already loaded sequence runtime', z.literal(true), () => window.__noisyTest?.demo.analysis().status === 'Analyzing: encoder' ? true : null, { timeoutMs: 90_000 });
+        const wasm = t.page.requests().map((r) => new URL(r.url).pathname).find((path) => path.startsWith('/vendor/ort/') && path.endsWith('.wasm'));
+        if (wasm === undefined) throw new Error('No sequence wasm request recorded to fault decoder startup.');
+        // ORT tries streaming compilation, a second fetch, then an XHR fallback.
+        // Fail all three loads of the first startup so only the driver's retry can recover.
+        await t.server.setFaults([`path:${wasm}:http500${once ? ':times=3' : ''}`]);
+      };
+      try {
+        await armDecoderFault(0, true);
+        await t.page.waitFor('single wasm startup fault recovers to Ready to tap', z.literal(true), () => window.__noisyTest?.demo.analysis().decoderReady ? true : null, { timeoutMs: 180_000 });
+        const recovered = await t.page.evaluate(WorkerOrder, workerOrder);
+        const startupRequests = t.page.requests().filter((r) => new URL(r.url).pathname.endsWith('.wasm'))
+          .map((r) => ({ path: new URL(r.url).pathname, type: r.resourceType, status: r.status }));
+        t.equal('transient fault covers all three wasm loads', startupRequests.filter((r) => r.status === 500).map((r) => r.type), ['Fetch', 'Fetch', 'XHR']);
+        t.equal('one startup fault opened exactly two decoder workers', recovered.opens.length, 2);
+        t.ok('retry opened at least 1500 ms after release', (recovered.opens[1] ?? 0) - (recovered.releases[0] ?? Infinity) >= 1500, recovered);
+        t.equal('recovered pill disappears', (await t.page.evaluate(Preparing, readPreparing)).text, null);
+        await t.server.clearFaults();
+        await armDecoderFault(1, false);
+        // An early tap must not hide the eventual reload sentence.
+        await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(0.5, 0.5); return true; });
+        await t.page.waitFor('bounded failure offers reload on screen', z.literal(true), () => {
+          const sentence = 'Tapping needs a reload on this device';
+          return window.__noisyTest?.demo.analysis().status === sentence && document.querySelector('[data-testid=status]')?.textContent?.startsWith(sentence) && document.querySelector('[data-testid=preparing]')?.textContent === sentence ? true : null;
+        }, { timeoutMs: 180_000 });
+        const failed = await t.page.evaluate(WorkerOrder, workerOrder);
+        t.equal('two failures release both workers and stop at one retry', [failed.opens.length, failed.decoders, failed.maxDecoders], [4, 0, 1]);
+        const usable = await t.page.evaluate(z.object({ fry: z.number().nullable(), png: z.number(), controls: z.boolean(), projects: z.boolean(), rawVisible: z.boolean() }), async () => {
+          const demo = window.__noisyTest?.demo;
+          if (demo === undefined) throw new Error('No demo hooks.');
+          const slider = document.querySelector<HTMLInputElement>('[data-testid=style-fry]');
+          if (slider === null) throw new Error('No Fry slider.');
+          slider.value = '0.75'; slider.dispatchEvent(new Event('input', { bubbles: true }));
+          const controls = [...document.querySelectorAll<HTMLButtonElement>('button')].filter((b) => ['Download', 'Motion'].includes(b.textContent ?? '')).every((b) => !b.disabled);
+          const projects = document.querySelector<HTMLButtonElement>('[data-testid=projects-toggle]')?.disabled === false;
+          const png = (await demo.downloadPng()).size;
+          return { fry: demo.document()?.style.fry ?? null, png, controls, projects,
+            rawVisible: /Out of memory|no available backend|ERR:|"kind"/.test(document.querySelector('[data-testid=status]')?.textContent ?? '') };
+        });
+        t.ok('sliders, Motion, Download and Projects remain available', usable.fry === 0.75 && usable.png > 0 && usable.controls && usable.projects && !usable.rawVisible, usable);
+        await t.file('driver-decoder-retry.json', JSON.stringify({ recovered, startupRequests, failed, usable }, null, 2));
+        await t.page.screenshot('driver-reload');
+      } finally { await t.server.clearFaults(); }
     },
   },
 ];

@@ -443,32 +443,42 @@ test("the document's primitives are core/raster.ts's types, and its ids and arra
   assert.deepEqual(checks, checks.map(() => true));
 });
 
-test('the version is the migration table length, a literal type a document at another version does not satisfy', () => {
+test('the version is the migration table length and a literal type', () => {
   assert.equal(SCENE_VERSION, MIGRATIONS.length);
-  assert.equal(SCENE_VERSION, 2);
-  const literal = true satisfies Equal<SceneDocument['version'], 2>;
-  const current: SceneDocument = minimalDocument();
-  // @ts-expect-error a document at version 3 is not a document of the two-entry migration table
-  const newer: SceneDocument = { ...minimalDocument(), version: 3 };
+  const literal = true satisfies Equal<SceneDocument['version'], 3>;
+  // @ts-expect-error version 4 is newer than the current migration table
+  const newer: SceneDocument = { ...minimalDocument(), version: 4 };
   assert.ok(literal);
-  assert.equal(current.version, 2);
-  assert.equal(newer.version, 3);
+  assert.equal(minimalDocument().version, 3);
   assert.deepEqual(failingPaths(newer), ['version']);
 });
 
-test('a three-entry migration table makes a schema and a type of version 3', () => {
+test('a four-entry migration table makes a schema and a type of version 4', () => {
   const add: Migration = (json) => json;
-  const drop: Migration = (json) => json;
-  const chain = [add, drop, add] as const satisfies readonly Migration[];
+  const chain = [add, add, add, add] as const satisfies readonly Migration[];
   const schema = sceneDocumentSchema(chain.length);
-  const literal = true satisfies Equal<SceneDocumentAt<typeof chain.length>['version'], 3>;
-  const inferred = true satisfies Equal<z.infer<typeof schema>['version'], 3>;
-  const atThree: SceneDocumentAt<3> = { ...minimalDocument(), version: 3 };
-  // @ts-expect-error a document at the current version 2 is not a document of a three-entry table
-  const atCurrent: SceneDocumentAt<3> = minimalDocument();
+  const literal = true satisfies Equal<SceneDocumentAt<typeof chain.length>['version'], 4>;
+  const inferred = true satisfies Equal<z.infer<typeof schema>['version'], 4>;
+  const atFour: SceneDocumentAt<4> = { ...minimalDocument(), version: 4 };
+  // @ts-expect-error current version 3 is not version 4
+  const atCurrent: SceneDocumentAt<4> = minimalDocument();
   assert.ok(literal && inferred);
-  assert.ok(schema.safeParse(atThree).success);
+  assert.ok(schema.safeParse(atFour).success);
   assert.ok(!schema.safeParse(atCurrent).success);
+});
+
+test('legacy objects retain names and gain visible defaults; current hidden layers round trip', () => {
+  const current = fiveClusterDocument();
+  const old = { ...current, version: 2, objects: current.objects.map(({ hidden: _hidden, ...object }) => object) };
+  const before = structuredClone(old);
+  const parsed = parseDocument(old);
+  assert.ok(parsed.ok);
+  assert.deepEqual(parsed.value.objects.map(({ name, hidden }) => ({ name, hidden })), current.objects.map(({ name }) => ({ name, hidden: false })));
+  assert.deepEqual(old, before);
+  const hidden = { ...current, objects: current.objects.map((object) => ({ ...object, name: 'My layer', hidden: true })) };
+  const restored = parseDocument(JSON.parse(JSON.stringify(hidden)));
+  assert.ok(restored.ok);
+  assert.deepEqual(restored.value, hidden);
 });
 
 test('version 1 scenes migrate Parallax to 1 without changing their existing fields or input', () => {
@@ -479,7 +489,7 @@ test('version 1 scenes migrate Parallax to 1 without changing their existing fie
   const parsed = parseDocument(old);
   assert.ok(parsed.ok, parsed.ok ? '' : JSON.stringify(parsed.error));
   assert.equal(parsed.value.motion.parallax, 1);
-  assert.deepEqual(parsed.value, { ...old, version: 2, motion: { ...motion, parallax: 1 } });
+  assert.deepEqual(parsed.value, { ...old, version: SCENE_VERSION, motion: { ...motion, parallax: 1 } });
   assert.deepEqual(old, before);
 });
 
@@ -488,7 +498,7 @@ test('version 0 scenes run the surface and Parallax migrations in order', () => 
   const { parallax: _parallax, ...motion } = current.motion;
   const parsed = parseDocument({ ...current, version: 0, motion });
   assert.ok(parsed.ok, parsed.ok ? '' : JSON.stringify(parsed.error));
-  assert.equal(parsed.value.version, 2);
+  assert.equal(parsed.value.version, SCENE_VERSION);
   assert.equal(parsed.value.motion.parallax, 1);
   assert.equal(parsed.value.surface.enabled, false);
 });

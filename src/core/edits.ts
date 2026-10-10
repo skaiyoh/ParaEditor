@@ -36,6 +36,9 @@ export type Edit =
   /** An object from a tap, its mask asset already stored; `restore` only on the inverse of `object.remove`. */
   | { readonly kind: 'object.add'; readonly object: SceneObject; readonly restore?: Restore }
   | { readonly kind: 'object.set'; readonly id: ObjectId; readonly patch: ObjectPatch }
+  | { readonly kind: 'object.rename'; readonly id: ObjectId; readonly name: string }
+  | { readonly kind: 'object.hide'; readonly id: ObjectId }
+  | { readonly kind: 'object.show'; readonly id: ObjectId }
   /** A new selection and mask for an object, together. */
   | { readonly kind: 'object.refine'; readonly id: ObjectId; readonly produced: ObjectProduced }
   | { readonly kind: 'object.remove'; readonly id: ObjectId }

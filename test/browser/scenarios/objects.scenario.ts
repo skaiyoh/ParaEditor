@@ -1,6 +1,7 @@
 import { z } from '../../../src/core/zod.ts';
 import { srgbToOklab } from '../../../src/core/color.ts';
 import type { Scenario } from '../scenario.ts';
+import { exportThroughSession } from './stereo.scenario.ts';
 
 /** 4032 x 3024 source; discs have radius 500 in the 2048 x 1536 master. */
 async function fixture(two: boolean): Promise<unknown> {
@@ -43,6 +44,7 @@ const TapResult = z.object({
   actualBounds: Bounds, expectedDiscBox: Bounds, boundsMargin: z.number(),
   mean: z.object({ L: z.number(), a: z.number(), b: z.number() }),
   edgeDifferences: z.number(), insideScreenEqualsExport: z.boolean(), overlayRestored: z.boolean(),
+  outsideBefore: z.array(z.number()), outsideSelected: z.array(z.number()), outsideUndimmed: z.array(z.number()), insideSelectionEqual: z.boolean(),
   deselectedExportEqual: z.boolean(), swatchesVisible: z.boolean(), swatchesHidden: z.boolean(),
   keyboardFocus: z.boolean(), nativeSwatch: z.boolean(), escapeDeselects: z.boolean(),
   changedPoints: z.array(z.boolean()), backgroundUnchanged: z.array(z.boolean()), retapCount: z.number(),
@@ -114,6 +116,10 @@ async function tapChecks(): Promise<unknown> {
     return a[i] === b[i] && a[i + 1] === b[i + 1] && a[i + 2] === b[i + 2] && a[i + 3] === b[i + 3];
   };
   const insideScreenEqualsExport = points.every((p) => samePixel(screen, exported, p));
+  if (demo.render === null) throw new Error('Missing selection probe.');
+  const outside = demo.render.selectionPixel(1600, 100);
+  const inside = demo.render.selectionPixel(600, 680);
+  const insideSelectionEqual = inside.color.every((value, i) => value === inside.undimmed[i]);
   // Read again immediately after export to prove that export restored the overlay.
   const pendingExport = demo.downloadPng();
   ctx.drawImage(stage, 0, 0);
@@ -121,6 +127,7 @@ async function tapChecks(): Promise<unknown> {
   const again = await pendingExport;
   const overlayRestored = await hash(again) === selectedHash && screen.every((v, i) => v === restored[i]);
   demo.select(null);
+  const outsideBefore = demo.render.selectionPixel(1600, 100).color;
   const deselectedExportEqual = await hash(await demo.downloadPng()) === selectedHash;
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   const swatchesHidden = document.querySelector('[data-testid=swatches]') === null;
@@ -148,6 +155,7 @@ async function tapChecks(): Promise<unknown> {
   const resetBytesEqual = await hash(await demo.downloadPng()) === document.body.dataset['objectsBaseline'];
   return { elapsedMs, count, selected, subject, boundsWithinDiscMargin, actualBounds: b, expectedDiscBox, boundsMargin,
     mean: produced.color.mean, edgeDifferences, insideScreenEqualsExport,
+    outsideBefore, outsideSelected: outside.color, outsideUndimmed: outside.undimmed, insideSelectionEqual,
     overlayRestored, deselectedExportEqual, swatchesVisible, swatchesHidden, changedPoints, backgroundUnchanged,
     keyboardFocus, nativeSwatch, escapeDeselects, retapCount, originalRestored, capCount, capStatus, resetCount, resetProducts, resetSelected, resetStatus, resetDepth, resetBytesEqual };
 }
@@ -185,18 +193,28 @@ async function twoChecks(): Promise<unknown> {
     patchErrors, backgroundPixelsChanged: bg.changedGray, backgroundMaxError: bg.max };
 }
 
+const Meter = z.object({
+  visible: z.boolean(), text: z.string(), percent: z.number(), expected: z.number().nullable(), fill: z.string(),
+  width: z.number(), topInset: z.number(), centerError: z.number(), trackHeight: z.number(), pointerEvents: z.string(),
+});
+const DimGrowth = z.object({
+  x: z.number(), y: z.number(), before: z.array(z.number()), beforeUndimmed: z.array(z.number()),
+  after: z.array(z.number()), afterUndimmed: z.array(z.number()),
+});
 const RefineResult = z.object({
   area: z.number(), asset: z.string(), size: z.number(), maskCount: z.number(), count: z.number(), selected: z.boolean(),
   plateNeeded: z.boolean(), document: z.string(), status: z.string(), candidateAreas: z.array(z.object({ candidate: z.number(), area: z.number() })),
   originalRank: z.number().nullable(), previewArea: z.number().nullable(), previewAsset: z.string().nullable(), refining: z.boolean(), cursor: z.string(),
   unchangedDuringPreview: z.boolean(), cancelledDocumentEqual: z.boolean(), cancelledProductsEqual: z.boolean(),
+  meter: Meter, meterOnHold: Meter.nullable(), dimGrowth: DimGrowth.nullable(),
 });
 
 /** Exercise Stage's actual handlers, never call the session's refinement methods. */
 async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 'escape' | 'back' | 'second' | 'cancel' | 'quick' | 'tap'): Promise<unknown> {
   const demo = window.__noisyTest?.demo;
   const stage = document.querySelector<HTMLCanvasElement>('[data-testid=stage]');
-  if (demo === undefined || stage === null) throw new Error('Missing refinement stage/hooks.');
+  const renderer = window.__noisyTest?.session?.renderer();
+  if (demo === undefined || stage === null || renderer === undefined || renderer === null) throw new Error('Missing refinement stage/hooks.');
   const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   const wait = async (predicate: () => boolean): Promise<void> => {
     const deadline = performance.now() + 15_000;
@@ -204,6 +222,19 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
       if (performance.now() >= deadline) throw new Error(`Refinement timed out (${action}): ${JSON.stringify(demo.refinement())}`);
       await pause(20);
     }
+  };
+  const meter = () => {
+    const node = document.querySelector('[data-testid="selection-meter"]');
+    const area = document.querySelector('.stage-area, .phone-stage');
+    const track = node?.querySelector('.selection-meter-track');
+    if (node === null || area === null || track === null || track === undefined) throw new Error('Missing selection meter.');
+    const style = getComputedStyle(node), box = node.getBoundingClientRect(), stageBox = area.getBoundingClientRect();
+    const size = demo.refinement()?.size;
+    return { visible: style.visibility === 'visible' && Number(style.opacity) > 0.99 && node.getAttribute('aria-hidden') === 'false',
+      text: node.textContent?.trim() ?? '', percent: Number(node.getAttribute('aria-valuenow')),
+      expected: size === undefined ? null : Math.round(100 * size), fill: style.getPropertyValue('--fill').trim(),
+      width: box.width, topInset: box.top - stageBox.top, centerError: box.left + box.width / 2 - stageBox.left - stageBox.width / 2,
+      trackHeight: track.getBoundingClientRect().height, pointerEvents: style.pointerEvents };
   };
   if (action === 'baseline') {
     await demo.tap(0.38, 0.58);
@@ -214,8 +245,27 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
   if (object === undefined) throw new Error('The sample ball was not selected.');
   const beforeDocument = JSON.stringify(demo.document());
   const beforeProducts = JSON.stringify(demo.projectMasks());
+  const originalMask = demo.projectMasks().find((entry) => entry.asset === object.produced.mask.asset);
+  const readStage = () => {
+    const canvas = new OffscreenCanvas(stage.width, stage.height), ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (ctx === null) throw new Error('No refinement screen readback.');
+    renderer.renderStill(); ctx.drawImage(stage, 0, 0);
+    return ctx.getImageData(0, 0, stage.width, stage.height).data;
+  };
+  const beforeScreen = action === 'grow' ? readStage() : null;
+  const beforeUndimmed = action === 'grow' ? await (async () => {
+    const bitmap = await createImageBitmap(await demo.downloadPng(), { colorSpaceConversion: 'none' });
+    try {
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height), ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (ctx === null) throw new Error('No refinement export readback.');
+      ctx.drawImage(bitmap, 0, 0); return ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    } finally { bitmap.close(); }
+  })() : null;
   const box = stage.getBoundingClientRect();
-  const x = box.left + box.width * 0.38, y = box.top + box.height * 0.58;
+  const contained = getComputedStyle(stage).objectFit === 'contain';
+  const scale = Math.min(box.width / stage.width, box.height / stage.height);
+  const width = contained ? stage.width * scale : box.width, height = contained ? stage.height * scale : box.height;
+  const x = box.left + (box.width - width) / 2 + width * 0.38, y = box.top + (box.height - height) / 2 + height * 0.58;
   const primary = action === 'finish' ? Number(document.body.dataset['refinePointer']) : Number(document.body.dataset['refinePointer'] ?? '90') + 2;
   document.body.dataset['refinePointer'] = String(primary);
   const pointer = (type: string, dx = 0, pointerId = primary, target: EventTarget = stage) => target.dispatchEvent(new PointerEvent(type, {
@@ -227,6 +277,8 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
   let originalRank: number | null = null;
   let previewArea: number | null = null, previewAsset: string | null = null;
   let unchangedDuringPreview = true;
+  let meterOnHold: ReturnType<typeof meter> | null = null;
+  let dimGrowth: z.infer<typeof DimGrowth> | null = null;
   if (action === 'finish') {
     pointer('pointerup', 120); click(120);
     await wait(() => demo.refinement() === null);
@@ -239,6 +291,8 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
       pointer('pointermove', 40); await pause(400); pointer('pointerup', 40); click(40); await pause(50);
     } else {
       await pause(390);
+      await wait(() => meter().visible);
+      meterOnHold = meter();
       await wait(() => demo.refinement()?.candidateAreas.length === 3);
       const held = demo.refinement();
       candidateAreas = [...(held?.candidateAreas ?? [])]; originalRank = held?.originalRank ?? null;
@@ -246,7 +300,37 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
       pointer('pointermove', travel);
       await wait(() => demo.refinement()?.previewAsset !== null && demo.refinement()?.previewAsset !== undefined);
       previewArea = demo.refinement()?.previewArea ?? null; previewAsset = demo.refinement()?.previewAsset ?? null;
+      await wait(() => meter().percent === meter().expected);
       unchangedDuringPreview = JSON.stringify(demo.document()) === beforeDocument;
+      if (action === 'grow' && beforeScreen !== null && beforeUndimmed !== null && originalMask !== undefined) {
+        const preview = demo.refinementMask();
+        if (preview === null) throw new Error('Missing refinement preview mask.');
+        renderer.renderStill();
+        const marginX = Math.ceil(Math.max(1, Math.round(stage.width / box.width)) * preview.width / stage.width);
+        const marginY = Math.ceil(Math.max(1, Math.round(stage.height / box.height)) * preview.height / stage.height);
+        // A newly included patch, away from both old and new white boundaries.
+        // Judge the real preview's mask, rather than assuming a sample contour.
+        for (let my = marginY; my < preview.height - marginY && dimGrowth === null; my++) for (let mx = marginX; mx < preview.width - marginX && dimGrowth === null; mx++) {
+          const p = my * preview.width + mx;
+          if ((preview.bytes[p] ?? 0) < 128) continue;
+          let included = true;
+          for (let dy = -marginY; dy <= marginY && included; dy++) for (let dx = -marginX; dx <= marginX && included; dx++) {
+            const nx = mx + dx, ny = my + dy;
+            const ox = Math.floor((nx + .5) * originalMask.width / preview.width);
+            const oy = Math.floor((ny + .5) * originalMask.height / preview.height);
+            included = (preview.bytes[ny * preview.width + nx] ?? 0) >= 128 && (originalMask.bytes[oy * originalMask.width + ox] ?? 0) < 128;
+          }
+          if (!included) continue;
+          const px = Math.floor((mx + .5) * stage.width / preview.width), py = Math.floor((my + .5) * stage.height / preview.height);
+          const i = (py * stage.width + px) * 4;
+          const base = Array.from(beforeUndimmed.subarray(i, i + 3));
+          if (base.reduce((sum, value) => sum + value, 0) < 60) continue;
+          const live = demo.render?.selectionPixel(px, py);
+          if (live === undefined) throw new Error('Missing selection pixel probe.');
+          dimGrowth = { x: px, y: py, before: Array.from(beforeScreen.subarray(i, i + 3)), beforeUndimmed: base,
+            after: [...live.color], afterUndimmed: [...live.undimmed] };
+        }
+      }
       if (action !== 'grow') {
         if (action === 'escape') window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
         if (action === 'back') pointer('pointermove');
@@ -258,6 +342,7 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
     }
   }
   const doc = demo.document(), updated = doc?.objects[0];
+  if (action !== 'grow') await pause(160);
   const mask = demo.projectMasks().find((entry) => entry.asset === updated?.produced.mask.asset);
   if (updated === undefined || mask === undefined) throw new Error('The committed object mask is missing.');
   return { area: mask.bytes.filter((value) => value >= 128).length, asset: updated.produced.mask.asset, size: updated.produced.selection.size ?? 0.5,
@@ -265,17 +350,148 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
     plateNeeded: demo.products().plateNeeded, document: JSON.stringify(doc), status: demo.scene().status,
     candidateAreas, originalRank, previewArea, previewAsset, refining: demo.refinement() !== null, cursor: getComputedStyle(stage).cursor,
     unchangedDuringPreview, cancelledDocumentEqual: JSON.stringify(doc) === beforeDocument,
-    cancelledProductsEqual: JSON.stringify(demo.projectMasks()) === beforeProducts };
+    cancelledProductsEqual: JSON.stringify(demo.projectMasks()) === beforeProducts, meter: meter(), meterOnHold, dimGrowth };
 }
+
+/** Layers are exercised through native controls; hooks only inspect renderer/document products. */
+async function layerPixels(): Promise<unknown> {
+  const demo = window.__noisyTest?.demo;
+  if (demo?.render == null) throw new Error('Missing layer renderer.');
+  const pixel = demo.render.selectionPixel(1533, 768);
+  const bitmap = await createImageBitmap(await demo.downloadPng(), { colorSpaceConversion: 'none' });
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height), context = canvas.getContext('2d');
+  if (context === null) throw new Error('Missing export readback.');
+  context.drawImage(bitmap, 0, 0); bitmap.close();
+  const exported = [...context.getImageData(1533, 768, 1, 1).data];
+  const restored = demo.render.selectionPixel(1533, 768);
+  const second = demo.document()?.objects[1];
+  return { screen: pixel.color, undimmed: pixel.undimmed, exported,
+    exportMatches: exported[3] === 255 && exported.slice(0, 3).every((value, i) => value === pixel.undimmed[i]),
+    overlayRestored: restored.color.every((value, i) => value === pixel.color[i]),
+    plateLabel: second?.hidden ? demo.render.geometryPixel(1533, 768).label : null,
+    plate: demo.products().plateSize === null ? null : demo.platePixel(1533, 768) };
+}
+const LayerPixels = z.object({ screen: z.array(z.number()), undimmed: z.array(z.number()), exported: z.array(z.number()),
+  exportMatches: z.boolean(), overlayRestored: z.boolean(), plateLabel: z.number().nullable(), plate: z.array(z.number()).nullable() });
 
 export const scenarios: readonly Scenario[] = [
   {
+    id: 'objects.layers', title: 'Layer names, visibility, deletion and history on desktop and phone', target: 'dev', covers: ['LAY1'], timeoutMs: 600_000,
+    async run(t) {
+      const { page } = t;
+      for (const phone of [false, true]) {
+        const frame = phone ? 'phone' : 'desktop';
+        await page.emulate({ width: phone ? 402 : 1440, height: phone ? 874 : 900, deviceScaleFactor: 1, mobile: phone, colorScheme: 'dark' });
+        await page.goto('/');
+        await page.waitFor('layer hooks', z.literal(true), () => window.__noisyTest?.demo === undefined ? null : true);
+        if (phone) await page.evaluate(z.literal(true), () => { Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 }); return true; });
+        await page.evaluate(Early, fixture, true);
+        await page.waitFor('layer decoder ready', z.literal(true), () => window.__noisyTest?.demo.analysis().decoderReady ? true : null, { timeoutMs: 240_000 });
+        await page.evaluate(z.literal(true), async () => {
+          const demo = window.__noisyTest?.demo;
+          await demo?.tap(515 / 2048, .5); await demo?.tap(1533 / 2048, .5); return true;
+        });
+        const ids = await page.evaluate(z.array(z.string()).length(2), () => window.__noisyTest?.demo.objects().map((object) => object.id));
+        const first = `[data-object-id="${ids[0]}"]`, second = `[data-object-id="${ids[1]}"]`;
+        const button = (row: string, action: string): string => `${row} [data-testid="layer-${action}"]`;
+        await page.click(`${first} .layer-select`);
+        const beginRename = async (): Promise<void> => {
+          if (phone) await page.click('[data-testid="layer-rename"]');
+          else await page.evaluate(z.literal(true), (selector) => {
+            document.querySelector(selector)?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); return true;
+          }, `${first} .layer-select`);
+          await page.waitFor('inline layer name', z.literal(true), () => document.querySelector('[data-testid="layer-name-input"]') === null ? null : true);
+          await page.evaluate(z.literal(true), () => {
+            const input = document.querySelector('[data-testid="layer-name-input"]');
+            if (!(input instanceof HTMLInputElement)) throw new Error('No layer name input.');
+            input.select(); return true;
+          });
+        };
+        await beginRename(); await page.press('Backspace');
+        await page.type('[data-testid="layer-name-input"]', 'First disc'); await page.press('Enter');
+        t.equal(`${frame}: Enter commits the name`, await page.evaluate(z.string(), () => window.__noisyTest?.demo.objects()[0]?.name), 'First disc');
+        await beginRename(); await page.press('Backspace');
+        await page.type('[data-testid="layer-name-input"]', 'Cancelled'); await page.press('Escape');
+        t.equal(`${frame}: Escape cancels without deselecting`, await page.evaluate(z.object({ name: z.string(), selected: z.boolean() }), () => {
+          const object = window.__noisyTest?.demo.objects()[0]; return { name: object?.name, selected: object?.selected };
+        }), { name: 'First disc', selected: true });
+        await beginRename(); await page.press('Backspace'); await page.press('Enter');
+        t.equal(`${frame}: empty name rejected`, await page.evaluate(z.literal(true), () =>
+          document.querySelector('[data-testid="layer-name-input"]')?.getAttribute('aria-invalid') === 'true' && window.__noisyTest?.demo.objects()[0]?.name === 'First disc'), true);
+        await page.press('Escape');
+        await beginRename(); await page.press('Backspace'); await page.type('[data-testid="layer-name-input"]', 'Red disc');
+        await page.click(`${second} .layer-select`);
+        t.equal(`${frame}: blur commits the name`, await page.evaluate(z.string(), () => window.__noisyTest?.demo.objects()[0]?.name), 'Red disc');
+        const before = await page.evaluate(LayerPixels, layerPixels);
+        // Observe the real Preparing sentence even when inpaint completes between driver polls.
+        await page.evaluate(z.literal(true), () => {
+          const observer = new MutationObserver(() => {
+            if (document.querySelector('[data-testid="preparing"]')?.textContent?.startsWith('Preparing')) document.body.dataset['layersPreparing'] = 'yes';
+            if (document.body.dataset['layersPreparing'] === 'yes') observer.disconnect();
+          });
+          observer.observe(document.body, { childList: true, subtree: true, characterData: true }); return true;
+        });
+        await page.click(button(second, 'hide'));
+        await page.waitFor('hidden layer plate prepared', z.literal(true), () => {
+          const demo = window.__noisyTest?.demo;
+          return demo?.objects()[1]?.hidden && demo.products().plateSize !== null && !demo.products().plateNeeded &&
+            document.querySelector('[data-testid="preparing"]') === null ? true : null;
+        }, { timeoutMs: 180_000 });
+        const hidden = await page.evaluate(LayerPixels, layerPixels);
+        t.ok(`${frame}: hiding prepares a plate, removes object geometry and changes its center`, hidden.plate !== null && hidden.plateLabel === 0 &&
+          hidden.undimmed.some((value, i) => value !== before.undimmed[i]), hidden);
+        t.equal(`${frame}: Preparing appeared then cleared`, await page.evaluate(z.boolean(), () => document.body.dataset['layersPreparing'] === 'yes'), true);
+        t.ok(`${frame}: hidden PNG matches undimmed screen and restores selection overlay`, hidden.exportMatches && hidden.overlayRestored, hidden);
+        await page.click(button(second, 'hide'));
+        const shown = await page.evaluate(LayerPixels, layerPixels);
+        t.equal(`${frame}: Show restores the center pixel`, shown.undimmed, before.undimmed);
+        await page.click(button(second, 'hide'));
+        await page.click(`${first} .layer-select`);
+        if (phone) await page.evaluate(z.literal(true), () => { document.querySelector('.layer-list')?.scrollIntoView({ block: 'nearest' }); return true; });
+        // Focus exposes the same icons as hover, also keeping keyboard actions discoverable.
+        await page.evaluate(z.literal(true), (selector) => {
+          const node = document.querySelector(selector); if (node instanceof HTMLButtonElement) node.focus(); return true;
+        }, button(first, 'hide'));
+        await page.screenshot(phone ? 'layers-phone-402' : 'layers-1440');
+        const maskBefore = await page.evaluate(z.string(), () => JSON.stringify([...(window.__noisyTest?.demo.projectMasks() ?? [])].sort((a, b) => a.asset.localeCompare(b.asset))));
+        await page.click(button(first, 'delete'));
+        const deleted = await page.evaluate(z.object({ rows: z.number(), selected: z.boolean(), swatches: z.boolean(), masks: z.number() }), () => ({
+          rows: document.querySelectorAll('.layer-row[data-object-id]').length,
+          selected: window.__noisyTest?.demo.objects().some((object) => object.selected) ?? true,
+          swatches: document.querySelector('[data-testid="swatches"]') !== null, masks: window.__noisyTest?.demo.products().masks,
+        }));
+        t.equal(`${frame}: delete removes row and products and selects scene`, deleted, { rows: 1, selected: false, swatches: false, masks: 1 });
+        await page.click('[data-testid="history-undo"]'); await page.click('[data-testid="history-undo"]');
+        t.equal(`${frame}: undo twice restores first and shows second`, await page.evaluate(z.array(z.object({ name: z.string(), hidden: z.boolean() })), () =>
+          window.__noisyTest?.demo.objects().map(({ name, hidden }) => ({ name, hidden }))), [{ name: 'Red disc', hidden: false }, { name: 'Object 2', hidden: false }]);
+        t.equal(`${frame}: undo restores exact mask bytes`, await page.evaluate(z.string(), () => JSON.stringify([...(window.__noisyTest?.demo.projectMasks() ?? [])].sort((a, b) => a.asset.localeCompare(b.asset)))), maskBefore);
+        await page.click('[data-testid="history-redo"]');
+        t.equal(`${frame}: redo hides second`, await page.evaluate(z.boolean(), () => window.__noisyTest?.demo.objects()[1]?.hidden), true);
+        if (!phone) {
+          await page.evaluate(z.literal(true), () => {
+            const range = document.querySelector('[data-testid="style-fry"]');
+            if (!(range instanceof HTMLInputElement)) throw new Error('No Fry range.');
+            range.focus(); range.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true })); return true;
+          });
+          t.equal('desktop: Cmd-Z shows second', await page.evaluate(z.boolean(), () => window.__noisyTest?.demo.objects()[1]?.hidden), false);
+          await page.evaluate(z.literal(true), () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Z', ctrlKey: true, shiftKey: true, bubbles: true })); return true; });
+          t.equal('desktop: Shift-Ctrl-Z redoes visibility', await page.evaluate(z.boolean(), () => window.__noisyTest?.demo.objects()[1]?.hidden), true);
+        }
+        await t.file(`layers-${frame}.json`, JSON.stringify({ before, hidden, shown, deleted }, null, 2));
+      }
+    },
+  },
+  {
     id: 'objects.refine', title: 'hold and drag real sample selection with transient preview, commit and cancellation', target: 'dev', covers: [], timeoutMs: 300_000,
     async run(t) {
+      await t.page.emulate({ width: 402, height: 874, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await t.page.goto('/');
       await t.page.waitFor('object hooks', z.literal(true), () => window.__noisyTest?.demo === undefined ? null : true);
+      await t.page.waitFor('phone sample action', z.literal(true), () =>
+        [...document.querySelectorAll('.phone-stage .empty-actions button')].some((button) =>
+          button instanceof HTMLButtonElement && button.textContent?.trim() === 'Try a sample') ? true : null);
       await t.page.evaluate(z.literal(true), () => {
-        const button = document.querySelector('[data-testid=try-sample]');
+        const button = [...document.querySelectorAll('.phone-stage .empty-actions button')].find((button) => button.textContent?.trim() === 'Try a sample');
         if (!(button instanceof HTMLButtonElement)) throw new Error('Missing sample button.');
         button.click(); return true;
       });
@@ -285,12 +501,23 @@ export const scenarios: readonly Scenario[] = [
       t.ok('sample ball has one mask and its plate is fresh', before.count === 1 && before.maskCount === 1 && before.area > 0 && !before.plateNeeded, before);
       await t.page.screenshot('refine-before');
       const live = await t.page.evaluate(RefineResult, refineChecks, 'grow');
+      t.ok('hold displays the starting refinement percentage', live.meterOnHold !== null && live.meterOnHold.visible &&
+        live.meterOnHold.percent === Math.round(before.size * 100) && live.meterOnHold.text === `Selection ${live.meterOnHold.percent}%`, live.meterOnHold);
+      t.ok('meter follows the right drag to 100%', live.meter.visible && live.meter.percent === 100 && live.meter.expected === 100 &&
+        live.meter.text === 'Selection 100%' && live.meter.fill === '100%', live.meter);
+      t.ok('phone meter uses the centered stage placement and range vocabulary', live.meter.width === 160 && Math.abs(live.meter.topInset - 12) < .5 &&
+        Math.abs(live.meter.centerError) < .5 && live.meter.trackHeight === 6 && live.meter.pointerEvents === 'none', live.meter);
+      t.ok('dim leaves a grown preview patch clear before release', live.dimGrowth !== null &&
+        live.dimGrowth.before.reduce((sum, value) => sum + value, 0) < live.dimGrowth.beforeUndimmed.reduce((sum, value) => sum + value, 0) &&
+        live.dimGrowth.after.every((value, i) => value === live.dimGrowth?.afterUndimmed[i]), live.dimGrowth);
+      await t.page.screenshot('selection-meter-402');
       t.ok('held move grows resident preview before lift', live.refining && live.previewArea !== null && live.previewArea > before.area && live.previewAsset !== before.asset, live);
       t.equal('preview retains the saved document and fresh plate', [live.unchangedDuringPreview, live.asset, live.plateNeeded], [true, before.asset, false]);
       t.equal('refinement cursor', live.cursor, 'ew-resize');
       t.ok('exactly three area-ordered candidates and an original rank are exposed', live.candidateAreas.length === 3 && live.originalRank !== null &&
         live.candidateAreas.every((entry, i, all) => i === 0 || entry.area >= (all[i - 1]?.area ?? 0)), live);
       const grown = await t.page.evaluate(RefineResult, refineChecks, 'finish');
+      t.equal('meter disappears after release', grown.meter.visible, false);
       t.ok('lift commits a larger mask, new asset and size above .5', grown.area > before.area && grown.asset !== before.asset && grown.size > 0.5, grown);
       t.equal('commit leaves the plate stale and drops the original mask', [grown.plateNeeded, grown.maskCount, grown.refining], [true, 1, false]);
       t.equal('gesture introduces no status sentence', [live.status, grown.status], [before.status, before.status]);
@@ -303,6 +530,7 @@ export const scenarios: readonly Scenario[] = [
       for (const action of ['escape', 'back', 'second', 'cancel'] satisfies readonly ('escape' | 'back' | 'second' | 'cancel')[]) {
         const result = await t.page.evaluate(RefineResult, refineChecks, action);
         t.ok(`${action} restores exact document, asset, products and plate`, result.cancelledDocumentEqual && result.cancelledProductsEqual && !result.refining && !result.plateNeeded && result.maskCount === 1, result);
+        t.equal(`${action} hides the meter`, result.meter.visible, false);
         cancellations.push({ action, result });
       }
       const quick = await t.page.evaluate(RefineResult, refineChecks, 'quick');
@@ -316,6 +544,7 @@ export const scenarios: readonly Scenario[] = [
   {
     id: 'objects.tap', title: 'real tap, subject products, screen-only selection, recolor, limit and baseline reset', target: 'dev', covers: [], timeoutMs: 300_000,
     async run(t) {
+      await t.page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
       await t.page.goto('/');
       await t.page.waitFor('object hooks', z.literal(true), () => window.__noisyTest?.demo === undefined ? null : true);
       const early = await t.page.evaluate(Early, fixture, false);
@@ -336,6 +565,12 @@ export const scenarios: readonly Scenario[] = [
       t.ok('masked mean within 0.05 Oklab of disc', error <= 0.05, { error, mean: result.mean, expected });
       t.ok('disc edge has screen-only white selection', result.edgeDifferences > 0, result.edgeDifferences);
       t.equal('well inside the disc screen equals export', result.insideScreenEqualsExport, true);
+      const lab = (rgb: readonly number[]) => srgbToOklab({ r: (rgb[0] ?? 0) / 255, g: (rgb[1] ?? 0) / 255, b: (rgb[2] ?? 0) / 255 });
+      const outsideBefore = lab(result.outsideBefore), outsideSelected = lab(result.outsideSelected);
+      t.ok('outside selected object is darker and bluer', outsideSelected.L < outsideBefore.L && outsideSelected.b < outsideBefore.b,
+        { outsideBefore, outsideSelected, bytes: [result.outsideBefore, result.outsideSelected] });
+      t.equal('outside probe input is identical with and without selection', result.outsideUndimmed, result.outsideBefore);
+      t.equal('selection probe interior is untouched', result.insideSelectionEqual, true);
       t.equal('export restores visible selection overlay', result.overlayRestored, true);
       t.equal('selected and deselected export bytes equal', result.deselectedExportEqual, true);
       t.ok('Green is a focusable native keyboard button and Escape removes selection', result.keyboardFocus && result.nativeSwatch && result.escapeDeselects);
@@ -349,6 +584,31 @@ export const scenarios: readonly Scenario[] = [
       t.equal('Reset status', result.resetStatus, 'Reset');
       t.equal('Reset retains depth analysis', result.resetDepth, true);
       t.equal('Reset PNG byte-identical to Ready to tap baseline', result.resetBytesEqual, true);
+      await t.page.evaluate(z.literal(true), async () => {
+        const demo = window.__noisyTest?.demo;
+        if (demo === undefined) throw new Error('Missing selection hooks.');
+        await demo.tap(600 / 2048, 680 / 1536); return true;
+      });
+      const selectedStereo = await exportThroughSession(t);
+      const loopIdentity = await t.page.evaluate(z.literal(true), async () => {
+        const demo = window.__noisyTest?.demo;
+        if (demo === undefined) throw new Error('Missing loop export hooks.');
+        const hash = async (blob: Blob) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))).join(',');
+        const selected = await hash(await demo.exportFrame(7));
+        demo.select(null);
+        return await hash(await demo.exportFrame(7)) === selected;
+      });
+      t.equal('loop PNG bytes ignore selection', loopIdentity, true);
+      const deselectedStereo = await exportThroughSession(t);
+      t.equal('selected and deselected stereo left JPEG bytes equal', selectedStereo.leftBytes, deselectedStereo.leftBytes);
+      t.equal('selected and deselected stereo right JPEG bytes equal', selectedStereo.rightBytes, deselectedStereo.rightBytes);
+      t.equal('selected and deselected complete MPO bytes equal', selectedStereo.mpoBytes, deselectedStereo.mpoBytes);
+      await t.page.evaluate(z.literal(true), () => {
+        const demo = window.__noisyTest?.demo, id = demo?.objects()[0]?.id;
+        if (demo === undefined || id === undefined) throw new Error('Missing selected object.');
+        demo.select(id); return true;
+      });
+      await t.page.screenshot('selection-dim-1440');
     },
   },
   {

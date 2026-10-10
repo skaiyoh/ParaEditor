@@ -82,10 +82,10 @@ test('the version-zero migration adds the disabled surface and selection size wi
     return { ...object, produced: { ...object.produced, selection } };
   }) };
   const before = structuredClone(legacy);
-  assert.equal(SCENE_VERSION, 2);
-  assert.equal(MIGRATIONS.length, 2);
+  assert.equal(SCENE_VERSION, 3);
+  assert.equal(MIGRATIONS.length, SCENE_VERSION);
   const parsed = parseDocument(legacy);
-  assert.deepEqual(parsed, { ok: true, value: { ...current, version: 2, surface: defaultSurface() } });
+  assert.deepEqual(parsed, { ok: true, value: { ...current, version: SCENE_VERSION, surface: defaultSurface() } });
   assert.deepEqual(legacy, before);
   assert.deepEqual(parseDocument(JSON.parse(JSON.stringify(legacy))), parsed);
   const extra = parseDocument({ ...legacy, unexpected: 1 });

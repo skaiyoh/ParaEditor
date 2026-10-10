@@ -2,6 +2,260 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { initialPolicy, nextWake, transition, type Policy, type PolicyEvent, type Stage } from '../src/session/policy.ts';
 import { createProducts, productAsset } from '../src/session/products.ts';
+import { createDriver, warmDecoder } from '../src/session/driver.ts';
+import type { AnalysisService, Decoder, SequenceListener } from '../src/analysis/service.ts';
+import { isAssetId, isBuildId, isModelId, isObjectId, isSceneId } from '../src/core/ids.ts';
+import { newDocument, newObject } from '../src/core/defaults.ts';
+import { photoStats } from '../src/photo/stats.ts';
+import type { Plane } from '../src/core/raster.ts';
+
+Object.defineProperty(globalThis, 'NOISY_DEV', { value: false, configurable: true });
+
+const flush = async (): Promise<void> => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+
+function driverRig(failures: readonly string[] = []) {
+  const id = '00000000-0000-4000-8000-000000000001';
+  const asset = 'a'.repeat(64);
+  const model = `depth-anything-v2-small@${'a'.repeat(64)}`;
+  const build = '671d30a4605d-20261010';
+  if (!isSceneId(id) || !isObjectId(id) || !isAssetId(asset) || !isModelId(model) || !isBuildId(build)) throw new Error('Invalid driver fixture ids.');
+  const master = { width: 2, height: 2, colorSpace: 'srgb', data: new Uint8ClampedArray(16) } satisfies ImageData;
+  const guide = { size: { width: 2, height: 2 }, data: new Uint8Array(12) };
+  const stats = photoStats(master, 1);
+  const color = { L: 0.5, a: 0, b: 0 };
+  const object = newObject({ id, existing: [], produced: { model,
+    selection: { kind: 'taps', points: [{ at: { x: 0.5, y: 0.5 }, label: 'include' }], candidate: 0 },
+    mask: { asset, format: 'u8', size: guide.size }, bounds: { x: 0, y: 0, ...guide.size }, depth: null,
+    color: { mean: color, clusters: [{ lab: color, weight: 0.5 }, { lab: color, weight: 0.5 }] } } });
+  const doc = newDocument({ id, title: 'fixture', seed: 1, now: '2026-10-10T18:00:00.000Z', writer: build, importedOn: 'node',
+    frame: { source: { asset, mediaType: 'image/png', byteLength: 1 }, master: { asset, size: guide.size },
+      original: { name: 'fixture.png', mediaType: 'image/png', size: guide.size } },
+    analysis: { ...stats, depth: null, plate: null, autoSubject: 'pending' } });
+  const events: string[] = [];
+  let now = 0, heavy = false, decoderAlive = false, opens = 0, heavyReleases = 0;
+  let listener: SequenceListener | null = null;
+  let plateWanted = false;
+  let changed = (): void => {};
+  const service: AnalysisService = {
+    runSequence(_scene, stages, _input, on) { if (stages[0].kind !== 'inpaint') assert.equal(decoderAlive, false); heavy = true; listener = on; events.push(`sequence.spawn:${stages[0].kind}`); },
+    cancelHeavy() { heavyReleases++; if (heavy) events.push('sequence.cancel'); heavy = false; },
+    openDecoder(input) {
+      assert.equal(heavy, false, 'sequence terminated before decoder opens');
+      assert.equal(decoderAlive, false, 'previous decoder released before another opens');
+      decoderAlive = true; const attempt = opens++; events.push('decoder.open');
+      const decoder: Decoder = { scene: input.scene,
+        async decode() {
+          const message = failures[attempt];
+          if (message !== undefined) return { ok: false, error: { kind: 'worker', op: 'decode', message } };
+          const mask = { format: 'u8', size: guide.size, data: new Uint8Array(4) } satisfies Plane<'u8'>;
+          const candidate = { mask, score: 1 };
+          return { ok: true, value: { candidates: [candidate, candidate, candidate] } };
+        },
+        release() { if (decoderAlive) { events.push('decoder.release'); decoderAlive = false; } },
+      };
+      return decoder;
+    },
+    async fetchModels() { return { ok: true, value: undefined }; },
+    openFaceTracker() { throw new Error('No face tracker in driver fixture.'); },
+    get alive() { return { heavy, decoder: decoderAlive }; },
+    lastHeavyTermination: null,
+  };
+  const driver = createDriver({ read: () => ({ doc: { ...doc, objects: plateWanted ? [object] : [], motion: { ...doc.motion, enabled: plateWanted } }, masterPixels: master }),
+    products: createProducts(), produce: () => {}, changed: () => changed(), windowEnabled: () => plateWanted }, {
+    clock: { now: () => now }, diag: { events: [], log: () => {} }, service, threads: 2,
+    prepareGuide: async () => guide, models: { kind: 'ready', ids: [model], depth: model, inpaint: model, count: 1 },
+  });
+  return {
+    driver, events, master,
+    heavyReleases: () => heavyReleases,
+    onChange(callback: () => void) { changed = callback; },
+    advance(ms: number) { now += ms; },
+    wantPlate(value: boolean) { plateWanted = value; },
+    complete() {
+      if (listener === null) throw new Error('No sequence running.');
+      const on = listener;
+      heavy = false; events.push('sequence.terminate');
+      on.onEmbeddings({ model, tensors: [
+        { name: 'image_embeddings.0', dims: [1, 32, 256, 256], data: new Float32Array(0) },
+        { name: 'image_embeddings.1', dims: [1, 64, 128, 128], data: new Float32Array(0) },
+        { name: 'image_embeddings.2', dims: [1, 256, 64, 64], data: new Float32Array(0) },
+      ] });
+      on.onDone();
+    },
+    finishPlate() { if (listener === null) throw new Error('No plate running.'); heavy = false; plateWanted = false; events.push('sequence.terminate'); listener.onDone(); },
+    failPlate() { if (listener === null) throw new Error('No plate running.'); heavy = false; events.push('sequence.terminate'); listener.onFailed('inpaint', { kind: 'worker', op: 'inpaint', message: 'background error' }); },
+  };
+}
+
+test('three imports release before sequence spawn and open only after sequence termination', async () => {
+  const r = driverRig(); await flush();
+  for (let i = 0; i < 3; i++) {
+    r.advance(3000);
+    const generation = r.driver.beginImport();
+    assert.deepEqual(r.driver.snapshot().alive, { heavy: false, decoder: false });
+    await r.driver.sceneReady(generation, r.master);
+    r.complete(); await flush();
+    assert.equal(r.driver.snapshot().status, 'Ready to tap');
+  }
+  assert.deepEqual(r.events, ['sequence.spawn:depth', 'sequence.terminate', 'decoder.open',
+    'decoder.release', 'sequence.spawn:depth', 'sequence.terminate', 'decoder.open',
+    'decoder.release', 'sequence.spawn:depth', 'sequence.terminate', 'decoder.open']);
+});
+
+test('non-startup decoder failure is sanitized without a retry', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const r = driverRig(['internal path and raw error']); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master); r.complete(); await flush();
+  assert.equal(r.driver.snapshot().status, 'Tapping unavailable - try another photo');
+  t.mock.timers.tick(10_000); await flush();
+  assert.equal(r.events.filter((e) => e === 'decoder.open').length, 1);
+});
+
+test('abort while a decoder is warming releases it and never reports ready', async () => {
+  const id = '00000000-0000-4000-8000-000000000001';
+  if (!isSceneId(id)) throw new Error('Invalid scene id.');
+  const controller = new AbortController();
+  let releases = 0;
+  const decoder: Decoder = { scene: id,
+    decode(_points, signal) { return new Promise((resolve) => signal.addEventListener('abort', () => resolve({ ok: false, error: { kind: 'cancelled' } }), { once: true })); },
+    release() { releases++; },
+  };
+  const pending = warmDecoder({ open: () => decoder, releaseHeavy: () => assert.fail('abort is not a retry'),
+    signal: controller.signal, now: () => 0, report: () => assert.fail('abort is not a failure'), onReady: () => assert.fail('abort is not ready') });
+  controller.abort();
+  assert.deepEqual(await pending, { kind: 'cancelled' });
+  assert.equal(releases, 1);
+});
+
+for (const cancelledAt of ['result', 'open', 'decode']) {
+  test(`cancelled ${cancelledAt} with a live signal is released without reporting or retrying`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const id = '00000000-0000-4000-8000-000000000001';
+    if (!isSceneId(id)) throw new Error('Invalid scene id.');
+    let opens = 0, releases = 0;
+    const decoder: Decoder = { scene: id,
+      async decode() {
+        if (cancelledAt === 'decode') throw new DOMException('Out of memory', 'AbortError');
+        return { ok: false, error: { kind: 'cancelled' } };
+      },
+      release() { releases++; },
+    };
+    const result = await warmDecoder({
+      open() { opens++; if (cancelledAt === 'open') throw new DOMException('Out of memory', 'AbortError'); return decoder; },
+      releaseHeavy: () => assert.fail('cancellation is not a retry'), signal: new AbortController().signal, now: () => 0,
+      report: () => assert.fail('cancellation is not a startup failure'), onReady: () => assert.fail('cancelled startup is not ready'),
+    });
+    assert.deepEqual(result, { kind: 'cancelled' });
+    t.mock.timers.tick(2000); await flush();
+    assert.equal(opens, 1);
+    assert.equal(releases, cancelledAt === 'open' ? 0 : 1);
+  });
+}
+
+const wasmStartupFailure = 'the decoder did not start: the decoder session could not be created: Error: Aborted(CompileError: WebAssembly.instantiate(): expected magic word 00 61 73 6d, found 66 61 75 6c @+0)';
+for (const message of ['RangeError: Out of memory', 'no available backend found',
+  'the decoder did not start: the decoder session could not be created: Error: no available backend found. ERR: [wasm] RangeError: Out of memory',
+  'the decoder session could not be created: TypeError: failed to fetch the wasm binary',
+  'the decoder session could not be created: Error: Failed to load model', wasmStartupFailure]) {
+  test(`${message} releases heavy work and retries once after 1500 ms`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const r = driverRig([message]); await flush();
+    await r.driver.sceneReady(r.driver.beginImport(), r.master); r.complete(); await flush();
+    assert.equal(r.driver.snapshot().status, 'Warming decoder');
+    assert.deepEqual(r.events.slice(-2), ['decoder.open', 'decoder.release']);
+    assert.deepEqual(r.driver.snapshot().alive, { heavy: false, decoder: false });
+    assert.equal(r.heavyReleases(), 2, 'import release and retry release both cancel heavy work');
+    t.mock.timers.tick(1499); await flush();
+    assert.equal(r.events.filter((e) => e === 'decoder.open').length, 1);
+    t.mock.timers.tick(1); await flush();
+    assert.equal(r.events.filter((e) => e === 'decoder.open').length, 2);
+    assert.equal(r.driver.snapshot().status, 'Ready to tap');
+  });
+}
+
+for (const failures of [['Out of memory', 'second raw failure'], [wasmStartupFailure, wasmStartupFailure]]) {
+  test(`second decoder failure after ${failures[0]} sets reload sentence, releases the worker, and never retries again`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const r = driverRig(failures); await flush();
+    await r.driver.sceneReady(r.driver.beginImport(), r.master); r.complete(); await flush();
+    t.mock.timers.tick(1500); await flush();
+    assert.equal(r.driver.snapshot().status, 'Tapping needs a reload on this device');
+    assert.equal(r.driver.decoder(), null);
+    assert.deepEqual(r.driver.snapshot().alive, { heavy: false, decoder: false });
+    t.mock.timers.tick(60_000); await flush();
+    assert.equal(r.events.filter((e) => e === 'decoder.open').length, 2);
+  });
+}
+
+test('replacement during retry wait prevents the old decoder from reopening', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const r = driverRig(['Out of memory']); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master); r.complete(); await flush();
+  r.driver.beginImport();
+  t.mock.timers.tick(2000); await flush();
+  assert.equal(r.events.filter((e) => e === 'decoder.open').length, 1);
+  assert.deepEqual(r.driver.snapshot().alive, { heavy: false, decoder: false });
+});
+
+test('a queued background sequence finishes before decoder warming begins', async () => {
+  const r = driverRig(); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master);
+  r.wantPlate(true); const plate = r.driver.requestPlateIfNeeded();
+  r.complete(); await flush();
+  assert.equal(r.driver.snapshot().alive.decoder, false);
+  assert.equal(r.events.at(-1), 'sequence.spawn:inpaint');
+  r.finishPlate(); await flush(); await plate;
+  assert.equal(r.events.at(-1), 'decoder.open');
+  assert.equal(r.driver.snapshot().status, 'Ready to tap');
+});
+
+test('a queued background failure still warms tapping after its worker terminates', async () => {
+  const r = driverRig(); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master);
+  r.wantPlate(true); const plate = r.driver.requestPlateIfNeeded();
+  const refused = assert.rejects(plate, /Analysis failed at inpaint/);
+  r.complete(); await flush(); r.failPlate(); await flush(); await refused;
+  assert.equal(r.driver.snapshot().decoderReady, true);
+  assert.deepEqual(r.driver.snapshot().alive, { heavy: false, decoder: true });
+  assert.match(r.driver.snapshot().status, /^Analysis failed at inpaint/);
+});
+
+test('decoder reload sentence takes precedence when the background also failed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const r = driverRig(['Out of memory', 'no available backend']); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master);
+  r.wantPlate(true); const refused = assert.rejects(r.driver.requestPlateIfNeeded(), /Analysis failed at inpaint/);
+  r.complete(); await flush(); r.failPlate(); await flush(); await refused;
+  t.mock.timers.tick(1500); await flush();
+  assert.equal(r.driver.snapshot().status, 'Tapping needs a reload on this device');
+  assert.deepEqual(r.driver.snapshot().alive, { heavy: false, decoder: false });
+});
+
+test('replacement during ready publication releases the adopted decoder without a stale status', async () => {
+  const r = driverRig(); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master);
+  r.onChange(() => { if (r.driver.snapshot().decoderReady) r.driver.beginImport(); });
+  r.complete(); await flush();
+  assert.equal(r.events.at(-1), 'decoder.release');
+  assert.deepEqual(r.driver.snapshot().alive, { heavy: false, decoder: false });
+  assert.equal(r.driver.snapshot().status, 'Waiting to analyze');
+});
+
+test('a background request during ready publication keeps the preparing sentence', async () => {
+  const r = driverRig(); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master);
+  let requested = false, plate = Promise.resolve();
+  r.onChange(() => {
+    if (r.driver.snapshot().decoderReady && !requested) {
+      requested = true; r.wantPlate(true); plate = r.driver.requestPlateIfNeeded();
+    }
+  });
+  r.complete(); await flush();
+  assert.equal(r.driver.snapshot().status, 'preparing');
+  assert.equal(r.driver.snapshot().alive.heavy, true);
+  r.finishPlate(); await flush(); await plate;
+  assert.equal(r.driver.snapshot().status, 'Ready to tap');
+});
 
 function rig() {
   let state: Policy = initialPolicy();

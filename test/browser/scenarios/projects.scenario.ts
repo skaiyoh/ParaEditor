@@ -102,6 +102,15 @@ export const scenarios: readonly Scenario[] = [{
       await page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(.38, .585); return true; });
       await page.waitFor('object swatches', z.literal(true), () => document.querySelector('[data-testid="swatches"]') === null ? null : true);
       await page.click('[data-testid="swatches"] button[aria-label="Green"]');
+      await page.click('[data-testid="layer-rename"]');
+      await page.press('Backspace');
+      await page.type('[data-testid="layer-name-input"]', 'Saved ball');
+      await page.press('Enter');
+      await page.click('.object-node [data-testid="layer-hide"]');
+      await page.waitFor('hidden project plate ready', z.literal(true), () => {
+        const demo = window.__noisyTest?.demo;
+        return demo?.objects()[0]?.hidden && demo.products().plateSize !== null && !demo.products().plateNeeded ? true : null;
+      }, { timeoutMs: 180_000 });
       await page.evaluate(z.literal(true), () => {
         const range = document.querySelector('[data-testid="style-fry"]');
         if (!(range instanceof HTMLInputElement)) throw new Error('No Fry slider.');
@@ -183,6 +192,9 @@ export const scenarios: readonly Scenario[] = [{
           layerPresent: object !== undefined && Array.from(document.querySelectorAll('.layer-name')).some((node) => node.textContent === object.name), masksMatch };
       }, saved.json);
       t.ok('opening restores the whole document, masks and object layers and clears selection', restored.equal && restored.masksMatch && restored.layerPresent && restored.selectionCleared, restored);
+      t.equal('restored project keeps the layer name and hidden flag', await page.evaluate(z.object({ name: z.string(), hidden: z.boolean() }), () => {
+        const object = window.__noisyTest?.demo.objects()[0]; return { name: object?.name, hidden: object?.hidden };
+      }), { name: 'Saved ball', hidden: true });
       await page.waitFor('restored analysis is ready', z.literal(true), () => window.__noisyTest?.demo.analysis().decoderReady ? true : null, { timeoutMs: 180_000 });
       const refusedRows = await addFixtureRows(1), refusedId = refusedRows[0];
       if (refusedId === undefined) throw new Error('No refusal fixture.');

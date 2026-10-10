@@ -3,10 +3,9 @@ import type { DemoScene, DemoSession } from '../session/scene.ts';
 import type { SceneDocument, Style } from '../core/types.ts';
 import { applyEdit } from '../core/reduce.ts';
 import { RANGES } from '../core/ranges.ts';
-import { Swatches } from './swatches.tsx';
 import { EnableSwitch, Node, RangeControl } from './controls.tsx';
-import { Layers } from './layers.tsx';
-import { PhoneFrame } from './phone.tsx';
+import { Layers, ObjectInspector } from './layers.tsx';
+import { ParallaxNode, PhoneFrame } from './phone.tsx';
 import { Projects } from './projects.tsx';
 
 const PHONE_QUERY = '(max-width: 760px), (max-height: 500px), (max-width: 1100px) and (orientation: portrait)';
@@ -24,8 +23,9 @@ function usePhoneFrame(): boolean {
 }
 
 /** A fresh node, never given a 2D context. The session owns its renderer. */
-function Stage({ scene, session, onFit, contained = false, visible = true }: {
+function Stage({ scene, session, onFit, refinementSize, contained = false, visible = true }: {
   readonly scene: DemoScene | null; readonly session: DemoSession; readonly onFit: (percent: number) => void;
+  readonly refinementSize: number | null;
   readonly contained?: boolean;
   readonly visible?: boolean;
 }) {
@@ -38,6 +38,9 @@ function Stage({ scene, session, onFit, contained = false, visible = true }: {
   const pointers = useRef(new Set<number>());
   const suppressClick = useRef(false);
   const [refining, setRefining] = useState(false);
+  const meterSize = useRef(0);
+  if (refinementSize !== null) meterSize.current = Math.round(refinementSize * 100);
+  const meterActive = refining && refinementSize !== null && scene !== null && visible;
   const pointAt = (node: HTMLCanvasElement, clientX: number, clientY: number) => {
     const box = node.getBoundingClientRect();
     if (box.width <= 0 || box.height <= 0) return null;
@@ -97,7 +100,7 @@ function Stage({ scene, session, onFit, contained = false, visible = true }: {
     // Imports and Reset abandon a hold even before its timer has fired.
     clearGesture();
   }, [scene?.doc.id, scene?.doc.frame.master.asset, scene?.doc.objects.length]);
-  return <canvas key="webgl-stage" ref={canvas} data-testid="stage" class={`stage-canvas${refining ? ' is-refining' : ''}`} hidden={scene === null || !visible} aria-label="Rendered photo"
+  return <><canvas key="webgl-stage" ref={canvas} data-testid="stage" class={`stage-canvas${refining ? ' is-refining' : ''}`} hidden={scene === null || !visible} aria-label="Rendered photo"
     onPointerDown={(event) => {
       if (event.button !== 0) return;
       pointers.current.add(event.pointerId);
@@ -145,7 +148,62 @@ function Stage({ scene, session, onFit, contained = false, visible = true }: {
       if (suppressClick.current) { suppressClick.current = false; return; }
       const point = pointAt(event.currentTarget, event.clientX, event.clientY);
       if (point !== null) void session.tap(point);
-    }} />;
+    }} />
+    <div class="selection-meter" data-testid="selection-meter" data-active={meterActive} aria-hidden={!meterActive}
+      role="meter" aria-label="Selection" aria-valuemin={0} aria-valuemax={100} aria-valuenow={meterSize.current}
+      style={{ '--fill': `${meterSize.current}%` }}>
+      <span>Selection {meterSize.current}%</span>
+      <div class="selection-meter-track" aria-hidden="true" />
+    </div>
+  </>;
+}
+
+/** Product diagnostics read the same session inputs used by the live camera. */
+function ParallaxDebug({ session }: { readonly session: DemoSession }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [readings, setReadings] = useState(session.parallaxDebug());
+  useLayoutEffect(() => {
+    let request = 0, last = -Infinity;
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+    const tick = (now: number): void => {
+      if (now - last >= 100) {
+        last = now;
+        const next = session.parallaxDebug(); setReadings(next);
+        const context = canvas.current?.getContext('2d', { willReadFrequently: true });
+        if (context !== null && context !== undefined) {
+          context.clearRect(0, 0, 320, 240);
+          if (next.frame !== null) {
+            context.drawImage(next.frame, 0, 0, 320, 240);
+            if (next.face !== null) {
+              const { center, size } = next.face;
+              context.strokeStyle = accent; context.lineWidth = 2;
+              context.strokeRect((center.x - size / 2) * 320, (center.y - size / 2) * 240, size * 320, size * 240);
+            }
+          }
+        }
+      }
+      request = requestAnimationFrame(tick);
+    };
+    request = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(request);
+  }, [session]);
+  const number = (n: number | null): string => n === null ? 'Unavailable' : n.toFixed(2);
+  const pair = (value: { x: number; y: number }): string => `${value.x.toFixed(3)}, ${value.y.toFixed(3)}`;
+  return <div class="parallax-debug-area"><section class="parallax-debug" id="parallax-debug-panel" data-testid="parallax-debug" aria-label="Parallax debug">
+    <canvas ref={canvas} width="320" height="240" data-testid="parallax-debug-frame" aria-label="Camera frame with detected face box" />
+    {readings.frame === null && <p class="parallax-camera-status">{readings.cameraRunning ? 'Waiting for camera frame' : 'Camera unavailable'}</p>}
+    <dl>
+      <div><dt>Beta</dt><dd data-testid="parallax-beta">{number(readings.beta)}</dd></div>
+      <div><dt>Gamma</dt><dd data-testid="parallax-gamma">{number(readings.gamma)}</dd></div>
+      <div><dt>Screen type</dt><dd data-testid="parallax-screen-type">{readings.type ?? 'Unavailable'}</dd></div>
+      <div><dt>Screen angle</dt><dd data-testid="parallax-screen-angle">{number(readings.angle)}</dd></div>
+      <div><dt>Window angle</dt><dd data-testid="parallax-window-angle">{number(readings.legacy)}</dd></div>
+      <div><dt>Mapped angle</dt><dd data-testid="parallax-mapped-angle">{number(readings.effectiveAngle)}</dd></div>
+      <div><dt>Tilt target</dt><dd data-testid="parallax-tilt-target">{pair(readings.tilt)}</dd></div>
+      <div><dt>Face target</dt><dd data-testid="parallax-face-target">{pair(readings.faceTarget)}</dd></div>
+      <div><dt>Fused offset</dt><dd data-testid="parallax-fused-offset">{pair(readings.offset)}</dd></div>
+    </dl>
+  </section></div>;
 }
 
 const controls = [
@@ -179,7 +237,11 @@ function editSymbols(session: DemoSession, patch: Partial<SceneDocument['symbols
   if (result.kind === 'applied') session.setDocument(result.doc);
 }
 
-function Inspector({ scene, session }: { readonly scene: DemoScene | null; readonly session: DemoSession }) {
+function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, debug, onDebug }: {
+  readonly scene: DemoScene | null; readonly session: DemoSession;
+  readonly parallaxEnabled: boolean; readonly modelsReady: boolean; readonly onParallax: () => void;
+  readonly debug: boolean; readonly onDebug: () => void;
+}) {
   const [expanded, setExpanded] = useState<Readonly<Record<NodeName, boolean>>>({
     Fry: true, Motion: false, Symbols: false, Surface: false, Palette: true, Camera: true,
   });
@@ -188,7 +250,7 @@ function Inspector({ scene, session }: { readonly scene: DemoScene | null; reado
   return <aside class="inspector" aria-label="Inspector">
     <h2 class="scope-heading">Scene</h2>
     {scene !== null && <div class="node-stack">
-      {selected !== undefined && <section class="object-node" aria-label="Object"><h3 class="object-heading" title={selected.name}>{selected.name}</h3><Swatches session={session} recolor={selected.recolor} /></section>}
+      {selected !== undefined && <ObjectInspector key={selected.id} object={selected} session={session} />}
       <Node name="Fry" expanded={expanded.Fry} onExpand={() => expand('Fry')}>
         {controls.filter((control) => control.group === 'Fry').map(({ field, label, min, max, step }) =>
           <RangeControl key={field} id={`style-${field}`} label={label} min={min} max={max} step={step} value={scene.doc.style[field]} onInput={(value) => session.setFry(value)} />)}
@@ -200,6 +262,7 @@ function Inspector({ scene, session }: { readonly scene: DemoScene | null; reado
           value={scene.doc.motion.parallax} onInput={(parallax) => session.setMotion({ parallax })} />
         <RangeControl id="motion-loopSeconds" label="Loop seconds" min={2} max={6} step={0.1} value={scene.doc.motion.loopSeconds} onInput={(loopSeconds) => session.setMotion({ loopSeconds })} />
       </Node>
+      <ParallaxNode enabled={parallaxEnabled} available={modelsReady} onParallax={onParallax} debug={debug} onDebug={onDebug} />
       <Node name="Symbols" expanded={expanded.Symbols} onExpand={() => expand('Symbols')}
         toggle={<EnableSwitch name="Symbols" checked={scene.doc.symbols.enabled} onChange={(enabled) => editSymbols(session, { enabled })} />}>
         <RangeControl id="symbols-cellSize" label="Cell size" min={6} max={48} step={2} value={scene.doc.symbols.cellSize} onInput={(cellSize) => editSymbols(session, { cellSize })} />
@@ -236,6 +299,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   const [state, setState] = useState(session.snapshot());
   const [fit, setFit] = useState(0);
   const [projectsOpen, setProjectsOpen] = useState(false);
+  const [debug, setDebug] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const cameraInput = useRef<HTMLInputElement>(null);
   const observedTiming = useRef(state.analysisTiming);
@@ -252,7 +316,14 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   }), [session]);
   useLayoutEffect(() => {
     const escape = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !event.defaultPrevented && !session.cancelRefinement()) session.select(null);
+      if (event.defaultPrevented) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button', 'file'].includes(target.type)))) return;
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) session.redo(); else session.undo();
+      } else if (event.key === 'Escape' && !session.cancelRefinement()) session.select(null);
     };
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
@@ -270,21 +341,30 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
     return ms === undefined ? '' : `${Math.round(ms)} ms`;
   };
   const busy = state.status === 'Importing…';
-  const status = bootError ?? (state.status === 'Ready' || state.status === 'Drop a photo' ? state.analysisStatus : state.status);
+  const tapUnavailable = state.analysisStatus.startsWith('Tapping ');
+  const status = bootError ?? (state.parallaxEnabled && state.analysisStatus === 'preparing' ? `${state.status} - preparing` :
+    tapUnavailable || state.status === 'Ready' || state.status === 'Drop a photo' ? state.analysisStatus : state.status);
+  const preparing = scene === null ? null : tapUnavailable ? state.analysisStatus
+    : state.analysisStatus === 'Analyzing: inpaint' ? 'Preparing: background'
+    : state.analysisStatus.startsWith('Analyzing: ') ? state.analysisStatus.replace('Analyzing: ', 'Preparing: ')
+    : state.analysisStatus === 'preparing' ? 'Preparing: background'
+    : state.analysisStatus === 'Warming decoder' ? state.analysisStatus
+    : !analysis.decoderReady ? state.analysisStatus : null;
   const touch = navigator.maxTouchPoints > 0;
   const toggleMotion = (): void => { if (scene !== null) session.setMotion({ enabled: !scene.doc.motion.enabled }); };
   const toggleSymbols = (): void => { if (scene !== null) editSymbols(session, { enabled: !scene.doc.symbols.enabled }); };
-  const toggleWindow = (): void => { void session.setWindow(!state.windowEnabled); };
-  const toggleTilt = (): void => { void session.setTilt(!state.tiltEnabled); };
+  const toggleParallax = (): void => { void session.setParallax(!state.parallaxEnabled); };
+  const toggleDebug = (): void => setDebug((shown) => !shown);
   if (phone) return <main class={`editor phone-editor${scene === null ? '' : ' has-photo'}`} aria-label="Photo editor"
     onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'; }}
     onDrop={(event) => { event.preventDefault(); open(event.dataTransfer?.files[0]); }}>
-    <PhoneFrame state={state} session={session} status={status} busy={busy} touch={touch} modelsReady={analysis.modelsReady}
+    <PhoneFrame state={state} session={session} status={status} preparing={preparing} busy={busy} touch={touch} modelsReady={analysis.modelsReady}
       projectsOpen={projectsOpen} onProjects={() => setProjectsOpen((open) => !open)}
       projects={<Projects session={session} onOpened={() => setProjectsOpen(false)} />}
       onOpen={open} onSample={sample} onDownload={() => { void download(); }}
-      onMotion={toggleMotion} onSymbols={toggleSymbols} onWindow={toggleWindow} onTilt={toggleTilt}>
-      <Stage scene={scene} session={session} onFit={setFit} contained visible={!projectsOpen} />
+      onMotion={toggleMotion} onSymbols={toggleSymbols} onParallax={toggleParallax} debug={debug} onDebug={toggleDebug}>
+      <Stage scene={scene} session={session} onFit={setFit} refinementSize={state.refinementSize} contained visible={!projectsOpen} />
+      {debug && scene !== null && !projectsOpen && <ParallaxDebug session={session} />}
     </PhoneFrame>
   </main>;
   return (
@@ -326,14 +406,17 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
         <section class="viewer" aria-label="Photo viewer">
           <div class="viewer-toolbar"><span>Fit{scene !== null ? ` ${fit}%` : ''}</span></div>
           <div class="stage-area" aria-busy={busy}>
-            <Stage scene={scene} session={session} onFit={setFit} />
+            <Stage scene={scene} session={session} onFit={setFit} refinementSize={state.refinementSize} />
+            {preparing !== null && <p class="preparing" data-testid="preparing">{preparing}</p>}
+            {debug && scene !== null && <ParallaxDebug session={session} />}
             {scene === null && <div class="empty-stage"><p>Drop a photo</p><div class="empty-actions">
               <button type="button" onClick={() => input.current?.click()}>Open</button>
               <button type="button" onClick={sample}>Try a sample</button>
             </div></div>}
           </div>
         </section>
-        <Inspector scene={scene} session={session} />
+        <Inspector scene={scene} session={session} parallaxEnabled={state.parallaxEnabled} modelsReady={analysis.modelsReady}
+          onParallax={toggleParallax} debug={debug} onDebug={toggleDebug} />
       </div>
       <footer class="bottom-bar">
         <p class="status-line" data-testid="status" role="status">{status}{NOISY_DEV && state.analysisTiming !== null ? ` (${state.analysisTiming.stage}: ${Math.round(state.analysisTiming.ms)} ms)` : ''}</p>
@@ -341,8 +424,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
           {scene !== null && <>
             <button type="button" aria-pressed={scene.doc.motion.enabled} onClick={toggleMotion}>Motion</button>
             <button type="button" aria-pressed={scene.doc.symbols.enabled} onClick={toggleSymbols}>Symbols</button>
-            <button type="button" data-testid="window-enabled" aria-pressed={state.windowEnabled} disabled={!analysis.modelsReady} onClick={toggleWindow}>Window</button>
-            {touch && <button type="button" data-testid="tilt-enabled" aria-pressed={state.tiltEnabled} disabled={!analysis.modelsReady} onClick={toggleTilt}>Tilt</button>}
+            <button type="button" data-testid="parallax-enabled" aria-pressed={state.parallaxEnabled} disabled={!analysis.modelsReady} onClick={toggleParallax}>Parallax</button>
           </>}
         </div>
         <div class="build-meta"><small data-testid="isolation" title="Cross-origin isolation">{isolated ? 'isolated: yes' : 'isolated: no'}</small><small data-testid="build-id">build {buildId}</small></div>

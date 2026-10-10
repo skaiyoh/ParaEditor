@@ -30,7 +30,17 @@ const addParallax: Migration = (json) => {
   return { ...json, ...patch, version: 2 };
 };
 
-export const MIGRATIONS = [addSurface, addParallax] as const satisfies readonly Migration[];
+/** Version 2 to 3. Existing layers keep their names and remain visible. */
+const addLayerVisibility: Migration = (json) => {
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) return json;
+  const objects = 'objects' in json && Array.isArray(json.objects) ? json.objects.map((object: unknown, index: number) => {
+    if (typeof object !== 'object' || object === null || Array.isArray(object)) return object;
+    return { name: `Object ${index + 1}`, ...object, hidden: false };
+  }) : undefined;
+  return { ...json, ...(objects === undefined ? {} : { objects }), version: 3 };
+};
+
+export const MIGRATIONS = [addSurface, addParallax, addLayerVisibility] as const satisfies readonly Migration[];
 
 /** The table's length, typed as the tuple's literal length, so `SceneDocument['version']` is a literal type. */
 export const SCENE_VERSION = MIGRATIONS.length;

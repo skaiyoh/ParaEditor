@@ -45,7 +45,7 @@ export function defaultSurface(): Surface {
 
 /** Motion starts off; `focus` null follows the subject, or the frame. */
 export function defaultMotion(): Motion {
-  return { enabled: false, orbit: 0.6, parallax: 1, loopSeconds: 3, focus: null };
+  return { enabled: false, orbit: 0.6, parallax: 2, loopSeconds: 3, focus: null };
 }
 
 export function defaultLighting(): Lighting {
@@ -111,6 +111,7 @@ export function newObject(input: { readonly id: ObjectId; readonly produced: Obj
   return {
     id: input.id,
     name: nextObjectName(input.existing),
+    hidden: false,
     subject: false,
     recolor: { kind: 'none' },
     symbols: 'slider',

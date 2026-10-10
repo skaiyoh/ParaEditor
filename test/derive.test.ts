@@ -564,3 +564,19 @@ test('every AssetId field the schema declares is either read by assetRefs or nam
   );
   assert.deepEqual([...assetRefs(doc)].sort(), [...referenced].sort());
 });
+
+test('hidden layers leave draw order and hit testing but retain the plate hole and freshness masks', () => {
+  const base = fiveClusterDocument();
+  const original = base.objects[0];
+  assert.ok(original);
+  const doc = { ...base, motion: { ...base.motion, enabled: false }, objects: [{ ...original, hidden: true }] };
+  const mask = { format: 'u8', size: { width: 1, height: 1 }, data: new Uint8Array([255]) } satisfies Plane<'u8'>;
+  const masks = new Map([[original.id, mask]]);
+  assert.deepEqual(layers(doc), [{ kind: 'plate' }]);
+  assert.equal(labelAt(doc, masks, { x: .5, y: .5 }), null);
+  assert.ok(holeMask(doc, masks, { width: 2, height: 2 }).data.every((byte) => byte === 255));
+  assert.deepEqual(sortedMasks(doc), [original.produced.mask.asset]);
+  assert.equal(plateNeeded(doc), true);
+  const fresh = { ...doc, analysis: { ...doc.analysis, plate: plateProduct(1, sortedMasks(doc)) } };
+  assert.equal(plateNeeded(fresh), false);
+});

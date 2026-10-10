@@ -891,6 +891,11 @@ A reply whose `jobId` names no pending decode, as the late answer to a cancelled
 `openDecoder` whose `spawnDecoder` throws terminates the decoder alive as above and returns a stopped decoder, whose decodes resolve `worker` with `the decoder stopped: the decode worker could not be started: ` and the error, and logs no worker event; one whose `init` cannot be posted is stopped the same way, with `init could not be posted: ` and the error, after its worker is terminated.
 The decoder and the sequence worker are independent: neither half reads or changes the other's worker, and when a decoder may be opened beside a sequence is its caller's.
 
+The demo session calls `beginImport()` before loading a replacement source, aborting warming (including a pending retry), cancelling the old sequence and releasing the resident decoder before the new sequence can spawn.
+The driver opens the new decoder only after the service has terminated the import sequence and any queued background sequence has finished; a background request during warming aborts that warmup and defers it until the sequence ends.
+If decoder startup reports `Out of memory`, `no available backend`, or a decoder session that could not start (including wasm loading), warming releases the failed decoder and all heavy work, waits 1500 ms, and retries once with the retained embeddings and guide; cancelled results and `AbortError` are never retried.
+A second failure leaves tapping unavailable with `Tapping needs a reload on this device`; edits, Motion, downloads and Projects remain usable, and the raw startup error goes only to dev diagnostics.
+
 ### Fetching models
 
 `fetchModels(ops, signal, onProgress)` logs `fetch.start` for each model of `ops`, once each, in the order of `ops`, then awaits the loader.
@@ -1288,6 +1293,28 @@ Every refusal is one sentence on stderr that says what to do, and a failed step 
 `test/start.test.ts` exercises exits 0, 1, 2, 3, and 130 (a Ctrl-C while checking Tailscale) through `test/support/tailscale-stub.ts`, a stand-in `tailscale` that answers `status --json`, `serve status [--json]`, a foreground `serve --https=443 <target>` that writes its configuration and stays up until signalled, `serve --https=443 off`, and `serve reset`, can delay any answer, and records every call and signal; it runs either as the `tailscale` script itself or, as the real `/usr/local/bin/tailscale` runs the CLI, as that script's child.
 The stub models the real command and is not it: whether the real foreground share removes its own configuration when it stops, and whether `off` removes a foreground share's leftover, are checked only by a run against a real tailnet.
 
+## Editable object layers
+
+Object layers persist their `name` and `hidden` flag in scene documents.
+Version 3 adds `hidden: false` to legacy objects and supplies `Object N` only when a legacy name is missing.
+`object.rename`, `object.hide`, `object.show` and `object.remove` are individual undo steps applied through the reducer.
+The session owns the bounded history, records object creation and refinement alongside its edits, and clears history on Reset or installation of another photo or project.
+Deleting the selected object selects the scene.
+Each history entry retains the mask planes named by its forward and inverse edits; the active product store retains only current document masks, and undo restores the original planes before rendering and autosave.
+History is transient; autosave persists the current names, visibility and object list under the existing project revision rules.
+
+Desktop layers and the phone sheet share the layer rows and Object inspector.
+Rows provide selection, double-click rename, Hide or Show, and immediate Delete.
+The Object inspector provides the name and Rename action, swatches, Hide or Show, then Delete.
+Inline rename commits on Enter or blur, cancels on Escape and refuses an empty name.
+Layers headers expose Undo and Redo; Cmd/Ctrl-Z and Shift-Cmd/Ctrl-Z operate history except in text editing controls.
+
+Hidden layers leave draw order and hit testing, while all current masks remain inputs to plate preparation and freshness.
+Hiding requests the existing Preparing path even with Motion off.
+Once a fresh plate is resident, still rendering reuses the Motion geometry compositor at zero camera offset and zoom 1, drawing only visible objects above the plate.
+PNG export uses that same still compositor and omits the screen selection overlay.
+No shader or analysis change is involved.
+
 ## Shared projects and the Projects API
 
 `src/projects/` is a leaf importing only itself and `core/`.
@@ -1450,6 +1477,13 @@ The session decodes the stored tap points once, orders its three soft masks by a
 Legacy selections parse with size 0.5; a decoder choice outside the middle is preserved at its candidate's neutral size, with legacy .5 gestures anchored there until commit.
 Frame-coalesced previews replace only the renderer's object products, leaving the document, layer thumbnail, plate and autosave unchanged; pointer up applies `object.refine` with recomputed statistics and a content-addressed mask, releases the old mask and allows the usual plate reconciliation and autosave.
 Escape, returning to the starting size, a second pointer, lost capture, Reset or import discards the preview and retains the original document and mask.
+The session exposes the live pointer size in page state as `refinementSize`, without changing the document or notifying autosave.
+While the hold is live, the stage shows a 0..100 selection-size meter centered 12 CSS pixels below its top edge, including below the phone strip; release hides it immediately through the 140 ms opacity transition, even while commit finishes.
+The meter reports refinement size, not mask area.
+The renderer's final screen-selection compositor multiplies pixels outside the selected label toward deep blue (Oklab lightness reduced by 0.35, hue 260 degrees) at 55% strength, then retains the white boundary outline.
+The selected interior is untouched, and each preview mask replaces the label input for this compositor on its next draw.
+Still, stereo view and loop-frame exports disable this entire selection pass, so neither the dim nor the DOM meter enters their bytes.
+The dev-only `selectionPixel` probe reads the actual final screen-pass RGB and its undimmed input at a master-space point, with row zero at the photo's top.
 
 The scene document is the JSON a scene is stored and exported as.
 Its shape has one owner, `core/schema.ts`, a zod schema; `core/types.ts` exports the types zod infers from it (`SceneDocument`, `Frame`, `Analysis`, `Style`, `SceneObject`, `Light`, and the rest) and declares none by hand.
@@ -1650,6 +1684,8 @@ An `object.set` that sets an object's motion to the one it holds is unchanged wh
 | `palette.target` | sets the target of one cluster, or clears it when `color` is null, keeping the list sorted by cluster | `palette.target` with the previous color, or null when the cluster had none |
 | `object.add` | appends the object; when no object in the scene is the subject, it becomes the subject | `[object.remove]` |
 | `object.set` | lays a patch over one object | `object.set` with the previous values; when the patch sets `motion`, then `motion { enabled }` with its previous value |
+| `object.rename` | sets a nonempty layer name | `object.set` with the previous name |
+| `object.hide`, `object.show` | sets layer visibility | the opposite visibility edit |
 | `object.refine` | replaces what analysis produced for one object, its selection and mask together | `object.refine` with the previous `produced` |
 | `object.remove` | removes one object; nothing else changes, `motion.focus` included | `[object.add]` alone, with `restore` |
 | `light.add` | appends the light | `[light.remove]` |
@@ -1758,7 +1794,7 @@ The inverses of `object.refine` and of `object.remove` carry a whole `produced`,
 `core/history.ts` holds the undo history the session keeps while a scene is open; it is never persisted.
 
 ```ts
-type HistoryEntry = { key: string | null; at: number; forward: NonEmpty<Edit>; inverse: NonEmpty<Edit> };
+type HistoryEntry = { key: string | null; at: number; forward: NonEmpty<Edit>; inverse: NonEmpty<Edit>; masks?: ReadonlyMap<AssetId, Plane<'u8'>> };
 type History = { undo: readonly HistoryEntry[]; redo: readonly HistoryEntry[] };
 type HistoryStep = { edits: NonEmpty<Edit>; history: History };
 
@@ -1799,14 +1835,14 @@ Since a push adds at most one entry and clears the redo stack, and undo and redo
 | `palette.target` | `palette.target:<cluster>`; `String(-0)` is `0`, so -0 and 0 share the key of cluster 0 |
 | `object.set` with a one-field patch | `object.set:<id>:<field>`, but null for a patch that sets the object's motion to `none` |
 | `light.set` with a one-field patch | `light.set:<id>:<field>` |
-| a patch of several fields or none, `object.add`, `object.refine`, `object.remove`, `light.add`, `light.remove` | null |
+| a patch of several fields or none, `object.add`, `object.refine`, `object.rename`, `object.hide`, `object.show`, `object.remove`, `light.add`, `light.remove` | null |
 
 Every edit under one key sets the same fields, and sets them to the same stored value whatever they held before, which is what makes the last forward of a coalesced entry redo the whole entry and its first inverse undo it; `palette.target` qualifies because it sets the cluster number outright as well as the color.
 Two sliders, two swatches, or two fields of one light therefore keep their own steps within the window.
 An `object.set` to motion `none` is its own step because the edits before it under the same key may have turned the scene's motion on, which its forward alone would not redo.
 
 `referencedAssets` lists every asset a mask in the history names: the mask of each `object.add` and each `object.refine` in any entry's forward or inverse list, on either stack, which includes the inverse of every `object.remove`.
-The session keeps these assets cached and stored while the scene is open, so any undo or redo finds its mask; an asset referenced only by an entry that was dropped past 50 is no longer listed.
+The session keeps these mask planes in the history entries while the scene is open, so any undo or redo restores its mask; an asset referenced only by an entry that was dropped past 50 is no longer listed.
 
 ## Derivations and reconcile
 
@@ -1832,7 +1868,7 @@ NEED_OPS: Readonly<Record<Need['kind'], readonly AnalysisOp[]>>;
 
 ### The draw order
 
-`layers` returns the plate's layer first, then one layer per object.
+`layers` returns the plate's layer first, then one layer per visible object.
 The objects are sorted far to near by `produced.depth.median`, a disparity in which 0 is the farthest point and 1 the nearest, so a smaller median draws earlier.
 An object whose depth statistics are null sorts nearest, after every object that has them.
 Objects with the same median, or with null statistics, keep their order in `doc.objects`.
@@ -1874,7 +1910,8 @@ The distance is computed with the exact two-pass distance transform of Felzenszw
 
 ### The plate, the anchor, and the assets
 
-`plateNeeded(doc)` is true when the scene has objects, `motion.enabled` is on and something moves (`motion.orbit` is above 0, or any object's motion is not `none`), and the objects' mask ids, sorted as `sortedMasks` sorts them (see "Products and the dropped source"), differ from `analysis.plate.forMasks` or no plate exists.
+`plateNeeded(doc)` is true when the scene has a hidden object or enabled Motion moves a layer, and the current mask ids differ from `analysis.plate.forMasks` or no plate exists.
+Hidden masks remain part of that freshness comparison and the inpaint hole.
 With motion off a loop is the still's scene with moving grain, so an object's motion counts only while `motion.enabled` is on; an `object.set` that gives an object motion turns it on (see "Edits and the reducer"), but a later `motion { enabled: false }` turns it off with the object's motion kept.
 A loop at `orbit` 0 with no object motion moves no layer under the identity camera and needs no plate.
 
@@ -1953,6 +1990,30 @@ objectMotionBound(doc: SceneDocument, id: ObjectId): Vec2;
 The renderer is not built yet.
 The functions over plain numbers, `cycleTurn`, `cameraOffset`, `parallaxReach`, `parallaxDisplacement`, `bobOffset`, `swayAngle`, `swayDisplacement`, and `wobbleDisplacement`, with `objectDisplacement`'s choice among them, are the formulas the geometry pass and object motion are to evaluate on the GPU and test their shaders against.
 `frameCount`, `loopPhase`, `parallaxClamp`, `cameraRadius`, and `objectMotionBound` are computed once per frame or per scene on the CPU and are to reach the shaders as inputs.
+
+### Live Parallax
+
+The viewer rail has Motion, Symbols and Parallax.
+`session/view-driver.ts` owns one render clock for Parallax, fed by `session/window.ts` (camera face tracking) and `session/tilt.ts` (device orientation).
+Both sources start in the enable gesture, so iOS's orientation permission call runs before any await.
+Each source owns its permission, timeout and cleanup; an unavailable source contributes the centered target without stopping the other.
+The status names the running sources: `Parallax: camera and tilt`, `Parallax: camera`, or `Parallax: tilt`.
+If both fail, Parallax turns off and reports their failure sentences.
+
+The camera's front-facing pixels are unmirrored; the face target mirrors the detected x coordinate.
+Tilt captures a fresh physical rest pose on every enable and maps the difference through `screenTilt`.
+The pure mapping selects an orientation-type row and the effective angle, preserving PH3's quarter-turn signs until the real iPad readings justify changing the table.
+The angle comes from `screen.orientation.angle`, then `window.orientation`, then zero.
+Each source target clamps to 0 through 1, their offsets about 0.5 are summed and clamped again, and the fused target follows the existing 120 ms exponential smoothing and `parallaxClamp` gain.
+Parallax keeps the existing plate request and Motion frame rules.
+New documents start at `motion.parallax: 2`; loading saved documents preserves their amounts and the legacy migration retains amount 1.
+
+The Parallax node's Debug toggle shows a 200 px panel over the stage, with the matching tracked camera frame and square detection box, beta, gamma, screen type, native and legacy screen angles, mapped angle, both source targets and the rendered fused offset.
+The frame copy stays in the session after inference consumes the bitmap; the UI draws it and the accent box to a separate 2D canvas.
+Diagnostics refresh only while the panel is mounted, and the panel is never passed to the renderer or exporter.
+On the phone its bottom edge is 12 px above the collapsed status sheet, preserving readable status and diagnostics.
+The node switch and the rail's `parallax-enabled` button share the session state.
+`window.track`, `phone.tilt` and `phone.layout` exercise the real face worker, source fusion, failure isolation, stop paths, diagnostics and phone layout.
 
 ### The loop crop
 

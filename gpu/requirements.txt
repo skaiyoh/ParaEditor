@@ -1,0 +1,13 @@
+# Exact packages already present in the platform image + GP0/GP1 overlay.
+# Audit manifest, not permission to replace the platform's PyTorch/ROCm stack.
+# No new Python package is needed by GP2; HTTP uses the standard library.
+torch==2.13.0+rocm10.0.0
+torchvision==0.28.0+rocm10.0.0
+numpy==2.5.2
+Pillow==12.3.0
+opencv-python-headless==4.13.0.92
+hydra-core==1.3.2
+omegaconf==2.3.0
+antlr4-python3-runtime==4.9.3
+iopath==0.1.10
+portalocker==3.2.0

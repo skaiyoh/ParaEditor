@@ -143,6 +143,13 @@ export function editCases(): readonly EditCase[] {
       outcome: 'invalid',
     },
 
+    { name: 'object rename', doc: five, edit: { kind: 'object.rename', id: SUBJECT, name: 'Named layer' }, outcome: 'applied' },
+    { name: 'object hide', doc: five, edit: { kind: 'object.hide', id: SUBJECT }, outcome: 'applied' },
+    { name: 'object show', doc: () => { const doc = five(); return { ...doc, objects: doc.objects.map((object) => ({ ...object, hidden: true })) }; }, edit: { kind: 'object.show', id: SUBJECT }, outcome: 'applied' },
+    { name: 'object rename empty', doc: five, edit: { kind: 'object.rename', id: SUBJECT, name: '   ' }, outcome: 'invalid' },
+    { name: 'object rename too long', doc: five, edit: { kind: 'object.rename', id: SUBJECT, name: 'x'.repeat(81) }, outcome: 'invalid' },
+    { name: 'object hide unknown id', doc: five, edit: { kind: 'object.hide', id: objectId(99) }, outcome: 'unknown-id' },
+
     { name: 'object set, motion turns motion on', doc: minimalWithObject, edit: { kind: 'object.set', id: objectId(0), patch: { motion: { kind: 'bob', amount: 0.4 } } }, outcome: 'applied' },
     { name: 'object set, motion with motion on', doc: five, edit: { kind: 'object.set', id: SUBJECT, patch: { motion: { kind: 'sway', amount: 0.2 } } }, outcome: 'applied' },
     { name: 'object set, motion none', doc: five, edit: { kind: 'object.set', id: SUBJECT, patch: { motion: { kind: 'none' } } }, outcome: 'applied' },

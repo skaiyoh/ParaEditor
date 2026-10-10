@@ -1,9 +1,10 @@
 import type { DemoSession } from './scene.ts';
-import type { AnalysisSnapshot } from './driver.ts';
+import type { AnalysisDriver, AnalysisSnapshot } from './driver.ts';
 import type { SceneDocument } from '../core/types.ts';
 import { plateNeeded } from '../core/derive.ts';
 import type { StylePatch } from '../core/edits.ts';
 import type { RendererDebug } from '../render/types.ts';
+import type { SelectionDebug } from '../render/debug.ts';
 import { isObjectId, isSceneId } from '../core/ids.ts';
 import type { Oklch, Plane } from '../core/raster.ts';
 import { applyEdit } from '../core/reduce.ts';
@@ -21,8 +22,9 @@ export type DemoTestSurface = {
   select(id: string | null): void;
   setRecolor(color: Oklch | null): void;
   reset(): void;
-  objects(): readonly { readonly id: string; readonly subject: boolean; readonly recolor: SceneDocument['objects'][number]['recolor']; readonly bounds: SceneDocument['objects'][number]['produced']['bounds']; readonly depth: SceneDocument['objects'][number]['produced']['depth']; readonly selected: boolean }[];
+  objects(): readonly { readonly id: string; readonly name: string; readonly hidden: boolean; readonly subject: boolean; readonly recolor: SceneDocument['objects'][number]['recolor']; readonly bounds: SceneDocument['objects'][number]['produced']['bounds']; readonly depth: SceneDocument['objects'][number]['produced']['depth']; readonly selected: boolean }[];
   analysis(): AnalysisSnapshot;
+  analysisDiagnostics(): ReturnType<AnalysisDriver['diagnostics']>;
   requestPlate(): Promise<void>;
   injectMask(plane: { width: number; height: number; data: Uint8Array }): void;
   platePixel(x: number, y: number): readonly number[];
@@ -32,6 +34,7 @@ export type DemoTestSurface = {
   setMotion(patch: Partial<SceneDocument['motion']>): void;
   document(): SceneDocument | null;
   refinement(): ReturnType<DemoSession['refinementProbe']>;
+  refinementMask(): { readonly width: number; readonly height: number; readonly bytes: readonly number[] } | null;
   projectMasks(): readonly { readonly asset: string; readonly width: number; readonly height: number; readonly bytes: readonly number[] }[];
   projects(): ReturnType<DemoSession['projects']['snapshot']> & ReturnType<DemoSession['projects']['diagnostics']>;
   openProject(id: string): Promise<boolean>;
@@ -42,12 +45,14 @@ export type DemoTestSurface = {
   setFry(f: number): void;
   injectDepth(plane: Plane<'f32'> | null): void;
   injectFace(center: Vec2 | null): void;
+  injectCameraFrame(frame: ImageData, face: Parameters<DemoSession['injectCameraFrame']>[1]): void;
+  parallaxDebug(): ReturnType<DemoSession['parallaxDebug']>;
   injectOrientation(orientation: Orientation): void;
   injectScreenAngle(angle: number | null): void;
   windowReady(): boolean;
   windowFrames(): number;
   windowTracks(): readonly MediaStreamTrack[];
-  readonly render: RendererDebug | null;
+  readonly render: (RendererDebug & Partial<SelectionDebug>) | null;
 };
 
 export function demoTestHooks(session: DemoSession): DemoTestSurface {
@@ -73,10 +78,11 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
     reset: () => session.reset(),
     objects() {
       const scene = session.snapshot().scene;
-      return scene?.doc.objects.map((object) => ({ id: object.id, subject: object.subject, recolor: object.recolor,
+      return scene?.doc.objects.map((object) => ({ id: object.id, name: object.name, hidden: object.hidden, subject: object.subject, recolor: object.recolor,
         bounds: object.produced.bounds, depth: object.produced.depth, selected: scene.selected === object.id })) ?? [];
     },
     analysis: () => session.analysis.snapshot(),
+    analysisDiagnostics: () => session.analysis.diagnostics(),
     requestPlate: () => session.requestPlateIfNeeded(),
     injectMask: (plane) => session.injectMask(plane),
     platePixel(x, y) {
@@ -101,6 +107,11 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
     setMotion: (patch) => session.setMotion(patch),
     document: () => session.snapshot().scene?.doc ?? null,
     refinement: () => session.refinementProbe(),
+    refinementMask() {
+      const asset = session.refinementProbe()?.previewAsset;
+      const mask = [...session.products.masks].find(([id]) => id === asset)?.[1];
+      return mask === undefined ? null : { ...mask.size, bytes: Array.from(mask.data) };
+    },
     projectMasks() {
       const assets = new Set(session.snapshot().scene?.doc.objects.map((object) => object.produced.mask.asset));
       return [...session.products.masks].filter(([asset]) => assets.has(asset)).map(([asset, mask]) => ({ asset, ...mask.size, bytes: Array.from(mask.data) }));
@@ -117,7 +128,7 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
     products() {
       const scene = session.snapshot().scene;
       const state = session.snapshot();
-      return { generation: session.analysis.generation(), depth: session.products.depths.size, masks: session.products.masks.size, plates: session.products.plates.size, plateSize: scene?.plate?.size ?? null, guideSize: session.analysis.guide()?.size ?? null, plateNeeded: scene !== null && (state.windowEnabled || state.tiltEnabled ? windowPlateNeeded(scene.doc) : plateNeeded(scene.doc)) };
+      return { generation: session.analysis.generation(), depth: session.products.depths.size, masks: session.products.masks.size, plates: session.products.plates.size, plateSize: scene?.plate?.size ?? null, guideSize: session.analysis.guide()?.size ?? null, plateNeeded: scene !== null && (state.parallaxEnabled ? windowPlateNeeded(scene.doc) : plateNeeded(scene.doc)) };
     },
     setStyle: (patch) => session.setStyle(patch),
     setSymbols: (patch) => {
@@ -128,6 +139,8 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
     },
     setFry: (f) => session.setFry(f),
     injectFace: (center) => session.injectFace(center),
+    injectCameraFrame: (frame, face) => session.injectCameraFrame(frame, face),
+    parallaxDebug: () => session.parallaxDebug(),
     injectOrientation: (orientation) => session.injectOrientation(orientation),
     injectScreenAngle,
     windowReady: () => session.windowReady(),

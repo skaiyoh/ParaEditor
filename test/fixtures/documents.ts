@@ -84,6 +84,7 @@ export function minimalDocument(): SceneDocument {
 const subject: SceneObject = {
   id: OBJECT_IDS[0],
   name: 'Object 1',
+  hidden: false,
   subject: true,
   recolor: { kind: 'target', color: { l: 0.79, c: 0.27, h: 142 } },
   symbols: 'slider',
@@ -108,6 +109,7 @@ const subject: SceneObject = {
 const box: SceneObject = {
   id: OBJECT_IDS[1],
   name: 'Object 2',
+  hidden: false,
   subject: false,
   recolor: { kind: 'none' },
   symbols: 'never',
