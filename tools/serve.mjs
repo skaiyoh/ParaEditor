@@ -12,7 +12,7 @@
 // fixture's master as raw RGBA bytes (/dev/synth/master).
 // Production mode, which tools/start.mjs runs, has none of them, writes
 // nothing to disk, and answers 404 for /dev and /api and every path under
-// them, however the request spells them, and for a file under dev/ or api/ of
+// them, except the empty GET /api/projects absence probe (204), and for a file under dev/ or api/ of
 // its root reached through any mount. A request Node's HTTP parser rejects
 // gets Node's own answer before this server sees it.
 // docs/ARCHITECTURE.md ("Dev server") documents every route, the fault
@@ -20,7 +20,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, createReadStream, createWriteStream, mkdirSync } from 'node:fs';
-import { mkdir, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
@@ -34,7 +34,7 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_ROW_BYTES = 1024 * 1024;
 /** Largest binary capture the sink accepts. */
 const MAX_CAPTURE_BYTES = 256 * 1024 * 1024;
-const FAULT_PREFIXES = ['/models/', '/vendor/ort/'];
+const FAULT_PREFIXES = ['/models/', '/vendor/ort/', '/api/projects'];
 /** Longest delay a slow fault takes: setTimeout's limit. */
 const MAX_SLOW_MS = 2 ** 31 - 1;
 /** Where browsers send the report-only CSP's violation reports, in dev mode. */
@@ -353,6 +353,9 @@ function createServer(options, contract, firstSeq, tls) {
   const appliedFault = new WeakMap();
   const writeLog = mode.dev ? createLogWriter(options.requestLog) : null;
   const synthMaster = mode.dev ? createSynthMasters() : null;
+  const projectQueues = new Map();
+  const projectTombstones = new Set();
+  let projectSerialization = null;
   let seq = firstSeq;
 
   const csp = contract.all['Content-Security-Policy'];
@@ -567,6 +570,132 @@ function createServer(options, contract, firstSeq, tls) {
     return sendJson(req, res, 200, urlPath, { ok: true, ...capture });
   }
 
+  // Dev fixture only. UUID and content-hash path segments never become arbitrary paths.
+  const PROJECT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+  const MASK_ID = /^[a-f0-9]{64}$/;
+  const projectsRoot = path.join(options.results, 'projects');
+  async function atomicFile(file, bytes) {
+    await mkdir(path.dirname(file), { recursive: true });
+    const partial = `${file}.${randomBytes(6).toString('hex')}.part`;
+    try { await writeFile(partial, bytes, { flag: 'wx' }); await rename(partial, file); }
+    finally { await unlink(partial).catch(() => {}); }
+  }
+  async function projectJson(file) {
+    try { return JSON.parse(await readFile(file, 'utf8')); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  }
+  async function handleProjects(req, res, urlPath, fault) {
+    if (fault?.kind === 'http500') return sendJson(req, res, 500, urlPath, { error: 'The project store is unavailable.' });
+    const sendBytes = (status, bytes, contentType) => {
+      head(req, res, status, urlPath, { 'Content-Length': String(bytes.length) }, { contentType });
+      if (fault?.kind === 'corrupt') return res.end(bytes.map((value) => value ^ 0xff));
+      if (fault?.kind === 'truncate' && fault.bytes < bytes.length) {
+        res.flushHeaders();
+        res.write(bytes.subarray(0, fault.bytes));
+        return res.socket?.end();
+      }
+      return res.end(bytes);
+    };
+    const reply = (status, value) => sendBytes(status, Buffer.from(`${JSON.stringify(value)}\n`), 'application/json');
+    const [, , , id, resource, asset, extra] = urlPath.split('/');
+    const bad = (sentence) => reply(400, { error: sentence });
+    const missing = () => reply(404, { error: 'The project was not found.' });
+    if (urlPath !== '/api/projects' && (!PROJECT_ID.test(id ?? '') || extra !== undefined ||
+        (resource === 'masks' ? !MASK_ID.test(asset ?? '') : asset !== undefined) ||
+        (resource !== undefined && !['scene', 'photo', 'thumbnail', 'masks'].includes(resource)))) {
+      return bad('The project path is invalid.');
+    }
+    // Retain a PUT before a slow response so late work is still revision/tombstone checked.
+    const limit = resource === 'scene' ? MAX_ROW_BYTES : resource === 'thumbnail' ? 59_999 : resource === 'masks' ? 16 * 1024 * 1024 : MAX_CAPTURE_BYTES;
+    const bytes = req.method === 'PUT' ? await readBody(req, limit) : null;
+    if (fault?.kind === 'slow') await wait(fault.ms);
+    if (fault?.kind === 'stall') {
+      head(req, res, 200, urlPath, {}, { contentType: 'application/json' }); res.flushHeaders(); return;
+    }
+    if (urlPath === '/api/projects') {
+      if (req.method !== 'GET') return sendText(req, res, 405, urlPath, 'method not allowed');
+      const projects = [];
+      let ids;
+      try { ids = await readdir(projectsRoot); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; ids = []; }
+      for (const id of ids) {
+        if (!PROJECT_ID.test(id)) continue;
+        const scene = await projectJson(path.join(projectsRoot, id, 'scene.json'));
+        if (scene === null) continue;
+        projects.push({ id, name: scene.document.title, updatedAt: scene.updatedAt, thumbnail: `/api/projects/${id}/thumbnail` });
+      }
+      projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
+      return reply(200, { projects });
+    }
+    const dir = path.join(projectsRoot, id);
+    const execute = async () => {
+      if (resource === undefined) {
+        if (req.method !== 'DELETE') return sendText(req, res, 405, urlPath, 'method not allowed');
+        projectTombstones.add(id);
+        try { await stat(dir); } catch (error) { if (error.code === 'ENOENT') return missing(); throw error; }
+        await rm(dir, { recursive: true });
+        return reply(200, { ok: true });
+      }
+      const file = path.join(dir, resource === 'scene' ? 'scene.json' : resource === 'masks' ? `masks/${asset}` : resource);
+      if (req.method === 'GET') {
+        if (resource === 'scene') {
+          const scene = await projectJson(file);
+          return scene === null ? missing() : reply(200, { document: scene.document, masks: scene.masks, revision: scene.revision ?? 0 });
+        }
+        let savedBytes;
+        try { savedBytes = await readFile(file); }
+        catch (error) { if (error.code === 'ENOENT') return missing(); throw error; }
+        const type = resource === 'thumbnail' ? 'image/jpeg' : resource === 'masks' ? 'application/octet-stream' : (await projectJson(path.join(dir, 'photo.json')))?.contentType ?? 'application/octet-stream';
+        return sendBytes(200, savedBytes, type);
+      }
+      if (req.method !== 'PUT') return sendText(req, res, 405, urlPath, 'method not allowed');
+      if (projectTombstones.has(id)) return reply(410, { error: 'The project was deleted.' });
+      const type = String(req.headers['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase();
+      if (bytes === null || bytes.length === 0) return bad('The project body is empty or too large.');
+      if (resource === 'scene') {
+        if (type !== 'application/json') return bad('The project scene must be JSON.');
+        let scene;
+        try {
+          projectSerialization ??= import('../src/projects/serialize.ts');
+          const { deserializeScene, serializeDocument } = await projectSerialization;
+          const parsed = deserializeScene(JSON.parse(bytes.toString('utf8')));
+          if (parsed.document.id !== id) return bad('The project document id must match its path.');
+          scene = { document: serializeDocument(parsed.document), masks: parsed.masks, revision: parsed.revision, updatedAt: new Date().toISOString() };
+        } catch { return bad('The project scene or its mask metadata is invalid.'); }
+        const stored = await projectJson(file);
+        if (stored !== null && scene.revision <= (stored.revision ?? 0)) return reply(409, { error: 'The project scene revision must increase.' });
+        // If bytes already exist, reject a size mismatch; metadata may also arrive first.
+        for (const [asset, size] of Object.entries(scene.masks)) {
+          try {
+            const info = await stat(path.join(dir, 'masks', asset));
+            if (info.size !== size.width * size.height) return bad('The project mask size does not match its bytes.');
+          } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        }
+        await atomicFile(file, JSON.stringify(scene));
+      } else if (resource === 'thumbnail') {
+        if (type !== 'image/jpeg' || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes.at(-2) !== 0xff || bytes.at(-1) !== 0xd9) return bad('The project thumbnail must be a JPEG under 60 KB.');
+        await atomicFile(file, bytes);
+      } else if (resource === 'masks') {
+        if (type !== 'application/octet-stream') return bad('The project mask must be raw bytes.');
+        const scene = await projectJson(path.join(dir, 'scene.json'));
+        const size = scene?.masks[asset];
+        if (size !== undefined && bytes.length !== size.width * size.height) return bad('The project mask size does not match its bytes.');
+        if (createHash('sha256').update(bytes).digest('hex') !== asset) return bad('The project mask bytes do not match their asset id.');
+        await atomicFile(file, bytes);
+      } else {
+        if (!/^(image\/[a-z0-9.+-]+|application\/octet-stream)$/.test(type)) return bad('The project photo must carry its original content type.');
+        await atomicFile(file, bytes);
+        await atomicFile(path.join(dir, 'photo.json'), JSON.stringify({ contentType: type }));
+      }
+      return reply(200, { ok: true });
+    };
+    // Reads and writes of one project cannot race deletion or each other's atomic files.
+    const queued = (projectQueues.get(id) ?? Promise.resolve()).catch(() => {}).then(execute);
+    projectQueues.set(id, queued);
+    try { return await queued; }
+    finally { if (projectQueues.get(id) === queued) projectQueues.delete(id); }
+  }
+
   /**
    * POST stores one CSP violation report, in any media type browsers use
    * (application/csp-report, application/reports+json), as a line of
@@ -638,7 +767,16 @@ function createServer(options, contract, firstSeq, tls) {
       } catch {
         return badPath(req, res, '/', 'bad path encoding');
       }
+      if (!mode.dev && req.method === 'GET' && urlPath === '/api/projects') {
+        head(req, res, 204, urlPath);
+        return res.end();
+      }
       if (!mode.dev && namesDevOnly(urlPath)) return sendText(req, res, 404, urlPath, 'not found');
+      if (mode.dev && (urlPath === '/api/projects' || urlPath.startsWith('/api/projects/'))) {
+        const fault = faults.take(urlPath);
+        if (fault !== null) appliedFault.set(res, fault.spec);
+        return await handleProjects(req, res, urlPath, fault);
+      }
       if (Object.hasOwn(endpoints, urlPath)) return await endpoints[urlPath](req, res, urlPath, query);
       const mount = mounts.find((m) => urlPath.startsWith(m.prefix));
       const readable = req.method === 'GET' || req.method === 'HEAD';

@@ -4,12 +4,13 @@ import type { DemoSession } from '../session/scene.ts';
 import { RangeControl } from './controls.tsx';
 import { Swatches } from './swatches.tsx';
 
-export function PhoneFrame({ state, session, status, busy, touch, modelsReady, onOpen, onSample, onDownload, onMotion, onSymbols, onWindow, onTilt, children }: {
+export function PhoneFrame({ state, session, status, busy, touch, modelsReady, projectsOpen, projects, onProjects, onOpen, onSample, onDownload, onMotion, onSymbols, onWindow, onTilt, children }: {
   readonly state: ReturnType<DemoSession['snapshot']>; readonly session: DemoSession;
   readonly status: string; readonly busy: boolean; readonly touch: boolean; readonly modelsReady: boolean;
   readonly onOpen: (file: File | undefined) => void; readonly onSample: () => void;
   readonly onDownload: () => void; readonly onMotion: () => void; readonly onSymbols: () => void;
   readonly onWindow: () => void; readonly onTilt: () => void; readonly children: ComponentChildren;
+  readonly projectsOpen: boolean; readonly projects: ComponentChildren; readonly onProjects: () => void;
 }) {
   const { scene, windowEnabled, tiltEnabled } = state;
   const cameraInput = useRef<HTMLInputElement>(null);
@@ -25,6 +26,7 @@ export function PhoneFrame({ state, session, status, busy, touch, modelsReady, o
     <header class="top-bar phone-strip">
       <span class="photo-name" title={scene?.doc.frame.original.name}>{scene?.doc.frame.original.name ?? 'No photo open'}</span>
       <div class="action-rail" aria-label="Photo actions">
+        <button type="button" data-testid="projects-toggle" aria-pressed={projectsOpen} onClick={onProjects}>Projects</button>
         {touch && <button type="button" data-testid="take-photo" onClick={takePhoto}>Take a photo</button>}
         <button type="button" disabled={scene === null || busy} onClick={() => session.reset()}>Reset</button>
       </div>
@@ -34,17 +36,18 @@ export function PhoneFrame({ state, session, status, busy, touch, modelsReady, o
     </header>
     <section class="phone-stage" aria-label="Photo viewer" aria-busy={busy}>
       {children}
-      {scene === null && <div class="empty-stage"><div class="empty-actions">
+      {projectsOpen && projects}
+      {scene === null && !projectsOpen && <div class="empty-stage"><div class="empty-actions">
         {touch && <button type="button" onClick={takePhoto}>Take a photo</button>}
         <button type="button" onClick={onSample}>Try a sample</button>
       </div></div>}
     </section>
-    <section class="phone-sheet" aria-label="Photo controls">
+    <section class="phone-sheet" aria-label="Photo controls" hidden={projectsOpen}>
       <button class="sheet-handle" type="button" aria-expanded={expanded} aria-controls="phone-tools"
         aria-label={expanded ? 'Hide photo controls' : 'Show photo controls'} onClick={() => setExpanded((open) => !open)}>
         <span class="status-line" data-testid="status" role="status">{status}</span>
       </button>
-      <div id="phone-tools" class="phone-tools" hidden={!expanded}>
+      <div id="phone-tools" class="phone-tools" hidden={!expanded || projectsOpen}>
         {scene !== null && <>
           <section class="node" aria-label="Fry">
             <RangeControl id="style-fry" label="Fry" min={0} max={1} step={0.01} value={scene.doc.style.fry} onInput={(value) => session.setFry(value)} />

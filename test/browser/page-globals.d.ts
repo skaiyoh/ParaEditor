@@ -36,6 +36,10 @@ declare global {
         exportFrame(frame: number): Promise<Blob>;
         setMotion(patch: Partial<SceneDocument['motion']>): void;
         document(): SceneDocument | null;
+        projectMasks(): readonly { readonly asset: string; readonly width: number; readonly height: number; readonly bytes: readonly number[] }[];
+        projects(): { readonly current: string | null; readonly state: 'saving' | 'saved' | 'failed' | 'absent'; readonly states: ReadonlyMap<string, 'saving' | 'saved' | 'failed'>; readonly retainedJobs: number; readonly pendingSaves: number };
+        openProject(id: string): Promise<boolean>;
+        deleteProject(id: string): Promise<boolean>;
         products(): { generation: number; depth: number; masks: number; plates: number; plateSize: { width: number; height: number } | null; guideSize: { width: number; height: number } | null; plateNeeded: boolean };
         setStyle(patch: StylePatch): void;
         setSymbols(patch: Partial<SceneDocument['symbols']>): void;

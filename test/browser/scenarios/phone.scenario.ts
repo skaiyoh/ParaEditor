@@ -65,7 +65,7 @@ export const scenarios: readonly Scenario[] = [{
       return untouched;
     });
     try {
-      await page.click('.action-rail button:nth-child(2)');
+      await page.click('[data-testid="try-sample"]');
       await page.waitFor('sample depth and decoder', z.literal(true), () => {
         const analysis = window.__noisyTest?.demo.analysis();
         return analysis?.depth && analysis.decoderReady && !analysis.alive.heavy ? true : null;

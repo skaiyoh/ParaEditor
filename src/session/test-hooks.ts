@@ -4,7 +4,7 @@ import type { SceneDocument } from '../core/types.ts';
 import { plateNeeded } from '../core/derive.ts';
 import type { StylePatch } from '../core/edits.ts';
 import type { RendererDebug } from '../render/types.ts';
-import { isObjectId } from '../core/ids.ts';
+import { isObjectId, isSceneId } from '../core/ids.ts';
 import type { Oklch, Plane } from '../core/raster.ts';
 import { applyEdit } from '../core/reduce.ts';
 import type { Vec2 } from '../core/motion.ts';
@@ -31,6 +31,10 @@ export type DemoTestSurface = {
   exportFrame(frame: number): Promise<Blob>;
   setMotion(patch: Partial<SceneDocument['motion']>): void;
   document(): SceneDocument | null;
+  projectMasks(): readonly { readonly asset: string; readonly width: number; readonly height: number; readonly bytes: readonly number[] }[];
+  projects(): ReturnType<DemoSession['projects']['snapshot']> & ReturnType<DemoSession['projects']['diagnostics']>;
+  openProject(id: string): Promise<boolean>;
+  deleteProject(id: string): Promise<boolean>;
   products(): { generation: number; depth: number; masks: number; plates: number; plateSize: { width: number; height: number } | null; guideSize: { width: number; height: number } | null; plateNeeded: boolean };
   setStyle(patch: StylePatch): void;
   setSymbols(patch: Partial<SceneDocument['symbols']>): void;
@@ -95,6 +99,19 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
     },
     setMotion: (patch) => session.setMotion(patch),
     document: () => session.snapshot().scene?.doc ?? null,
+    projectMasks() {
+      const assets = new Set(session.snapshot().scene?.doc.objects.map((object) => object.produced.mask.asset));
+      return [...session.products.masks].filter(([asset]) => assets.has(asset)).map(([asset, mask]) => ({ asset, ...mask.size, bytes: Array.from(mask.data) }));
+    },
+    projects: () => ({ ...session.projects.snapshot(), ...session.projects.diagnostics() }),
+    openProject(id) {
+      if (!isSceneId(id)) throw new Error('Invalid project id.');
+      return session.openProject(id);
+    },
+    deleteProject(id) {
+      if (!isSceneId(id)) throw new Error('Invalid project id.');
+      return session.projects.remove(id);
+    },
     products() {
       const scene = session.snapshot().scene;
       const state = session.snapshot();

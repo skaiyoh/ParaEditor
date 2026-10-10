@@ -150,7 +150,7 @@ export function readImports(root: string, rels: readonly string[]): ReadonlyMap<
 
 // The module map.
 
-const LEAVES = ['photo', 'analysis', 'render', 'export', 'store', 'scenefile'] as const;
+const LEAVES = ['photo', 'analysis', 'render', 'export', 'store', 'scenefile', 'projects'] as const;
 type Leaf = (typeof LEAVES)[number];
 const DIRECTORIES = ['app', 'core', 'platform', 'session', 'ui', 'dev', ...LEAVES] as const;
 type ModuleName = 'main' | (typeof DIRECTORIES)[number];
@@ -212,7 +212,8 @@ function edgeRule(from: ModuleFile, to: ModuleFile, imp: ImportRecord): string |
     case 'render':
     case 'export':
     case 'store':
-    case 'scenefile': {
+    case 'scenefile':
+    case 'projects': {
       if (within(from.module, 'core', 'platform')) return null;
       if (from.module === 'export' && to.module === 'render') {
         const onlyRenderer = imp.typeOnly && imp.names !== null && imp.names.length > 0 && imp.names.every((n) => n === 'Renderer');

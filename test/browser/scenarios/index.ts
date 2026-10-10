@@ -24,6 +24,7 @@ import { scenarios as loop } from './loop.scenario.ts';
 import { scenarios as view } from './view.scenario.ts';
 import { scenarios as windowScenarios } from './window.scenario.ts';
 import { scenarios as phone } from './phone.scenario.ts';
+import { scenarios as projects } from './projects.scenario.ts';
 import { scenarios as stereo } from './stereo.scenario.ts';
 import { scenarios as symbols } from './symbols.scenario.ts';
 import { scenarios as surface } from './surface.scenario.ts';
@@ -60,5 +61,6 @@ export const SCENARIO_FILES = {
   'view.scenario.ts': view,
   'window.scenario.ts': windowScenarios,
   'phone.scenario.ts': phone,
+  'projects.scenario.ts': projects,
   'stereo.scenario.ts': stereo,
 } as const satisfies Readonly<Record<string, readonly Scenario[]>>;

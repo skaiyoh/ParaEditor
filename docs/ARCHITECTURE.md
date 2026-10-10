@@ -1288,6 +1288,85 @@ Every refusal is one sentence on stderr that says what to do, and a failed step 
 `test/start.test.ts` exercises exits 0, 1, 2, 3, and 130 (a Ctrl-C while checking Tailscale) through `test/support/tailscale-stub.ts`, a stand-in `tailscale` that answers `status --json`, `serve status [--json]`, a foreground `serve --https=443 <target>` that writes its configuration and stays up until signalled, `serve --https=443 off`, and `serve reset`, can delay any answer, and records every call and signal; it runs either as the `tailscale` script itself or, as the real `/usr/local/bin/tailscale` runs the CLI, as that script's child.
 The stub models the real command and is not it: whether the real foreground share removes its own configuration when it stops, and whether `off` removes a foreground share's leftover, are checked only by a run against a real tailnet.
 
+## Shared projects and the Projects API
+
+`src/projects/` is a leaf importing only itself and `core/`.
+`serialize.ts` writes the whole scene document as JSON and reads it through `parseDocument`, including version migration.
+It validates exactly one size entry for each distinct object-mask asset, a nonnegative safe-integer scene revision, and represents masks as raw row-major u8 bytes with no header.
+Mask planes are bounded to 4096 px per side and 16 MiB, and byte length must equal width times height.
+`store.ts` uses same-origin fetch with a 15 second request timeout and verifies loaded photo and mask content hashes.
+Every successful mutation reads and validates its complete `{ ok: true }` JSON body within that timeout.
+Headers alone never complete a write; stalled or malformed acknowledgements fail it.
+UI reaches it through `src/session/projects.ts` and `scene.ts`, preserving `ui -> session -> leaves -> core`.
+The import checker recognizes projects as a leaf.
+
+One GET /api/projects probe runs when the page's project session is created.
+All writes, loads, deletes and list refreshes wait for that probe.
+A 204 or 404 permanently disables the store for that page load, cancels pending saves and leaves an empty Projects panel whose only sentence is No project store on this server.
+The local production server returns a bodyless 204 for this GET only; 404 remains supported for a hosted server whose store is not deployed yet.
+Photo imports and editing keep working without project requests after that initial probe.
+Other failures retain Not saved and permit later save/refresh attempts.
+The initial successful probe supplies the list without a duplicate refresh while it is in flight.
+
+The session starts the original-photo upload once a successful import has its new project id.
+While a new photo is fetched and decoded, the project session reports Saving instead of treating the temporarily absent current id as Saved.
+A committed import owns its fresh id; a refused import ends preparation and reports Not saved.
+Document and referenced-mask changes restart a 1500 ms trailing debounce; selection and status changes do not save.
+Each project's serial queue writes any unsaved photo, new immutable mask assets, the thumbnail, then scene JSON.
+Scene PUT is the final checkpoint; an older in-flight save cannot overwrite a newer queued edit in the same session.
+New projects start at revision zero; restored projects retain their saved revision, and each changed snapshot increments it before saving.
+The store atomically rejects a scene revision that is not strictly greater than the existing one with HTTP 409, including a request whose client timed out before the server finishes.
+HTTP 409 and 410 are terminal for that snapshot; the client preserves any newer pending snapshot and does not retry the refused one.
+A new import flushes the previous pending snapshot before replacing its renderer, and those writes finish under the previous id.
+Reset saves the reset document under the same id.
+Deletion stops autosave for that id, waits for queued writes, deletes its resources and drops its job, File and retained masks.
+DELETE 404 is success, including a first import whose photo upload failed before creating server resources.
+The fixture keeps an in-memory tombstone for every deleted id, including an unknown id, until the server restarts; all subsequent PUTs under it return HTTP 410 without writing.
+Continued edits of the deleted scene do not recreate it.
+Save failures remain in project state as Not saved until a later save succeeds, and never change the analysis status line.
+There is no cross-device merging; a device starts from the loaded revision and only a strictly greater scene revision can own the next checkpoint.
+
+Thumbnails come from the renderer's frame-zero still export without selection, downsampled with a 2D canvas to a 256 px long edge.
+They are JPEGs smaller than 60,000 bytes; the session tries decreasing JPEG qualities to enforce the bound.
+Projects reuse the 64 px layer row, a 48 px thumbnail, a name, an 11 px secondary saved time and a two-click Delete confirmation lasting three seconds.
+Desktop Projects replaces the left sidebar; phone Projects fills the stage above the toolbar while hiding the entire editing sheet, including its handle.
+With a store available, the panel refreshes on opening and every 15 seconds while visible.
+
+Project opening has a guarded preparation branch using importSource's current AbortController identity and generation.
+It loads scene, original photo and masks, decodes a File with the original filename and checks the candidate render while preserving the current document, selection, products, analysis readiness and autosave ownership.
+A preparation failure reports its error on the existing scene without cancelling that analysis or suspending its saves.
+Only a prepared project commits a new import generation: it flushes the previous project's thumbnail with its original renderer, publishes the first look using the saved id, then installs every mask by asset id and sets the whole saved document before sceneReady can start depth analysis.
+Selection is cleared and the normal analysis driver recomputes depth and any needed plate.
+A persisted plate whose pixels are absent is treated as missing only in the analysis driver's read projection so reconcile can rebuild it without discarding the persisted look.
+Obsolete imports close their decoded bitmaps and never publish or begin autosave.
+
+The same-origin API is JSON except for binary assets:
+
+| Request | Response or body |
+| --- | --- |
+| GET `/api/projects` | Available store: `{ projects: [{ id, name, updatedAt, thumbnail }] }`, newest server save first, then id for ties; thumbnail is `/api/projects/<id>/thumbnail`. Local production without a store: 204 with no body |
+| PUT or GET `/api/projects/<id>/scene` | `{ document, masks: { [asset]: { width, height } }, revision }`; document id equals path id, revision is a nonnegative safe integer; PUT revision must exceed the existing one or returns 409 |
+| PUT or GET `/api/projects/<id>/photo` | Original bytes and original image content type (application/octet-stream for untyped files); filename lives in document.frame.original.name |
+| PUT or GET `/api/projects/<id>/masks/<asset>` | application/octet-stream, u8 row-major bytes, SHA-256 equals asset id; dimensions live in scene metadata |
+| PUT or GET `/api/projects/<id>/thumbnail` | image/jpeg, less than 60,000 bytes |
+| DELETE `/api/projects/<id>` | Removes the scene and every asset beneath the id and tombstones the id for the server's lifetime; later PUTs return 410; missing-id 404 is success to the client |
+
+Successful mutations return `{ ok: true }` with HTTP 200.
+Missing projects or resources return 404; malformed paths, metadata, media types or bodies return 400 with `{ error: "One sentence." }`.
+All responses pass through the existing header contract; the CSP is unchanged.
+Scene JSON is limited to 1 MiB and original photos to 256 MiB in the dev fixture.
+PUTs can arrive before scene metadata; existing mask bytes are checked against dimensions when metadata arrives, and existing metadata is checked when mask bytes arrive.
+The client writes binary assets before scene JSON; only ids with a scene appear in the list.
+updatedAt in the list is the server's scene-write timestamp, independently of document.updatedAt.
+
+In dev mode, tools/serve.mjs persists atomic files under `<results>/projects/<id>/`, serializing each id's reads, writes and delete.
+scene.json contains the transport document, mask sizes, revision and server updatedAt; photo and thumbnail are binary, photo.json holds the content type, and masks/<asset> contains raw bytes.
+Legacy fixture metadata without a revision reads as revision zero; new scene PUTs must supply the revision.
+The existing path fault grammar accepts `/api/projects` for HTTP 500, slow, stalled, byte-inverted corrupt or connection-ending truncated API responses, including mutation acknowledgements.
+Production mode exposes only the bodyless GET absence probe and writes no project files; every other method or path under `/api/projects` remains 404 until the hosted Worker supplies the API.
+The local production server therefore cannot save projects before that Worker is connected.
+test/serve-projects.test.ts exercises this contract through real HTTP, and projects.autosave is the real-page dev scenario.
+
 ## Module map and the import graph
 
 Each module under `src/` belongs to the module named by its top-level directory, and `src/main.tsx` is its own:

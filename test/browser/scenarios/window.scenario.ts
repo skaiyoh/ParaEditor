@@ -15,7 +15,7 @@ export const scenarios: readonly Scenario[] = [{
     const { page } = t;
     await page.goto('/');
     await page.evaluate(z.literal(true), () => { performance.setResourceTimingBufferSize(2000); return true; });
-    await page.click('.action-rail button:nth-child(2)');
+    await page.click('[data-testid="try-sample"]');
     await page.waitFor('sample depth and decoder', z.literal(true), () => {
       const analysis = window.__noisyTest?.demo.analysis();
       return analysis?.depth && analysis.decoderReady && !analysis.alive.heavy ? true : null;

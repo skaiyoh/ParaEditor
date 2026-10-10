@@ -1,5 +1,5 @@
 import { newDocument, newObject } from '../core/defaults.ts';
-import { isAssetId, isSceneId, isObjectId, type AssetId, type ObjectId } from '../core/ids.ts';
+import { isAssetId, isSceneId, isObjectId, type AssetId, type ObjectId, type SceneId } from '../core/ids.ts';
 import { SCENE_VERSION } from '../core/migrate.ts';
 import { sceneDocumentSchema } from '../core/schema.ts';
 import type { SceneDocument } from '../core/types.ts';
@@ -28,6 +28,7 @@ import { LOOP_FPS } from '../render/loop.ts';
 import { createWindowDriver } from './window.ts';
 import { createTiltDriver, type Orientation } from './tilt.ts';
 import type { ViewHost } from './view-driver.ts';
+import { createProjectSession } from './projects.ts';
 
 /** D2a consumes doc and master; D3 makes fresh worker bitmaps from masterPixels. */
 export type DemoScene = {
@@ -99,6 +100,10 @@ export function createDemoSession() {
   };
   let pendingMask = Promise.resolve();
   let renderer: Renderer | null = null;
+  const projects = createProjectSession(() => {
+    if (renderer === null) throw new Error('The photo renderer is unavailable.');
+    return renderPng(renderer);
+  });
   let renderError: unknown = null;
   let stageCanvas: HTMLCanvasElement | null = null;
   const loop = createLoopStepper((frame) => { renderer?.renderFrame(frame); }, (error) => {
@@ -119,6 +124,7 @@ export function createDemoSession() {
       status = error instanceof Error ? error.message : String(error);
     }
     state = { status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), windowEnabled: windowView.enabled(), tiltEnabled: tiltView.enabled() };
+    if (scene !== null && readyScene?.generation === generation) projects.observe(scene.doc, products.masks);
     for (const listener of listeners) listener(state);
   };
   const setDocument = (doc: SceneDocument): void => {
@@ -136,7 +142,13 @@ export function createDemoSession() {
     }
   };
   const analysis = createAnalysisDriver({
-    read: () => state.scene, products, changed: () => publish(state), windowEnabled: () => viewEnabled(),
+    // A restored plate reference is persisted metadata, not a resident raster.
+    // Reconciliation must request the missing transient product without changing the saved look.
+    read: () => {
+      const scene = state.scene;
+      if (scene === null || scene.doc.analysis.plate === null || products.plates.has(scene.doc.analysis.plate.image.asset)) return scene;
+      return { ...scene, doc: { ...scene.doc, analysis: { ...scene.doc.analysis, plate: null } } };
+    }, products, changed: () => publish(state), windowEnabled: () => viewEnabled(),
     produce(product) {
       if (state.scene === null) return;
       if (product.kind === 'plate' && state.scene.doc.objects.length === 0) return;
@@ -192,7 +204,8 @@ export function createDemoSession() {
     if (viewEnabled()) {
       const view = activeView();
       loop.stop(); renderer.renderView(view.camera(), view.frame());
-    } else if (scene.doc.motion.enabled && readyScene?.generation === generation && readyScene.id === scene.doc.id && !plateNeeded(scene.doc)) {
+    } else if (scene.doc.motion.enabled && readyScene?.generation === generation && readyScene.id === scene.doc.id && !plateNeeded(scene.doc) &&
+      (scene.doc.analysis.plate === null || scene.plate !== null)) {
       if (loop.running()) renderer.renderFrame(loop.frame());
       loop.start(frameCount(scene.doc.motion, LOOP_FPS), scene.doc.id);
     } else {
@@ -264,7 +277,25 @@ export function createDemoSession() {
     }).finally(() => { tapControllers.delete(controller); });
     return pendingMask;
   }
-  async function importSource(source: (signal: AbortSignal) => Promise<File>): Promise<void> {
+  type LoadedProject = Awaited<ReturnType<typeof projects.load>>;
+  function installImported(imported: DemoScene, file: File, project: LoadedProject | null, current: number, refuseOnRenderError: boolean): void {
+    const scene = project === null ? imported : { ...imported, doc: { ...imported.doc, id: project.document.id } };
+    const previous = state.scene;
+    readyScene = { generation: current, id: scene.doc.id };
+    try { publish({ status: 'Ready', scene }, refuseOnRenderError); }
+    catch (error) { readyScene = null; scene.master.close(); throw error; }
+    baseline = scene.doc;
+    previous?.master.close();
+    if (project !== null) {
+      for (const [asset, mask] of project.masks) products.putMask(asset, mask);
+      setDocument(project.document);
+    }
+    projects.begin(file, state.scene?.doc ?? scene.doc, products.masks, project?.revision ?? null);
+  }
+  async function importSource(source: (signal: AbortSignal) => Promise<{
+    readonly file: File; readonly project: LoadedProject | null;
+  }>): Promise<boolean> {
+    projects.suspend();
     loop.stop(); stopView(); readyScene = null;
     importController?.abort();
     const controller = new AbortController();
@@ -276,22 +307,20 @@ export function createDemoSession() {
     const firstLook = retained === null ? null : { ...retained, doc: { ...retained.doc, analysis: { ...retained.doc.analysis, depth: null, plate: null }, objects: [] }, selected: null };
     publish({ status: 'Importing…', scene: firstLook });
     try {
-      const file = await source(controller.signal);
-      if (current !== generation) return;
-      const scene = await importScene(file);
-      if (current !== generation) { scene.master.close(); return; }
-      const previous = state.scene;
-      readyScene = { generation: current, id: scene.doc.id };
-      try { publish({ status: 'Ready', scene }, true); }
-      catch (error) { readyScene = null; scene.master.close(); throw error; }
-      baseline = scene.doc;
-      previous?.master.close();
-      await analysis.sceneReady(current, scene.masterPixels);
+      const { file, project } = await source(controller.signal);
+      if (current !== generation || controller.signal.aborted || importController !== controller) return false;
+      const imported = await importScene(file);
+      if (current !== generation || controller.signal.aborted || importController !== controller) { imported.master.close(); return false; }
+      installImported(imported, file, project, current, true);
+      await analysis.sceneReady(current, imported.masterPixels);
+      return current === generation;
     } catch (error) {
-      if (current === generation) {
+      if (current === generation && !controller.signal.aborted && importController === controller) {
         analysis.importFailed(current);
+        projects.openFailed();
         publish({ status: error instanceof Error ? error.message : String(error), scene: state.scene });
       }
+      return false;
     }
   }
   async function exportStereo(size: Size = STEREO_3DS_SIZE) {
@@ -301,7 +330,7 @@ export function createDemoSession() {
     return renderStereo(renderer, scene.doc, size);
   }
   return {
-    products,
+    products, projects,
     tap, select,
     setRecolor(color: Oklch | null): void {
       const id = state.scene?.selected;
@@ -333,15 +362,64 @@ export function createDemoSession() {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
-    importFile(file: File): Promise<void> { return importSource(async () => file); },
-    importUrl(url: string, name: string): Promise<void> {
-      return importSource(async (signal) => {
+    async importFile(file: File): Promise<void> { await importSource(async () => ({ file, project: null })); },
+    async importUrl(url: string, name: string): Promise<void> {
+      await importSource(async (signal) => {
         const target = new URL(url, location.href);
         if (target.origin !== location.origin) throw new Error('The sample must load from this site.');
         const response = await fetch(target, { signal });
         if (!response.ok) throw new Error(`The sample could not load (HTTP ${response.status}).`);
-        return new File([await response.blob()], name, { type: response.headers.get('content-type') ?? '' });
+        return { file: new File([await response.blob()], name, { type: response.headers.get('content-type') ?? '' }), project: null };
       });
+    },
+    async openProject(id: SceneId): Promise<boolean> {
+      importController?.abort();
+      const controller = new AbortController(); importController = controller;
+      const expected = generation;
+      const valid = (): boolean => expected === generation && importController === controller && !controller.signal.aborted;
+      let prepared: { readonly project: LoadedProject; readonly scene: DemoScene } | null = null;
+      publish({ ...state, status: 'Importing…' });
+      try {
+        const project = await projects.load(id, controller.signal);
+        if (!valid()) return false;
+        const imported = await importScene(project.photo);
+        prepared = { project, scene: imported };
+        if (!valid()) { imported.master.close(); return false; }
+        const masks = new Map(project.document.objects.map((object) => {
+          const mask = project.masks.get(object.produced.mask.asset);
+          if (mask === undefined) throw new Error('A project mask is missing.');
+          return [object.id, mask] satisfies [ObjectId, Plane<'u8'>];
+        }));
+        // Validate the candidate while the current products, analysis and saves are intact.
+        // Restore the current renderer before suspend captures its pending thumbnail.
+        try {
+          if (renderer !== null) {
+            renderer.setScene({ doc: project.document, master: imported.master, masks, depth: null, plate: null, selected: null });
+            renderer.renderStill();
+          } else if (renderError !== null) throw renderError;
+        } finally { if (state.scene !== null) draw(state.scene); }
+      } catch (error) {
+        prepared?.scene.master.close();
+        if (valid()) {
+          publish({ ...state, status: error instanceof Error ? error.message : String(error) });
+          projects.openFailed();
+        }
+        return false;
+      }
+      if (prepared === null || !valid()) { prepared?.scene.master.close(); return false; }
+      projects.suspend();
+      loop.stop(); stopView(); readyScene = null;
+      invalidateTaps();
+      const current = analysis.beginImport(); generation = current;
+      installImported(prepared.scene, prepared.project.photo, prepared.project, current, false);
+      try { await analysis.sceneReady(current, prepared.scene.masterPixels); }
+      catch (error) {
+        if (current === generation) {
+          analysis.importFailed(current);
+          publish({ ...state, status: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      return current === generation;
     },
     requestPlateIfNeeded,
     setWindow: (enabled: boolean): Promise<void> => setView('window', enabled),

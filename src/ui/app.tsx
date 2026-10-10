@@ -7,6 +7,7 @@ import { Swatches } from './swatches.tsx';
 import { EnableSwitch, Node, RangeControl } from './controls.tsx';
 import { Layers } from './layers.tsx';
 import { PhoneFrame } from './phone.tsx';
+import { Projects } from './projects.tsx';
 
 const PHONE_QUERY = '(max-width: 760px), (max-height: 500px), (max-width: 1100px) and (orientation: portrait)';
 
@@ -23,9 +24,10 @@ function usePhoneFrame(): boolean {
 }
 
 /** A fresh node, never given a 2D context. The session owns its renderer. */
-function Stage({ scene, session, onFit, contained = false }: {
+function Stage({ scene, session, onFit, contained = false, visible = true }: {
   readonly scene: DemoScene | null; readonly session: DemoSession; readonly onFit: (percent: number) => void;
   readonly contained?: boolean;
+  readonly visible?: boolean;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useLayoutEffect(() => {
@@ -38,7 +40,7 @@ function Stage({ scene, session, onFit, contained = false }: {
     observer.observe(node);
     return () => observer.disconnect();
   }, [scene?.master, onFit]);
-  return <canvas key="webgl-stage" ref={canvas} data-testid="stage" class="stage-canvas" hidden={scene === null} aria-label="Rendered photo"
+  return <canvas key="webgl-stage" ref={canvas} data-testid="stage" class="stage-canvas" hidden={scene === null || !visible} aria-label="Rendered photo"
     onClick={(event) => {
       const box = event.currentTarget.getBoundingClientRect();
       const node = event.currentTarget;
@@ -141,6 +143,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   const phone = usePhoneFrame();
   const [state, setState] = useState(session.snapshot());
   const [fit, setFit] = useState(0);
+  const [projectsOpen, setProjectsOpen] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const cameraInput = useRef<HTMLInputElement>(null);
   const observedTiming = useRef(state.analysisTiming);
@@ -160,8 +163,8 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
   }, [session]);
-  const open = (file: File | undefined): void => { if (file !== undefined) void session.importFile(file); };
-  const sample = (): void => { void session.importUrl('/assets-static/sample.jpg', 'sample.jpg'); };
+  const open = (file: File | undefined): void => { if (file !== undefined) { setProjectsOpen(false); void session.importFile(file); } };
+  const sample = (): void => { setProjectsOpen(false); void session.importUrl('/assets-static/sample.jpg', 'sample.jpg'); };
   const download = async (): Promise<void> => {
     try { await session.savePng(); }
     catch (error) { session.reportError(error); }
@@ -183,9 +186,11 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
     onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'; }}
     onDrop={(event) => { event.preventDefault(); open(event.dataTransfer?.files[0]); }}>
     <PhoneFrame state={state} session={session} status={status} busy={busy} touch={touch} modelsReady={analysis.modelsReady}
+      projectsOpen={projectsOpen} onProjects={() => setProjectsOpen((open) => !open)}
+      projects={<Projects session={session} onOpened={() => setProjectsOpen(false)} />}
       onOpen={open} onSample={sample} onDownload={() => { void download(); }}
       onMotion={toggleMotion} onSymbols={toggleSymbols} onWindow={toggleWindow} onTilt={toggleTilt}>
-      <Stage scene={scene} session={session} onFit={setFit} contained />
+      <Stage scene={scene} session={session} onFit={setFit} contained visible={!projectsOpen} />
     </PhoneFrame>
   </main>;
   return (
@@ -194,8 +199,9 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
       <header class="top-bar">
         <span class="photo-name" title={scene?.doc.frame.original.name}>{scene?.doc.frame.original.name ?? 'No photo open'}</span>
         <div class="action-rail" aria-label="Photo actions">
+          <button type="button" data-testid="projects-toggle" aria-pressed={projectsOpen} onClick={() => setProjectsOpen((open) => !open)}>Projects</button>
           <button type="button" onClick={() => input.current?.click()}>Open</button>
-          <button type="button" onClick={sample}>Try a sample</button>
+          <button type="button" data-testid="try-sample" onClick={sample}>Try a sample</button>
           {touch && <button type="button" data-testid="take-photo" onClick={() => cameraInput.current?.click()}>Take a photo</button>}
           <button type="button" disabled={scene === null || busy} onClick={() => session.reset()}>Reset</button>
           <button class="primary-action" type="button" disabled={scene === null || busy} onClick={() => { void download(); }}>Download</button>
@@ -209,6 +215,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
       </header>
       <div class="workspace">
         <aside class="scene-sidebar" aria-label="Layers and scene">
+          {projectsOpen ? <Projects session={session} onOpened={() => setProjectsOpen(false)} /> : <>
           <Layers scene={scene} session={session} />
           <section class="scene-info" aria-labelledby="scene-heading">
             <h2 id="scene-heading" class="panel-heading">Scene</h2>
@@ -220,6 +227,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
             </dl>
             <span class="local-models">{session.analysis.modelCount()} models local</span>
           </section>
+          </>}
         </aside>
         <section class="viewer" aria-label="Photo viewer">
           <div class="viewer-toolbar"><span>Fit{scene !== null ? ` ${fit}%` : ''}</span></div>
