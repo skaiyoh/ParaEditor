@@ -58,6 +58,7 @@ export type Motion = z.infer<typeof motionSchema>;
 export type Lighting = z.infer<typeof lightingSchema>;
 export type SceneObject = z.infer<typeof sceneObjectSchema>;
 export type ObjectProduced = z.infer<typeof objectProducedSchema>;
+/** Legacy producers may omit size; the versioned document parser supplies .5. */
 export type Selection = z.infer<typeof selectionSchema>;
 export type TapPoint = z.infer<typeof tapPointSchema>;
 export type ObjectColor = z.infer<typeof objectColorSchema>;

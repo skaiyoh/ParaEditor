@@ -31,6 +31,7 @@ export type DemoTestSurface = {
   exportFrame(frame: number): Promise<Blob>;
   setMotion(patch: Partial<SceneDocument['motion']>): void;
   document(): SceneDocument | null;
+  refinement(): ReturnType<DemoSession['refinementProbe']>;
   projectMasks(): readonly { readonly asset: string; readonly width: number; readonly height: number; readonly bytes: readonly number[] }[];
   projects(): ReturnType<DemoSession['projects']['snapshot']> & ReturnType<DemoSession['projects']['diagnostics']>;
   openProject(id: string): Promise<boolean>;
@@ -99,6 +100,7 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
     },
     setMotion: (patch) => session.setMotion(patch),
     document: () => session.snapshot().scene?.doc ?? null,
+    refinement: () => session.refinementProbe(),
     projectMasks() {
       const assets = new Set(session.snapshot().scene?.doc.objects.map((object) => object.produced.mask.asset));
       return [...session.products.masks].filter(([asset]) => assets.has(asset)).map(([asset, mask]) => ({ asset, ...mask.size, bytes: Array.from(mask.data) }));

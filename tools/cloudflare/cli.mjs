@@ -1,9 +1,20 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { ROOT, STATE } from './prepare.mjs';
+
+export async function neonConnection() {
+  const file = path.join(ROOT, '.local/cloudflare.env');
+  if (((await stat(file)).mode & 0o777) !== 0o600) throw new Error('The local Cloudflare credentials file must have mode 600.');
+  const value = parseEnv(await readFile(file, 'utf8')).NEON_DATABASE_URL;
+  try {
+    const url = new URL(value);
+    if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || !url.username || !url.password) throw new Error();
+  } catch { throw new Error('The local Neon connection string is missing or invalid.'); }
+  return value;
+}
 
 export async function credentials({ env = process.env, file = path.join(ROOT, '.local/cloudflare.env') } = {}) {
   // Never combine a partial CI environment with credentials from another account.
@@ -21,7 +32,7 @@ export async function wrangler(args, { authenticated = true } = {}) {
     const child = spawn('npm', ['--cache', path.join(STATE, 'npm-cache'), 'exec', '--yes', '--package=wrangler@4.149.0', '--', 'wrangler', ...args], {
       // Pages only accepts wrangler.json discovered in its working directory.
       cwd: path.join(ROOT, 'tools/cloudflare'),
-      env: { ...process.env, ...auth, WRANGLER_SEND_METRICS: 'false', WRANGLER_LOG_PATH: path.join(STATE, 'wrangler.log'), CI: 'true' },
+      env: { ...process.env, ...auth, WRANGLER_SEND_METRICS: 'false', WRANGLER_LOG_PATH: path.join(STATE, 'wrangler.log'), WRANGLER_CACHE_DIR: path.join(STATE, 'wrangler-cache'), CI: 'true' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let output = '';

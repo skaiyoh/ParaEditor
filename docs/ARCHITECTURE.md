@@ -1367,6 +1367,18 @@ Production mode exposes only the bodyless GET absence probe and writes no projec
 The local production server therefore cannot save projects before that Worker is connected.
 test/serve-projects.test.ts exercises this contract through real HTTP, and projects.autosave is the real-page dev scenario.
 
+The hosted Pages Worker dispatches `/api/projects` before its static route table.
+One shared space has no login: Neon stores `projects(id, name, updated_at, scene, masks, revision)` and persistent `tombstones(id)`, while the `PROJECTS` R2 binding stores photo, masks and thumbnail beneath `projects/<id>/`.
+Photos retain their original content type in R2 HTTP metadata and are limited to 24 MiB on the hosted API; the other byte limits match the fixture.
+The Worker reuses the scene serializer, returns the transport revision with document and masks, and never includes the database timestamp in scene JSON.
+Only completed scene rows appear in the list, ordered by server updated_at descending then id ascending; binary writes update that timestamp only after a scene exists.
+Parameterized Neon HTTP queries use the pooled connection host's `/sql` endpoint with the connection string in `Neon-Connection-String`, never in an asset or response.
+Scene upserts and deletion use a READ COMMITTED HTTP batch whose first statement obtains a per-id PostgreSQL transaction advisory lock, so revision/tombstone checks see the previous holder's committed work.
+R2 cannot join that transaction: binary PUTs check tombstones before and after writing, and a late upload removes its prefix when deletion wins; tombstoned resources remain unreadable even during cleanup.
+`deploy.mjs projects`, `migrate` and `secrets` are one-time Mac setup commands; migration is idempotent and the mode-600 `.local/cloudflare.env` supplies the Pages secret in both environments.
+GitHub deployment runs the existing `verify.mjs` before promotion, including an isolated-id store round trip with binary equality, revision conflict, deletion and tombstone checks alongside the static/model contract.
+`hosted.projects` exercises import, editing, save, reload, reopening and deletion through the production UI; it uses its own id and preserves other shared projects.
+
 ## Module map and the import graph
 
 Each module under `src/` belongs to the module named by its top-level directory, and `src/main.tsx` is its own:
@@ -1431,6 +1443,13 @@ A part that adds a package or an exception changes the tables in `test/support/i
   The depth stage's statistics are read through it (see "The stage functions"), and the renderer's hole fill is to read its median through it too, so the two agree.
 
 ## The scene document
+
+Holding a stage pointer over an existing object for 350 ms without moving more than 8 CSS pixels starts selection refinement in `session/scene.ts`.
+The session decodes the stored tap points once, orders its three soft masks by area, and maps selection `size` in 0..1 through the smallest, middle and largest candidates; each third passes through thresholds 192, 128 and 96 at its start, midpoint and end.
+`session/refine.ts` remaps the chosen threshold onto the renderer's existing 128 crossing, and 120 CSS pixels left or right reaches the shrink or grow endpoint from the current size.
+Legacy selections parse with size 0.5; a decoder choice outside the middle is preserved at its candidate's neutral size, with legacy .5 gestures anchored there until commit.
+Frame-coalesced previews replace only the renderer's object products, leaving the document, layer thumbnail, plate and autosave unchanged; pointer up applies `object.refine` with recomputed statistics and a content-addressed mask, releases the old mask and allows the usual plate reconciliation and autosave.
+Escape, returning to the starting size, a second pointer, lost capture, Reset or import discards the preview and retains the original document and mask.
 
 The scene document is the JSON a scene is stored and exported as.
 Its shape has one owner, `core/schema.ts`, a zod schema; `core/types.ts` exports the types zod infers from it (`SceneDocument`, `Frame`, `Analysis`, `Style`, `SceneObject`, `Light`, and the rest) and declares none by hand.

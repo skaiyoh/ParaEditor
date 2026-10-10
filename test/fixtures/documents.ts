@@ -91,7 +91,7 @@ const subject: SceneObject = {
   thickness: 0.3,
   produced: {
     model: SAM_MODEL,
-    selection: { kind: 'auto-subject', seed: { at: { x: 0.5, y: 0.5 }, label: 'include' }, candidate: 0 },
+    selection: { kind: 'auto-subject', seed: { at: { x: 0.5, y: 0.5 }, label: 'include' }, candidate: 0, size: 0.5 },
     mask: { asset: assetId(0x31), format: 'u8', size: { width: 1024, height: 768 } },
     bounds: { x: 300, y: 200, width: 600, height: 500 },
     depth: { p10: 0.55, median: 0.7, p90: 0.8 },
@@ -122,6 +122,7 @@ const box: SceneObject = {
         { at: { x: 0.2, y: 0.8 }, label: 'exclude' },
       ],
       candidate: 1,
+      size: 0.5,
     },
     mask: { asset: assetId(0x32), format: 'u8', size: { width: 1024, height: 768 } },
     bounds: { x: 0, y: 1300, width: 400, height: 236 },

@@ -2,7 +2,7 @@ import { newDocument, newObject } from '../core/defaults.ts';
 import { isAssetId, isSceneId, isObjectId, type AssetId, type ObjectId, type SceneId } from '../core/ids.ts';
 import { SCENE_VERSION } from '../core/migrate.ts';
 import { sceneDocumentSchema } from '../core/schema.ts';
-import type { SceneDocument } from '../core/types.ts';
+import type { ObjectProduced, SceneDocument } from '../core/types.ts';
 import type { ImagePoint, Oklch, Plane, Rgb8 } from '../core/raster.ts';
 import { applyProduce, sortedMasks } from '../core/produce.ts';
 import { createAnalysisDriver } from './driver.ts';
@@ -29,6 +29,7 @@ import { createWindowDriver } from './window.ts';
 import { createTiltDriver, type Orientation } from './tilt.ts';
 import type { ViewHost } from './view-driver.ts';
 import { createProjectSession } from './projects.ts';
+import { anchoredSize, candidateSize, draggedSize, maskArea, rankCandidates, refinementChoice, thresholdMask } from './refine.ts';
 
 /** D2a consumes doc and master; D3 makes fresh worker bitmaps from masterPixels. */
 export type DemoScene = {
@@ -47,6 +48,7 @@ export type DemoState = {
   readonly analysisStatus: string; readonly analysisTiming: { readonly stage: string; readonly ms: number } | null;
   readonly windowEnabled: boolean;
   readonly tiltEnabled: boolean;
+  readonly refiningObject: ObjectId | null;
 };
 export type DemoSession = ReturnType<typeof createDemoSession>;
 
@@ -85,7 +87,7 @@ async function importScene(file: File): Promise<DemoScene> {
 }
 
 export function createDemoSession() {
-  let state: DemoState = { status: 'Drop a photo', scene: null, analysisStatus: 'Fetching models 0%', analysisTiming: null, windowEnabled: false, tiltEnabled: false };
+  let state: DemoState = { status: 'Drop a photo', scene: null, analysisStatus: 'Fetching models 0%', analysisTiming: null, windowEnabled: false, tiltEnabled: false, refiningObject: null };
   const products = createProducts();
   let generation = 0;
   let readyScene: { readonly generation: number; readonly id: SceneDocument['id'] } | null = null;
@@ -93,7 +95,19 @@ export function createDemoSession() {
   let baseline: SceneDocument | null = null;
   let objectEpoch = 0;
   const tapControllers = new Set<AbortController>();
+  type Refinement = {
+    readonly id: ObjectId; readonly original: ObjectProduced;
+    readonly generation: number; readonly epoch: number; readonly controller: AbortController;
+    readonly startSize: number; readonly done: Promise<void>; readonly resolve: () => void;
+    phase: 'decoding' | 'dragging' | 'committing';
+    candidates: ReturnType<typeof rankCandidates> | null;
+    anchor: number; size: number; revision: number; applied: number;
+    preview: ObjectProduced | null; frame: number | null; work: Promise<void> | null;
+    ready: Promise<void>;
+  };
+  let refinement: Refinement | null = null;
   const invalidateTaps = (): void => {
+    cancelRefinement();
     objectEpoch++;
     for (const controller of tapControllers) controller.abort();
     tapControllers.clear(); pendingMask = Promise.resolve();
@@ -123,7 +137,7 @@ export function createDemoSession() {
       if (refuseOnRenderError) throw error;
       status = error instanceof Error ? error.message : String(error);
     }
-    state = { status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), windowEnabled: windowView.enabled(), tiltEnabled: tiltView.enabled() };
+    state = { status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), windowEnabled: windowView.enabled(), tiltEnabled: tiltView.enabled(), refiningObject: refinement?.id ?? null };
     if (scene !== null && readyScene?.generation === generation) projects.observe(scene.doc, products.masks);
     for (const listener of listeners) listener(state);
   };
@@ -200,7 +214,12 @@ export function createDemoSession() {
       if (renderError !== null) throw renderError;
       return;
     }
-    renderer.setScene({ doc: scene.doc, master: scene.master, masks: scene.masks, depth: scene.depth, plate: scene.plate, selected: scene.selected });
+    const preview = refinement?.preview;
+    const doc = preview === null || preview === undefined ? scene.doc : {
+      ...scene.doc, objects: scene.doc.objects.map((object) => object.id === refinement?.id ? { ...object, produced: preview } : object),
+    };
+    const masks = preview === null || preview === undefined ? scene.masks : products.forScene(doc).masks;
+    renderer.setScene({ doc, master: scene.master, masks, depth: scene.depth, plate: scene.plate, selected: scene.selected });
     if (viewEnabled()) {
       const view = activeView();
       loop.stop(); renderer.renderView(view.camera(), view.frame());
@@ -225,16 +244,19 @@ export function createDemoSession() {
   async function requestPlateIfNeeded(): Promise<void> {
     const current = generation;
     await pendingMask;
+    while (refinement !== null && current === generation) await refinement.done;
     if (current !== generation || readyScene?.generation !== current) return;
     return analysis.requestPlateIfNeeded();
   }
   function select(id: ObjectId | null): void {
+    cancelRefinement();
     const scene = state.scene;
     if (scene === null) return;
     if (id !== null && !scene.doc.objects.some((object) => object.id === id)) throw new Error('The object is not in this photo.');
     publish({ status: 'Ready', scene: { ...scene, selected: id } });
   }
   function tap(at: ImagePoint): Promise<void> {
+    cancelRefinement();
     if (![at.x, at.y].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) return Promise.resolve();
     const decoder = analysis.decoder();
     if (state.scene === null || readyScene?.generation !== generation) return Promise.resolve();
@@ -262,7 +284,9 @@ export function createDemoSession() {
       if (!lock.ok) throw new Error(lock.error);
       const latest = state.scene;
       const produced = objectProduced({ model: lock.value.ops.decode.model, at: point, asset, mask,
-        master: latest.doc.frame.master.size, depth: latest.depth, thumbnail: makeThumbnail(latest.master), seed: latest.doc.seed });
+        master: latest.doc.frame.master.size, depth: latest.depth, thumbnail: makeThumbnail(latest.master), seed: latest.doc.seed,
+        selection: { kind: 'taps', points: [{ at: point, label: 'include' }], candidate: 0,
+          size: candidateSize(rankCandidates(decoded.value.candidates), 0) } });
       if (produced === null) { publish({ ...state, status: 'Nothing there' }); return; }
       const id = crypto.randomUUID();
       if (!isObjectId(id)) throw new Error('The object id is invalid.');
@@ -276,6 +300,127 @@ export function createDemoSession() {
       if (valid()) publish({ ...state, status: error instanceof Error ? error.message : String(error) });
     }).finally(() => { tapControllers.delete(controller); });
     return pendingMask;
+  }
+  function objectAt(at: ImagePoint): ObjectId | null {
+    const scene = state.scene;
+    if (scene === null || readyScene?.generation !== generation) return null;
+    const zoomed = (viewEnabled() && scene.depth !== null) || (loop.running() && effectiveOrbit(scene.doc.motion) > 0);
+    return labelAt(scene.doc, scene.masks, zoomed ? loopTapPoint(at, loopZoom(scene.doc.motion.parallax)) : at);
+  }
+  function refineValid(current: Refinement): boolean {
+    return refinement === current && current.generation === generation && current.epoch === objectEpoch && !current.controller.signal.aborted;
+  }
+  function dropPreview(current: Refinement): void {
+    const asset = current.preview?.mask.asset;
+    if (asset !== undefined && asset !== current.original.mask.asset &&
+      !state.scene?.doc.objects.some((object) => object.produced.mask.asset === asset)) dropMask(asset);
+  }
+  function dropMask(asset: AssetId): void {
+    // The foundation exposes only clear/put. Retain the other resident buffers.
+    const depths = [...products.depths], masks = [...products.masks].filter(([id]) => id !== asset), plates = [...products.plates];
+    products.clear();
+    for (const [id, plane] of depths) products.putDepth(id, plane);
+    for (const [id, plane] of masks) products.putMask(id, plane);
+    for (const [id, plane] of plates) products.putPlate(id, plane);
+  }
+  function cancelRefinement(): boolean {
+    const current = refinement;
+    if (current === null) return false;
+    refinement = null;
+    current.controller.abort();
+    if (current.frame !== null) cancelAnimationFrame(current.frame);
+    dropPreview(current); current.resolve();
+    publish(state);
+    return true;
+  }
+  async function produceRefinement(current: Refinement): Promise<void> {
+    const scene = state.scene, candidates = current.candidates;
+    if (!refineValid(current) || scene === null || candidates === null || current.revision === current.applied) return;
+    const revision = current.revision;
+    if (current.size === current.startSize) {
+      dropPreview(current); current.preview = null; current.applied = revision; draw(scene); return;
+    }
+    const size = anchoredSize(current.size, current.startSize, current.anchor);
+    const choice = refinementChoice(size);
+    const candidate = candidates[choice.rank];
+    const mask = thresholdMask(candidate.mask, choice.threshold);
+    const asset = await productAsset(mask.data);
+    if (!refineValid(current) || current.revision !== revision || state.scene === null) return;
+    const original = current.original.selection;
+    const points = original.kind === 'taps' ? original.points : [original.seed];
+    const point = points[0];
+    if (point === undefined) return;
+    const produced = objectProduced({ model: current.original.model, at: point.at, asset, mask,
+      master: scene.doc.frame.master.size, depth: state.scene.depth, thumbnail: makeThumbnail(scene.master), seed: scene.doc.seed,
+      selection: { ...original, candidate: candidate.candidate, size } });
+    if (produced === null) { cancelRefinement(); return; }
+    dropPreview(current);
+    products.putMask(asset, mask); current.preview = produced; current.applied = revision;
+    draw(state.scene);
+  }
+  function scheduleRefinement(current: Refinement): void {
+    if (!refineValid(current) || current.phase !== 'dragging' || current.frame !== null || current.work !== null || current.revision === current.applied) return;
+    current.frame = requestAnimationFrame(() => {
+      current.frame = null;
+      current.work = produceRefinement(current).catch(() => { if (refineValid(current)) cancelRefinement(); }).finally(() => {
+        current.work = null; scheduleRefinement(current);
+      });
+    });
+  }
+  function beginRefinement(id: ObjectId): boolean {
+    cancelRefinement();
+    const scene = state.scene, decoder = analysis.decoder();
+    const object = scene?.doc.objects.find((entry) => entry.id === id);
+    if (scene === null || object === undefined || decoder === null || readyScene?.generation !== generation || tapControllers.size > 0) return false;
+    const original = object.produced;
+    const selection = original.selection;
+    const points = selection.kind === 'taps' ? selection.points : [selection.seed] satisfies readonly [typeof selection.seed];
+    let resolve = (): void => {};
+    const done = new Promise<void>((finish) => { resolve = finish; });
+    const current: Refinement = { id, original, generation, epoch: objectEpoch, controller: new AbortController(),
+      startSize: selection.size ?? 0.5, size: selection.size ?? 0.5, anchor: selection.size ?? 0.5, phase: 'decoding', candidates: null,
+      revision: 0, applied: 0, preview: null, frame: null, work: null, ready: Promise.resolve(), done, resolve };
+    refinement = current;
+    publish({ ...state, scene: { ...scene, selected: id } });
+    current.ready = decoder.decode(points, current.controller.signal).then((result) => {
+      if (!refineValid(current)) return;
+      if (!result.ok) { cancelRefinement(); return; }
+      current.candidates = rankCandidates(result.value.candidates);
+      // Older documents default to .5 even when their decoder choice was not the middle.
+      if (current.startSize === 0.5 && selection.candidate === 0) current.anchor = candidateSize(current.candidates, 0);
+      if (current.phase === 'decoding') current.phase = 'dragging';
+      scheduleRefinement(current);
+    }).catch(() => { if (refineValid(current)) cancelRefinement(); });
+    return true;
+  }
+  function moveRefinement(travel: number): void {
+    const current = refinement;
+    if (current === null || current.phase === 'committing') return;
+    if (travel === 0 && current.revision > 0) { cancelRefinement(); return; }
+    const size = draggedSize(current.startSize, travel);
+    if (current.size === size) return;
+    current.size = size; current.revision++;
+    scheduleRefinement(current);
+  }
+  async function commitRefinement(): Promise<void> {
+    const current = refinement;
+    if (current === null) return;
+    current.phase = 'committing';
+    if (current.frame !== null) { cancelAnimationFrame(current.frame); current.frame = null; }
+    try {
+      await current.ready; await current.work;
+      if (!refineValid(current)) return;
+      await produceRefinement(current);
+      if (!refineValid(current) || state.scene === null) return;
+      const produced = current.preview;
+      if (produced === null || current.size === current.startSize) { cancelRefinement(); return; }
+      const result = applyEdit(state.scene.doc, { kind: 'object.refine', id: current.id, produced }, new Date().toISOString());
+      if (result.kind === 'refused') throw new Error(result.detail);
+      refinement = null; current.resolve();
+      if (!result.doc.objects.some((object) => object.produced.mask.asset === current.original.mask.asset)) dropMask(current.original.mask.asset);
+      // Publish the committed change for autosave; the plate retains its old forMasks.
+      setDocument(result.doc);
+    } catch { if (refineValid(current)) cancelRefinement(); }
   }
   type LoadedProject = Awaited<ReturnType<typeof projects.load>>;
   function installImported(imported: DemoScene, file: File, project: LoadedProject | null, current: number, refuseOnRenderError: boolean): void {
@@ -331,7 +476,18 @@ export function createDemoSession() {
   }
   return {
     products, projects,
-    tap, select,
+    tap, select, objectAt, beginRefinement, moveRefinement, commitRefinement, cancelRefinement,
+    refinementProbe() {
+      const current = refinement;
+      return current === null ? null : { id: current.id, phase: current.phase, size: current.size,
+        candidateAreas: current.candidates?.map(({ candidate, area }) => ({ candidate, area })) ?? [],
+        originalRank: current.candidates?.findIndex((candidate) => candidate.candidate === current.original.selection.candidate) ?? null,
+        previewAsset: current.preview?.mask.asset ?? null,
+        previewArea: current.preview === null ? null : (() => {
+          const mask = products.masks.get(current.preview.mask.asset);
+          return mask === undefined ? null : maskArea(mask);
+        })() };
+    },
     setRecolor(color: Oklch | null): void {
       const id = state.scene?.selected;
       if (id === null || id === undefined) return;

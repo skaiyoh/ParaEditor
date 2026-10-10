@@ -75,14 +75,17 @@ test('empty, equal and refused surface patches retain the original document and 
   }
 });
 
-test('the version-zero migration adds the disabled surface without changing any existing field or its input', () => {
+test('the version-zero migration adds the disabled surface and selection size without changing other fields or its input', () => {
   const { surface: _surface, ...current } = fiveClusterDocument();
-  const legacy = { ...current, version: 0 };
+  const legacy = { ...current, version: 0, objects: current.objects.map((object) => {
+    const { size: _size, ...selection } = object.produced.selection;
+    return { ...object, produced: { ...object.produced, selection } };
+  }) };
   const before = structuredClone(legacy);
   assert.equal(SCENE_VERSION, 2);
   assert.equal(MIGRATIONS.length, 2);
   const parsed = parseDocument(legacy);
-  assert.deepEqual(parsed, { ok: true, value: { ...legacy, version: 2, surface: defaultSurface() } });
+  assert.deepEqual(parsed, { ok: true, value: { ...current, version: 2, surface: defaultSurface() } });
   assert.deepEqual(legacy, before);
   assert.deepEqual(parseDocument(JSON.parse(JSON.stringify(legacy))), parsed);
   const extra = parseDocument({ ...legacy, unexpected: 1 });

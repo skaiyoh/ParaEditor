@@ -36,6 +36,11 @@ declare global {
         exportFrame(frame: number): Promise<Blob>;
         setMotion(patch: Partial<SceneDocument['motion']>): void;
         document(): SceneDocument | null;
+        refinement(): {
+          readonly id: string; readonly phase: 'decoding' | 'dragging' | 'committing'; readonly size: number;
+          readonly candidateAreas: readonly { readonly candidate: number; readonly area: number }[];
+          readonly originalRank: number | null; readonly previewAsset: string | null; readonly previewArea: number | null;
+        } | null;
         projectMasks(): readonly { readonly asset: string; readonly width: number; readonly height: number; readonly bytes: readonly number[] }[];
         projects(): { readonly current: string | null; readonly state: 'saving' | 'saved' | 'failed' | 'absent'; readonly states: ReadonlyMap<string, 'saving' | 'saved' | 'failed'>; readonly retainedJobs: number; readonly pendingSaves: number };
         openProject(id: string): Promise<boolean>;

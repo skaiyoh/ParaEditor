@@ -30,6 +30,32 @@ function Stage({ scene, session, onFit, contained = false, visible = true }: {
   readonly visible?: boolean;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  type Gesture = {
+    readonly pointer: number; readonly x: number; readonly y: number; readonly node: HTMLCanvasElement;
+    phase: 'holding' | 'refining' | 'moved'; timer: number | null;
+  };
+  const gesture = useRef<Gesture | null>(null);
+  const pointers = useRef(new Set<number>());
+  const suppressClick = useRef(false);
+  const [refining, setRefining] = useState(false);
+  const pointAt = (node: HTMLCanvasElement, clientX: number, clientY: number) => {
+    const box = node.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) return null;
+    // The phone's canvas contains the bitmap; letterbox presses are ignored.
+    const scale = contained ? Math.min(box.width / node.width, box.height / node.height) : 1;
+    const width = contained ? node.width * scale : box.width;
+    const height = contained ? node.height * scale : box.height;
+    const x = (clientX - box.left - (box.width - width) / 2) / width;
+    const y = (clientY - box.top - (box.height - height) / 2) / height;
+    return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? { x, y } : null;
+  };
+  const clearGesture = (): void => {
+    const current = gesture.current;
+    gesture.current = null;
+    if (current?.timer !== null && current?.timer !== undefined) clearTimeout(current.timer);
+    if (current !== null && current.node.hasPointerCapture(current.pointer)) current.node.releasePointerCapture(current.pointer);
+    setRefining(false);
+  };
   useLayoutEffect(() => {
     if (canvas.current !== null) return session.attachCanvas(canvas.current);
   }, [session]);
@@ -40,19 +66,85 @@ function Stage({ scene, session, onFit, contained = false, visible = true }: {
     observer.observe(node);
     return () => observer.disconnect();
   }, [scene?.master, onFit]);
-  return <canvas key="webgl-stage" ref={canvas} data-testid="stage" class="stage-canvas" hidden={scene === null || !visible} aria-label="Rendered photo"
-    onClick={(event) => {
-      const box = event.currentTarget.getBoundingClientRect();
+  useLayoutEffect(() => {
+    const ended = (event: PointerEvent): void => { pointers.current.delete(event.pointerId); };
+    const second = (event: PointerEvent): void => {
+      if (gesture.current !== null && event.pointerId !== gesture.current.pointer) {
+        pointers.current.add(event.pointerId);
+        suppressClick.current = true; clearGesture(); session.cancelRefinement();
+      }
+    };
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && gesture.current !== null) {
+        if (gesture.current.phase === 'refining') event.preventDefault();
+        suppressClick.current = true; clearGesture(); session.cancelRefinement();
+      }
+    };
+    window.addEventListener('keydown', escape);
+    window.addEventListener('pointerdown', second, true);
+    window.addEventListener('pointerup', ended, true);
+    window.addEventListener('pointercancel', ended, true);
+    const unsubscribe = session.subscribe((next) => {
+      if (gesture.current?.phase === 'refining' && next.refiningObject === null) { suppressClick.current = true; clearGesture(); }
+    });
+    return () => {
+      window.removeEventListener('keydown', escape); window.removeEventListener('pointerdown', second, true);
+      window.removeEventListener('pointerup', ended, true); window.removeEventListener('pointercancel', ended, true);
+      unsubscribe(); clearGesture(); session.cancelRefinement(); pointers.current.clear();
+    };
+  }, [session]);
+  useLayoutEffect(() => {
+    // Imports and Reset abandon a hold even before its timer has fired.
+    clearGesture();
+  }, [scene?.doc.id, scene?.doc.frame.master.asset, scene?.doc.objects.length]);
+  return <canvas key="webgl-stage" ref={canvas} data-testid="stage" class={`stage-canvas${refining ? ' is-refining' : ''}`} hidden={scene === null || !visible} aria-label="Rendered photo"
+    onPointerDown={(event) => {
+      if (event.button !== 0) return;
+      pointers.current.add(event.pointerId);
+      if (pointers.current.size > 1) { suppressClick.current = true; clearGesture(); session.cancelRefinement(); return; }
+      clearGesture(); suppressClick.current = false;
       const node = event.currentTarget;
-      if (box.width <= 0 || box.height <= 0) return;
-      // The phone canvas fills the stage; object-fit contains its bitmap.
-      // Map taps to that bitmap and ignore the surrounding letterbox.
-      const scale = contained ? Math.min(box.width / node.width, box.height / node.height) : 1;
-      const width = contained ? node.width * scale : box.width;
-      const height = contained ? node.height * scale : box.height;
-      const x = (event.clientX - box.left - (box.width - width) / 2) / width;
-      const y = (event.clientY - box.top - (box.height - height) / 2) / height;
-      if (x >= 0 && x <= 1 && y >= 0 && y <= 1) void session.tap({ x, y });
+      // Synthesized events have no native active pointer; real input is captured.
+      try { node.setPointerCapture(event.pointerId); } catch { /* No native pointer to capture. */ }
+      const current: Gesture = { pointer: event.pointerId, x: event.clientX, y: event.clientY, node, phase: 'holding', timer: null };
+      gesture.current = current;
+      const point = pointAt(node, event.clientX, event.clientY);
+      const id = point === null ? null : session.objectAt(point);
+      if (id !== null) current.timer = window.setTimeout(() => {
+        current.timer = null;
+        if (gesture.current !== current || current.phase !== 'holding') return;
+        if (session.beginRefinement(id)) { current.phase = 'refining'; suppressClick.current = true; setRefining(true); }
+      }, 350);
+    }}
+    onPointerMove={(event) => {
+      const current = gesture.current;
+      if (current === null || current.pointer !== event.pointerId) return;
+      const travel = event.clientX - current.x;
+      if (current.phase === 'refining') { session.moveRefinement(travel); return; }
+      if (Math.hypot(travel, event.clientY - current.y) > 8) {
+        current.phase = 'moved'; suppressClick.current = true;
+        if (current.timer !== null) { clearTimeout(current.timer); current.timer = null; }
+      }
+    }}
+    onPointerUp={(event) => {
+      pointers.current.delete(event.pointerId);
+      const current = gesture.current;
+      if (current === null || current.pointer !== event.pointerId) return;
+      if (current.phase === 'refining') { session.moveRefinement(event.clientX - current.x); void session.commitRefinement(); }
+      clearGesture();
+    }}
+    onPointerCancel={(event) => {
+      pointers.current.delete(event.pointerId);
+      if (gesture.current?.pointer === event.pointerId) { suppressClick.current = true; clearGesture(); session.cancelRefinement(); }
+    }}
+    onLostPointerCapture={(event) => {
+      if (gesture.current?.pointer === event.pointerId) { suppressClick.current = true; clearGesture(); session.cancelRefinement(); }
+    }}
+    onContextMenu={(event) => event.preventDefault()}
+    onClick={(event) => {
+      if (suppressClick.current) { suppressClick.current = false; return; }
+      const point = pointAt(event.currentTarget, event.clientX, event.clientY);
+      if (point !== null) void session.tap(point);
     }} />;
 }
 
@@ -159,7 +251,9 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
     setState(next);
   }), [session]);
   useLayoutEffect(() => {
-    const escape = (event: KeyboardEvent): void => { if (event.key === 'Escape') session.select(null); };
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && !event.defaultPrevented && !session.cancelRefinement()) session.select(null);
+    };
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
   }, [session]);

@@ -8,7 +8,7 @@ import type { NonEmpty, SceneId } from '../src/core/ids.ts';
 import { MIGRATIONS, SCENE_VERSION, type Migration } from '../src/core/migrate.ts';
 import { FLOORS, LENGTHS, RANGES, type FloorPath, type LengthPath, type NumberRange, type RangePath } from '../src/core/ranges.ts';
 import type { ImagePoint, ImageRef, Oklab, Oklch, PlaneRef, Rect, Size } from '../src/core/raster.ts';
-import { currentDocumentSchema, describeIssues, formatPath, parseDocument, sceneDocumentSchema } from '../src/core/schema.ts';
+import { currentDocumentSchema, describeIssues, formatPath, parseDocument, sceneDocumentSchema, selectionSchema } from '../src/core/schema.ts';
 import type {
   Analysis,
   DepthProduct,
@@ -117,9 +117,12 @@ test('every numeric bound of the schema equals its RANGES or FLOORS entry, and e
   const numeric = documentNodes().filter(({ node }) => typesOf(node).some((t) => t === 'number' || t === 'integer') && !('const' in node));
   assert.ok(numeric.length > 0);
   for (const { path, node } of numeric) {
-    const entry = isRangePath(path) ? RANGES[path] : isFloorPath(path) ? FLOORS[path] : undefined;
+    // SEL1 owns this additive field without changing the foundation's range table.
+    const selectionSize = path === 'objects[].produced.selection.size';
+    const entry = selectionSize ? { min: 0, max: 1, kind: 'real' } satisfies NumberRange
+      : isRangePath(path) ? RANGES[path] : isFloorPath(path) ? FLOORS[path] : undefined;
     if (entry === undefined) assert.ok(UNBOUNDED_NUMBERS.has(path), `${path} has no RANGES or FLOORS entry and is not listed as unbounded`);
-    else used.add(path);
+    else if (!selectionSize) used.add(path);
     const actual = {
       minimum: node['minimum'],
       exclusiveMinimum: node['exclusiveMinimum'],
@@ -269,6 +272,26 @@ test('the fixture documents parse, and a parse drops nothing', () => {
     assert.deepEqual(result.data, doc);
     // A JSON round trip, as a scene file or a record makes, parses to the same document.
     assert.deepEqual(currentDocumentSchema.parse(JSON.parse(JSON.stringify(doc))), doc);
+  }
+});
+
+test('legacy tapped and automatic selections migrate additively to size .5 and keep explicit refinements', () => {
+  const current = fiveClusterDocument();
+  const old = { ...current, objects: current.objects.map((object) => {
+    const { size: _size, ...selection } = object.produced.selection;
+    return { ...object, produced: { ...object.produced, selection } };
+  }) };
+  const migrated = parseDocument(JSON.parse(JSON.stringify(old)));
+  assert.ok(migrated.ok);
+  assert.ok(migrated.value.objects.length > 0);
+  assert.deepEqual(migrated.value, current);
+  for (const object of migrated.value.objects) assert.equal(object.produced.selection.size, 0.5);
+  const points = [{ at: { x: 0.5, y: 0.5 }, label: 'include' }];
+  for (const size of [0, 0.2, 0.5, 1]) {
+    assert.equal(selectionSchema.parse({ kind: 'taps', points, candidate: 0, size }).size, size);
+  }
+  for (const size of [-0.1, 1.1, NaN, Infinity, '0.5', null]) {
+    assert.equal(selectionSchema.safeParse({ kind: 'taps', points, candidate: 0, size }).success, false);
   }
 });
 

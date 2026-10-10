@@ -185,7 +185,134 @@ async function twoChecks(): Promise<unknown> {
     patchErrors, backgroundPixelsChanged: bg.changedGray, backgroundMaxError: bg.max };
 }
 
+const RefineResult = z.object({
+  area: z.number(), asset: z.string(), size: z.number(), maskCount: z.number(), count: z.number(), selected: z.boolean(),
+  plateNeeded: z.boolean(), document: z.string(), status: z.string(), candidateAreas: z.array(z.object({ candidate: z.number(), area: z.number() })),
+  originalRank: z.number().nullable(), previewArea: z.number().nullable(), previewAsset: z.string().nullable(), refining: z.boolean(), cursor: z.string(),
+  unchangedDuringPreview: z.boolean(), cancelledDocumentEqual: z.boolean(), cancelledProductsEqual: z.boolean(),
+});
+
+/** Exercise Stage's actual handlers, never call the session's refinement methods. */
+async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 'escape' | 'back' | 'second' | 'cancel' | 'quick' | 'tap'): Promise<unknown> {
+  const demo = window.__noisyTest?.demo;
+  const stage = document.querySelector<HTMLCanvasElement>('[data-testid=stage]');
+  if (demo === undefined || stage === null) throw new Error('Missing refinement stage/hooks.');
+  const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const wait = async (predicate: () => boolean): Promise<void> => {
+    const deadline = performance.now() + 15_000;
+    while (!predicate()) {
+      if (performance.now() >= deadline) throw new Error(`Refinement timed out (${action}): ${JSON.stringify(demo.refinement())}`);
+      await pause(20);
+    }
+  };
+  if (action === 'baseline') {
+    await demo.tap(0.38, 0.58);
+    demo.setMotion({ enabled: true, orbit: 0.1 });
+    await demo.requestPlate();
+  }
+  const object = demo.document()?.objects[0];
+  if (object === undefined) throw new Error('The sample ball was not selected.');
+  const beforeDocument = JSON.stringify(demo.document());
+  const beforeProducts = JSON.stringify(demo.projectMasks());
+  const box = stage.getBoundingClientRect();
+  const x = box.left + box.width * 0.38, y = box.top + box.height * 0.58;
+  const primary = action === 'finish' ? Number(document.body.dataset['refinePointer']) : Number(document.body.dataset['refinePointer'] ?? '90') + 2;
+  document.body.dataset['refinePointer'] = String(primary);
+  const pointer = (type: string, dx = 0, pointerId = primary, target: EventTarget = stage) => target.dispatchEvent(new PointerEvent(type, {
+    bubbles: true, cancelable: true, pointerId, pointerType: 'touch', isPrimary: pointerId === primary,
+    button: 0, buttons: type === 'pointerup' || type === 'pointercancel' ? 0 : 1, clientX: x + dx, clientY: y,
+  }));
+  const click = (dx = 0) => stage.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x + dx, clientY: y }));
+  let candidateAreas: { candidate: number; area: number }[] = [];
+  let originalRank: number | null = null;
+  let previewArea: number | null = null, previewAsset: string | null = null;
+  let unchangedDuringPreview = true;
+  if (action === 'finish') {
+    pointer('pointerup', 120); click(120);
+    await wait(() => demo.refinement() === null);
+  } else if (action !== 'baseline') {
+    if (action === 'tap') demo.select(null);
+    pointer('pointerdown');
+    if (action === 'tap') {
+      await pause(40); pointer('pointerup'); click(); await pause(50);
+    } else if (action === 'quick') {
+      pointer('pointermove', 40); await pause(400); pointer('pointerup', 40); click(40); await pause(50);
+    } else {
+      await pause(390);
+      await wait(() => demo.refinement()?.candidateAreas.length === 3);
+      const held = demo.refinement();
+      candidateAreas = [...(held?.candidateAreas ?? [])]; originalRank = held?.originalRank ?? null;
+      const travel = action === 'shrink' ? -120 : action === 'grow' ? 120 : 50;
+      pointer('pointermove', travel);
+      await wait(() => demo.refinement()?.previewAsset !== null && demo.refinement()?.previewAsset !== undefined);
+      previewArea = demo.refinement()?.previewArea ?? null; previewAsset = demo.refinement()?.previewAsset ?? null;
+      unchangedDuringPreview = JSON.stringify(demo.document()) === beforeDocument;
+      if (action !== 'grow') {
+        if (action === 'escape') window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        if (action === 'back') pointer('pointermove');
+        if (action === 'second') { pointer('pointerdown', 20, primary + 1, window); pointer('pointerup', 20, primary + 1, window); }
+        if (action === 'cancel') pointer('pointercancel', travel);
+        pointer('pointerup', action === 'back' ? 0 : travel, primary, action === 'escape' ? window : stage); click(action === 'back' ? 0 : travel);
+        await wait(() => demo.refinement() === null);
+      }
+    }
+  }
+  const doc = demo.document(), updated = doc?.objects[0];
+  const mask = demo.projectMasks().find((entry) => entry.asset === updated?.produced.mask.asset);
+  if (updated === undefined || mask === undefined) throw new Error('The committed object mask is missing.');
+  return { area: mask.bytes.filter((value) => value >= 128).length, asset: updated.produced.mask.asset, size: updated.produced.selection.size ?? 0.5,
+    maskCount: demo.products().masks, count: doc?.objects.length ?? 0, selected: demo.objects()[0]?.selected ?? false,
+    plateNeeded: demo.products().plateNeeded, document: JSON.stringify(doc), status: demo.scene().status,
+    candidateAreas, originalRank, previewArea, previewAsset, refining: demo.refinement() !== null, cursor: getComputedStyle(stage).cursor,
+    unchangedDuringPreview, cancelledDocumentEqual: JSON.stringify(doc) === beforeDocument,
+    cancelledProductsEqual: JSON.stringify(demo.projectMasks()) === beforeProducts };
+}
+
 export const scenarios: readonly Scenario[] = [
+  {
+    id: 'objects.refine', title: 'hold and drag real sample selection with transient preview, commit and cancellation', target: 'dev', covers: [], timeoutMs: 300_000,
+    async run(t) {
+      await t.page.goto('/');
+      await t.page.waitFor('object hooks', z.literal(true), () => window.__noisyTest?.demo === undefined ? null : true);
+      await t.page.evaluate(z.literal(true), () => {
+        const button = document.querySelector('[data-testid=try-sample]');
+        if (!(button instanceof HTMLButtonElement)) throw new Error('Missing sample button.');
+        button.click(); return true;
+      });
+      await t.page.waitFor('sample Ready to tap', z.literal(true), () => window.__noisyTest?.demo.analysis().decoderReady &&
+        document.querySelector('[data-testid=status]')?.textContent?.startsWith('Ready to tap') ? true : null, { timeoutMs: 240_000 });
+      const before = await t.page.evaluate(RefineResult, refineChecks, 'baseline');
+      t.ok('sample ball has one mask and its plate is fresh', before.count === 1 && before.maskCount === 1 && before.area > 0 && !before.plateNeeded, before);
+      await t.page.screenshot('refine-before');
+      const live = await t.page.evaluate(RefineResult, refineChecks, 'grow');
+      t.ok('held move grows resident preview before lift', live.refining && live.previewArea !== null && live.previewArea > before.area && live.previewAsset !== before.asset, live);
+      t.equal('preview retains the saved document and fresh plate', [live.unchangedDuringPreview, live.asset, live.plateNeeded], [true, before.asset, false]);
+      t.equal('refinement cursor', live.cursor, 'ew-resize');
+      t.ok('exactly three area-ordered candidates and an original rank are exposed', live.candidateAreas.length === 3 && live.originalRank !== null &&
+        live.candidateAreas.every((entry, i, all) => i === 0 || entry.area >= (all[i - 1]?.area ?? 0)), live);
+      const grown = await t.page.evaluate(RefineResult, refineChecks, 'finish');
+      t.ok('lift commits a larger mask, new asset and size above .5', grown.area > before.area && grown.asset !== before.asset && grown.size > 0.5, grown);
+      t.equal('commit leaves the plate stale and drops the original mask', [grown.plateNeeded, grown.maskCount, grown.refining], [true, 1, false]);
+      t.equal('gesture introduces no status sentence', [live.status, grown.status], [before.status, before.status]);
+      await t.page.screenshot('refine-grown');
+      await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.requestPlate(); return true; });
+      const shrunk = await t.page.evaluate(RefineResult, refineChecks, 'shrink');
+      t.ok('second gesture shrinks below the original ball area', shrunk.area < before.area && shrunk.size < before.size, shrunk);
+      await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.requestPlate(); return true; });
+      const cancellations = [];
+      for (const action of ['escape', 'back', 'second', 'cancel'] satisfies readonly ('escape' | 'back' | 'second' | 'cancel')[]) {
+        const result = await t.page.evaluate(RefineResult, refineChecks, action);
+        t.ok(`${action} restores exact document, asset, products and plate`, result.cancelledDocumentEqual && result.cancelledProductsEqual && !result.refining && !result.plateNeeded && result.maskCount === 1, result);
+        cancellations.push({ action, result });
+      }
+      const quick = await t.page.evaluate(RefineResult, refineChecks, 'quick');
+      t.ok('movement before hold adds no behavior', quick.cancelledDocumentEqual && quick.cancelledProductsEqual && !quick.refining && quick.count === 1, quick);
+      const tapped = await t.page.evaluate(RefineResult, refineChecks, 'tap');
+      t.ok('plain tap still selects the existing object', tapped.selected && tapped.count === 1 && tapped.cancelledDocumentEqual && !tapped.refining, tapped);
+      await t.file('objects-refine.json', JSON.stringify({ before, live, grown, shrunk, cancellations, quick, tapped,
+        sampleChoice: live.originalRank === 1 ? 'decoder candidate 0 is the middle by area' : `decoder candidate 0 has area rank ${live.originalRank}; preserved at imported size ${before.size}` }, null, 2));
+    },
+  },
   {
     id: 'objects.tap', title: 'real tap, subject products, screen-only selection, recolor, limit and baseline reset', target: 'dev', covers: [], timeoutMs: 300_000,
     async run(t) {

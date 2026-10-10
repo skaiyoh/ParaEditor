@@ -2,7 +2,7 @@ import { srgbToOklab } from '../core/color.ts';
 import { maskCovers } from '../core/derive.ts';
 import type { AssetId, ModelId } from '../core/ids.ts';
 import type { ImagePoint, Plane, Rect, Size } from '../core/raster.ts';
-import type { DepthStats, ObjectColor, ObjectProduced } from '../core/types.ts';
+import type { DepthStats, ObjectColor, ObjectProduced, Selection } from '../core/types.ts';
 import { clusterPixels } from '../photo/stats.ts';
 
 export type Thumbnail = { readonly width: number; readonly height: number; readonly data: Uint8ClampedArray };
@@ -82,11 +82,12 @@ export function objectProduced(input: {
   readonly model: ModelId; readonly at: ImagePoint; readonly asset: AssetId;
   readonly mask: Plane<'u8'>; readonly master: Size; readonly depth: Plane<'f32'> | null;
   readonly thumbnail: Thumbnail; readonly seed: number;
+  readonly selection?: Selection;
 }): ObjectProduced | null {
   const bounds = maskBounds(input.mask, input.master);
   if (bounds === null) return null;
   return {
-    model: input.model, selection: { kind: 'taps', points: [{ at: input.at, label: 'include' }], candidate: 0 },
+    model: input.model, selection: input.selection ?? { kind: 'taps', points: [{ at: input.at, label: 'include' }], candidate: 0, size: 0.5 },
     mask: { asset: input.asset, size: input.mask.size, format: 'u8' }, bounds,
     depth: input.depth === null ? null : maskedDepth(input.mask, input.depth),
     color: maskedColor(input.mask, input.thumbnail, input.seed),

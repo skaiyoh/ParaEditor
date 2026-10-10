@@ -314,11 +314,13 @@ export const selectionSchema = z
       kind: z.literal('taps'),
       points: z.tuple([tapPointSchema], tapPointSchema).readonly(),
       candidate: inRange('objects[].produced.selection.candidate'),
+      size: z.number().min(0).max(1).optional(),
     }),
     z.strictObject({
       kind: z.literal('auto-subject'),
       seed: tapPoint('objects[].produced.selection.seed.at.x', 'objects[].produced.selection.seed.at.y'),
       candidate: inRange('objects[].produced.selection.candidate'),
+      size: z.number().min(0).max(1).optional(),
     }),
   ])
   .readonly();
@@ -662,4 +664,13 @@ export function parseDocumentWith<const M extends readonly Migration[]>(
 }
 
 /** The parse chain of `core/migrate.ts`'s table: what the store and the scene file call. */
-export const parseDocument: (json: unknown) => Result<SceneDocument, ParseError> = parseDocumentWith(MIGRATIONS);
+const parseVersionedDocument = parseDocumentWith(MIGRATIONS);
+export const parseDocument: (json: unknown) => Result<SceneDocument, ParseError> = (json) => {
+  const result = parseVersionedDocument(json);
+  if (!result.ok || result.value.objects.every((object) => object.produced.selection.size !== undefined)) return result;
+  // Additive migration at the persisted-document boundary, never in reducer products.
+  // The existing version stays readable; a future versioned migration can absorb this default.
+  return parseVersionedDocument({ ...result.value, objects: result.value.objects.map((object) => ({
+    ...object, produced: { ...object.produced, selection: { ...object.produced.selection, size: object.produced.selection.size ?? 0.5 } },
+  })) });
+};

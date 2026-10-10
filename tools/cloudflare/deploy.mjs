@@ -5,12 +5,15 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from '../../src/core/zod.ts';
-import { credentials, wrangler } from './cli.mjs';
+import { credentials, neonConnection, wrangler } from './cli.mjs';
+import { neonSql } from './projects.ts';
 import { ROOT, STATE, OUTPUT, PROJECT, BUCKET, DOMAIN, verifiedModels, lockedFiles, inventory } from './prepare.mjs';
 
 const auth = await credentials();
 const account = `/accounts/${auth.CLOUDFLARE_ACCOUNT_ID}`;
 const projectPath = `${account}/pages/projects/${PROJECT}`;
+const PROJECTS_BUCKET = 'noisy-demo-projects';
+let privateNeonConnection;
 const Envelope = z.object({ success: z.boolean(), result: z.unknown().optional(), errors: z.array(z.object({ code: z.number(), message: z.string() })).default([]) });
 class ApiError extends Error {
   constructor(message, status) { super(message); this.status = status; }
@@ -27,7 +30,7 @@ async function api(endpoint, method = 'GET', body, extraHeaders = {}) {
   if (!response.ok || !parsed.success) throw new ApiError(`${method} ${endpoint.replace(auth.CLOUDFLARE_ACCOUNT_ID, '[account]')}: HTTP ${response.status}: ${JSON.stringify(parsed.errors)}`, response.status);
   return parsed.result;
 }
-const EnvConfig = z.object({ fail_open: z.literal(false), r2_buckets: z.object({ MODELS: z.object({ name: z.literal(BUCKET) }) }) });
+const EnvConfig = z.object({ fail_open: z.literal(false), r2_buckets: z.object({ MODELS: z.object({ name: z.literal(BUCKET) }), PROJECTS: z.object({ name: z.literal(PROJECTS_BUCKET) }) }) });
 const Project = z.object({ name: z.literal(PROJECT), subdomain: z.string(), production_branch: z.literal('demo'), deployment_configs: z.object({ preview: EnvConfig, production: EnvConfig }) });
 const Deployment = z.object({ id: z.string(), url: z.url(), environment: z.enum(['preview', 'production']), latest_stage: z.object({ status: z.string() }) });
 const Prepared = z.object({ buildId: z.string(), files: z.record(z.string(), z.string()) });
@@ -57,9 +60,49 @@ async function verifiedDeployment(environment) {
 async function configureProject() {
   const projects = z.array(z.object({ name: z.string() })).parse(await api(`${account}/pages/projects`));
   if (!projects.some((project) => project.name === PROJECT)) await api(`${account}/pages/projects`, 'POST', { name: PROJECT, production_branch: 'demo' });
-  const environment = { fail_open: false, compatibility_date: '2026-10-01', r2_buckets: { MODELS: { name: BUCKET } } };
+  const environment = { fail_open: false, compatibility_date: '2026-10-01', r2_buckets: { MODELS: { name: BUCKET }, PROJECTS: { name: PROJECTS_BUCKET } } };
   await api(projectPath, 'PATCH', { deployment_configs: { preview: environment, production: environment } });
   return Project.parse(await api(projectPath));
+}
+
+async function projectsBucket() {
+  const buckets = z.object({ buckets: z.array(z.object({ name: z.string(), storage_class: z.string() })) })
+    .parse(await api(`${account}/r2/buckets?name_contains=${PROJECTS_BUCKET}`));
+  const bucket = buckets.buckets.find((item) => item.name === PROJECTS_BUCKET);
+  if (bucket === undefined) await api(`${account}/r2/buckets`, 'POST', { name: PROJECTS_BUCKET, storage_class: 'Standard' });
+  else if (bucket.storage_class !== 'Standard') throw new Error('Existing projects bucket is not Standard storage.');
+  await configureProject();
+  console.log('Projects bucket ready and bound as PROJECTS in preview and production.');
+}
+
+async function migrate() {
+  privateNeonConnection = await neonConnection();
+  await neonSql(privateNeonConnection, [
+    { query: `CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY, name text NOT NULL,
+      updated_at timestamptz NOT NULL, scene jsonb NOT NULL, masks jsonb NOT NULL,
+      revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0 AND revision <= 9007199254740991))`, params: [] },
+    { query: 'ALTER TABLE projects ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0 AND revision <= 9007199254740991)', params: [] },
+    { query: 'CREATE TABLE IF NOT EXISTS tombstones (id text PRIMARY KEY)', params: [] },
+  ]);
+  console.log('Neon migration complete: projects (including revision) and tombstones are ready.');
+}
+
+async function secrets() {
+  privateNeonConnection = await neonConnection();
+  const current = z.object({ deployment_configs: z.object({
+    preview: z.object({ env_vars: z.record(z.string(), z.unknown()).default({}) }),
+    production: z.object({ env_vars: z.record(z.string(), z.unknown()).default({}) }),
+  }) }).parse(await api(projectPath));
+  const environments = Object.fromEntries(['preview', 'production'].map((environment) => [environment, {
+    env_vars: { ...current.deployment_configs[environment].env_vars, NEON_DATABASE_URL: { type: 'secret_text', value: privateNeonConnection } },
+  }]));
+  await api(projectPath, 'PATCH', { deployment_configs: environments });
+  const confirmed = z.object({ deployment_configs: z.object({
+    preview: z.object({ env_vars: z.object({ NEON_DATABASE_URL: z.object({ type: z.literal('secret_text') }) }) }),
+    production: z.object({ env_vars: z.object({ NEON_DATABASE_URL: z.object({ type: z.literal('secret_text') }) }) }),
+  }) }).safeParse(await api(projectPath));
+  if (!confirmed.success) throw new Error('Could not confirm the Neon secret in both environments.');
+  console.log('NEON_DATABASE_URL secret set in preview and production; value withheld.');
 }
 
 async function upload() {
@@ -180,6 +223,9 @@ async function cacheRule() {
 const command = process.argv[2];
 try {
   switch (command) {
+    case 'projects': await projectsBucket(); break;
+    case 'migrate': await migrate(); break;
+    case 'secrets': await secrets(); break;
     case 'upload': await upload(); break;
     case 'inventory': await remoteModels(true); break;
     case 'preview': await deploy('preview'); break;
@@ -192,9 +238,11 @@ try {
       break;
     }
     case 'status': console.log(JSON.stringify({ project: Project.parse(await api(projectPath)), domain: await api(`${projectPath}/domains/${DOMAIN}`) }, null, 2)); break;
-    default: throw new Error('Choose upload, inventory, preview, production, connect, cache-rule, or status.');
+    default: throw new Error('Choose projects, migrate, secrets, upload, inventory, preview, production, connect, cache-rule, or status.');
   }
 } catch (error) {
-  console.error(String(error).replaceAll(auth.CLOUDFLARE_API_TOKEN, '[redacted]'));
+  let safe = String(error).replaceAll(auth.CLOUDFLARE_API_TOKEN, '[redacted]');
+  if (privateNeonConnection !== undefined) safe = safe.replaceAll(privateNeonConnection, '[redacted]');
+  console.error(safe);
   process.exitCode = 1;
 }

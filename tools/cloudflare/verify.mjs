@@ -1,10 +1,12 @@
 // Direct HTTP verification of a prepared deployment, including every model byte.
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expectedHeaders, loadHeaderContract } from '../headers.mjs';
 import { ROOT, STATE, OUTPUT, lockedFiles } from './prepare.mjs';
+import { serializeScene } from '../../src/projects/serialize.ts';
+import { fiveClusterDocument } from '../../test/fixtures/documents.ts';
 
 const base = new URL(process.argv[2]);
 assert.equal(base.protocol, 'https:');
@@ -16,11 +18,84 @@ const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 async function request(urlPath, init = {}) {
   const response = await fetch(new URL(urlPath, base), { ...init, redirect: 'manual', signal: AbortSignal.timeout(180_000) });
   for (const [name, value] of Object.entries(expectedHeaders(contract, urlPath, { status: response.status }))) {
-    if (response.status >= 400 && name === 'Content-Type') continue; // Errors are explicit plain text.
+    if ((response.status >= 400 || urlPath.startsWith('/api/projects')) && name === 'Content-Type') continue;
     assert.equal(response.headers.get(name), value, `${urlPath}: ${name}`);
   }
   return response;
 }
+
+// ci.mjs already runs this before promotion. Use a fresh id and remove only our
+// own project; preview and production share the real store with the editor.
+async function projectsRoundTrip() {
+  const json = async (urlPath, init = {}, status = 200) => {
+    const response = await request(urlPath, init);
+    assert.equal(response.status, status, urlPath);
+    assert.equal(response.headers.get('Content-Type'), 'application/json');
+    return await response.json();
+  };
+  const before = await json('/api/projects');
+  assert.ok(Array.isArray(before.projects));
+  const id = randomUUID(), route = `/api/projects/${id}`;
+  const photo = new Uint8Array([0, 1, 255, 0, 128, 7]);
+  const mask = new Uint8Array([0, 1, 127, 128, 254, 255]);
+  const asset = digest(mask);
+  const thumbnail = new Uint8Array([255, 216, 1, 2, 255, 217]);
+  const source = fiveClusterDocument(), first = source.objects[0];
+  assert.ok(first);
+  const plane = { format: 'u8', size: { width: 3, height: 2 }, data: mask };
+  const document = { ...source, id, title: 'Hosting verification', analysis: { ...source.analysis, plate: null },
+    objects: [{ ...first, produced: { ...first.produced, mask: { asset, format: 'u8', size: plane.size } } }] };
+  const scene = serializeScene(document, new Map([[asset, plane]]), 0);
+  const put = async (part, body, type) => assert.deepEqual(await json(`${route}/${part}`, {
+    method: 'PUT', headers: { 'Content-Type': type }, body,
+  }), { ok: true });
+  try {
+    await put('photo', photo, 'image/png');
+    await put(`masks/${asset}`, mask, 'application/octet-stream');
+    await put('thumbnail', thumbnail, 'image/jpeg');
+    await put('scene', JSON.stringify(scene), 'application/json');
+    const listed = (await json('/api/projects')).projects.find((project) => project.id === id);
+    assert.equal(listed?.name, document.title);
+    assert.equal(listed?.thumbnail, `${route}/thumbnail`);
+    assert.ok(Number.isFinite(Date.parse(listed.updatedAt)));
+    assert.deepEqual(await json(`${route}/scene`), scene);
+    for (const [part, expected, type] of [['photo', photo, 'image/png'], [`masks/${asset}`, mask, 'application/octet-stream'], ['thumbnail', thumbnail, 'image/jpeg']]) {
+      const response = await request(`${route}/${part}`);
+      assert.equal(response.status, 200); assert.equal(response.headers.get('Content-Type'), type);
+      assert.deepEqual(new Uint8Array(await response.arrayBuffer()), expected);
+    }
+    // Exercise the real database's lock/upsert protocol, not just the SQL stub.
+    const write = (revision) => json(`${route}/scene`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...scene, revision }) });
+    await write(1);
+    assert.deepEqual(await json(`${route}/scene`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scene) }, 409), { error: 'The project scene revision must increase.' });
+    assert.equal((await json(`${route}/scene`)).revision, 1);
+    const competing = await Promise.all([2, 3].map((revision) => request(`${route}/scene`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...scene, revision }),
+    })));
+    for (const response of competing) {
+      assert.ok(response.status === 200 || response.status === 409);
+      assert.deepEqual(await response.json(), response.status === 200 ? { ok: true } : { error: 'The project scene revision must increase.' });
+    }
+    assert.equal((await json(`${route}/scene`)).revision, 3);
+    const [removed, late] = await Promise.all([json(route, { method: 'DELETE' }), request(`${route}/scene`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...scene, revision: 4 }),
+    })]);
+    assert.deepEqual(removed, { ok: true });
+    assert.ok(late.status === 200 || late.status === 410);
+    assert.deepEqual(await late.json(), late.status === 200 ? { ok: true } : { error: 'The project was deleted.' });
+    assert.deepEqual(await json(`${route}/photo`, { method: 'PUT', headers: { 'Content-Type': 'image/png' }, body: photo }, 410), { error: 'The project was deleted.' });
+    assert.deepEqual(await json(`${route}/scene`, {}, 404), { error: 'The project was not found.' });
+    const after = await json('/api/projects');
+    assert.ok(!after.projects.some((project) => project.id === id));
+    console.log(`PASS projects: photo, mask, thumbnail and scene PUT/GET byte for byte; list, revision 409, concurrent saves/delete, tombstone 410; ${after.projects.length} projects remain (verification id absent).`);
+    if (before.projects.length === 0 && after.projects.length === 0) console.log('PASS projects list empty before and after the round trip.');
+  } finally {
+    const cleanup = await request(route, { method: 'DELETE' });
+    assert.ok(cleanup.status === 200 || cleanup.status === 404);
+    assert.deepEqual(await cleanup.json(), cleanup.status === 200 ? { ok: true } : { error: 'The project was not found.' });
+  }
+}
+await projectsRoundTrip();
 for (const file of ['/', '/index.html', ...build.files.map((name) => `/${name}`)]) {
   const response = await request(file);
   assert.equal(response.status, 200, file);
