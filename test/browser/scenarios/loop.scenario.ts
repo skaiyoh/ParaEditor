@@ -1,17 +1,22 @@
 import type { Scenario } from '../scenario.ts';
 import { z } from 'zod';
-import { LOOP_ZOOM, PARALLAX_MARGIN, cameraOffset, parallaxDisplacement, loopPhase, frameCount } from '../../../src/core/motion.ts';
+import { LOOP_ZOOM, PARALLAX_MARGIN, cameraOffset, parallaxDisplacement, loopPhase, frameCount, loopZoom } from '../../../src/core/motion.ts';
+
+const travelSchema = z.object({ x: z.number(), y: z.number() });
+const parallaxSchema = z.object({ orientation: z.enum(['landscape', 'portrait']), one: travelSchema, two: travelSchema,
+  borders: z.boolean(), plateCovered: z.boolean(), still: z.boolean(), restored: z.boolean() });
 
 const resultSchema = z.object({ moved: z.boolean(), wrap: z.boolean(), still: z.boolean(), edges: z.boolean(),
   offSamples: z.array(z.number()), onSamples: z.array(z.number()), stopped: z.boolean(), controls: z.boolean(), noObjects: z.boolean(), zeroOrbit: z.boolean(),
+  parallaxControl: z.boolean(), parallax: z.array(parallaxSchema),
   landscape: z.object({ width: z.number(), height: z.number() }).nullable(), portrait: z.object({ width: z.number(), height: z.number() }).nullable() });
 
 const loopScenario: Scenario = {
-  id: 'render.loop', title: 'Parallax loop, still and borders', covers: ['D6'], target: 'dev', timeoutMs: 300_000,
+  id: 'render.loop', title: 'Parallax loop, still and borders', covers: ['D6', 'PH3'], target: 'dev', timeoutMs: 300_000,
   async run(context) {
     const { page } = context;
     await page.goto(context.baseUrl);
-    const result = await page.evaluate(resultSchema, async () => {
+    const result = await page.evaluate(resultSchema, async ({ oneZoom, twoZoom }) => {
       const demo = window.__noisyTest?.demo;
       if (demo === undefined) throw new Error('The dev surface is missing.');
       const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -55,6 +60,12 @@ const loopScenario: Scenario = {
       const landscape = demo.scene().master;
       const noObjects = demo.objects().length === 0;
       const stillOff = await bytes(await demo.downloadPng());
+      const parallaxInput = document.querySelector('#motion-parallax');
+      const inputs = Array.from(document.querySelectorAll('.inspector input[type="range"]'));
+      const orbitIndex = inputs.findIndex((input) => input.id === 'motion-orbit');
+      const parallaxControl = parallaxInput instanceof HTMLInputElement && parallaxInput.min === '0.5' && parallaxInput.max === '3' &&
+        parallaxInput.step === '0.1' && parallaxInput.value === '1' && parallaxInput.labels?.[0]?.textContent?.includes('Parallax') === true &&
+        orbitIndex >= 0 && inputs[orbitIndex + 1] === parallaxInput && inputs[orbitIndex + 2]?.id === 'motion-loopSeconds';
       const toggle = document.querySelector('[data-testid="motion-enabled"]');
       if (!(toggle instanceof HTMLInputElement)) throw new Error('No Motion toggle.');
       toggle.click();
@@ -63,9 +74,9 @@ const loopScenario: Scenario = {
         if (!(input instanceof HTMLInputElement)) throw new Error(`No ${field} input.`);
         input.value = value; input.dispatchEvent(new Event('input', { bubbles: true }));
       } };
-      setSliders([['orbit', '0.4'], ['loopSeconds', '2.6']]);
-      const changedSliders = demo.document()?.motion.orbit === .4 && demo.document()?.motion.loopSeconds === 2.6;
-      setSliders([['orbit', '0.6'], ['loopSeconds', '3']]);
+      setSliders([['orbit', '0.4'], ['parallax', '2'], ['loopSeconds', '2.6']]);
+      const changedSliders = demo.document()?.motion.orbit === .4 && demo.document()?.motion.parallax === 2 && demo.document()?.motion.loopSeconds === 2.6;
+      setSliders([['orbit', '0.6'], ['parallax', '1'], ['loopSeconds', '3']]);
       const controls = changedSliders && demo.document()?.motion.enabled === true && demo.document()?.motion.orbit === .6 && demo.document()?.motion.loopSeconds === 3;
       const count = Math.round((demo.document()?.motion.loopSeconds ?? 3) * 30);
       demo.setMotion({ orbit: 0 });
@@ -90,15 +101,68 @@ const loopScenario: Scenario = {
       const stillOnEffects = await bytes(await demo.downloadPng());
       toggle.click(); const stoppedAt = demo.frame(); await sleep(150); const stopped = stoppedAt === demo.frame() && demo.document()?.motion.enabled === false;
       still = still && equal(stillOnEffects, await bytes(await demo.downloadPng()));
+      const checkParallax = async (orientation: 'landscape' | 'portrait') => {
+        await wait(() => demo.analysis().decoderReady);
+        demo.setMotion({ enabled: false, orbit: 1, parallax: 1, loopSeconds: 4, focus: 0 });
+        demo.setStyle({ simplify: 0, grain: 0, colorNoise: 0, clipping: 0, crunch: 0, outline: 0 }); demo.setSymbols({ enabled: false });
+        const size = orientation === 'landscape' ? { width: 128, height: 96 } : { width: 96, height: 128 };
+        const mask = new Uint8Array(size.width * size.height), depth = new Float32Array(mask.length).fill(.2);
+        for (let y = size.height * .375; y < size.height * .625; y++) for (let x = size.width * .375; x < size.width * .625; x++) {
+          const i = y * size.width + x; mask[i] = 255; depth[i] = 1;
+        }
+        demo.injectMask({ ...size, data: mask }); await wait(() => demo.objects().length === 1);
+        demo.injectDepth({ format: 'f32', size, data: depth }); demo.select(null);
+        demo.setMotion({ enabled: true }); await wait(() => demo.analysis().plate && !demo.products().plateNeeded);
+        const stage = document.querySelector('[data-testid="stage"]'), renderer = window.__noisyTest?.session?.renderer();
+        if (!(stage instanceof HTMLCanvasElement) || renderer === undefined || renderer === null) throw new Error('No Parallax stage or renderer.');
+        const geometry = () => {
+          const pixels = demo.render?.readGeometryPatch?.(0, 0, stage.width, stage.height);
+          if (pixels === undefined) throw new Error('No Parallax geometry probe.');
+          return pixels;
+        };
+        const centroid = () => {
+          const pixels = geometry(); let x = 0, y = 0, count = 0;
+          for (let i = 0; i < pixels.length; i += 4) if (pixels[i] === 1 && pixels[i + 3] === 255) {
+            x += (i / 4) % stage.width; y += Math.floor(i / 4 / stage.width); count++;
+          }
+          if (count === 0) throw new Error('No near object in the Parallax fixture.');
+          return { x: x / count, y: y / count };
+        };
+        const travel = async (parallax: number, zoom: number) => {
+          demo.setMotion({ parallax }); renderer.renderView({ x: 0, y: 0 }, 0, false); const center = centroid();
+          await demo.renderFrameAt(0); const moved = centroid();
+          // Geometry zoom grows with the margin; compare camera travel in the stored frame.
+          return { x: (moved.x - center.x) / zoom, y: (moved.y - center.y) / zoom };
+        };
+        const reference = await bytes(await demo.downloadPng());
+        const one = await travel(1, oneZoom), firstFrame = await bytes(await demo.exportFrame(0));
+        const two = await travel(2, twoZoom);
+        let borders = true, plateCovered = true;
+        for (const frame of [0, 30, 60, 90]) {
+          borders = await border(await demo.exportFrame(frame)) && demo.render?.geometryEdgesCovered() === true && borders;
+          await demo.renderFrameAt(frame); const pixels = geometry();
+          // Every interior texel, including the vacated object edge, has an opaque back layer.
+          for (let i = 3; i < pixels.length; i += 4) if (pixels[i] !== 255) { plateCovered = false; break; }
+        }
+        let still = true;
+        for (const parallax of [.5, 1, 1.7, 2, 3]) {
+          demo.setMotion({ parallax }); still = equal(reference, await bytes(await demo.downloadPng())) && still;
+        }
+        demo.setMotion({ parallax: 1 });
+        const restored = equal(firstFrame, await bytes(await demo.exportFrame(0)));
+        return { orientation, one, two, borders, plateCovered, still, restored };
+      };
+      const parallax = [await checkParallax('landscape')];
       await demo.importFile(await file(true)); await wait(() => demo.analysis().depth);
       demo.setStyle({ grain: 0, colorNoise: 0, clipping: 0, crunch: 0, outline: 0 }); demo.setSymbols({ enabled: false });
       demo.setMotion({ enabled: true, orbit: .6, loopSeconds: 3 });
       for (const frame of [0, Math.floor(count / 4), Math.floor(count / 2), Math.floor(count * 3 / 4)]) edges = await border(await demo.exportFrame(frame)) && demo.render?.geometryEdgesCovered() === true && edges;
-      return { moved, wrap, still, edges, offSamples, onSamples, stopped, controls, noObjects, zeroOrbit, landscape, portrait: demo.scene().master };
-    });
+      parallax.push(await checkParallax('portrait'));
+      return { moved, wrap, still, edges, offSamples, onSamples, stopped, controls, noObjects, zeroOrbit, parallaxControl, parallax, landscape, portrait: demo.scene().master };
+    }, { oneZoom: loopZoom(1), twoZoom: loopZoom(2) });
     const median = (values: readonly number[]) => [...values].sort((a, b) => a - b)[2] ?? Infinity;
     await page.screenshot('loop');
-    const stepMotion = { enabled: true, orbit: 1, loopSeconds: 4, focus: 0 };
+    const stepMotion = { enabled: true, orbit: 1, parallax: 1, loopSeconds: 4, focus: 0 };
     const count = frameCount(stepMotion, 30);
     const frames = [count / 4, count * 3 / 4];
     const expected = frames.map((frame, i) => {
@@ -167,6 +231,13 @@ const loopScenario: Scenario = {
     context.ok('motion leaves the still export untouched', result.still);
     context.ok('landscape and portrait borders are covered', result.edges);
     context.ok('Motion controls edit the document', result.controls);
+    context.ok('desktop Parallax row follows Orbit, defaults to 1 and ranges from 0.5 to 3 by 0.1', result.parallaxControl);
+    for (const check of result.parallax) {
+      context.ok(`${check.orientation}: Parallax 2 doubles the near object's frame-space displacement at frame 0`,
+        Math.abs(check.one.x) > 10 && Math.abs(check.two.x - 2 * check.one.x) < 2 && Math.abs(check.one.y) < 1 && Math.abs(check.two.y) < 1, check);
+      context.ok(`${check.orientation}: Parallax 2 keeps every border and the exposed plate covered`, check.borders && check.plateCovered, check);
+      context.ok(`${check.orientation}: every tested amount keeps the identity still, and returning to 1 restores exact loop bytes`, check.still && check.restored, check);
+    }
     context.ok('Motion off stops the frame index', result.stopped);
     context.ok('no objects in the back-layer motion check', result.noObjects);
     context.ok('orbit zero retains the identity still', result.zeroOrbit);

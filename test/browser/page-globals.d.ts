@@ -43,6 +43,7 @@ declare global {
         injectDepth(plane: Plane<'f32'> | null): void;
         injectFace(center: Vec2 | null): void;
         injectOrientation(orientation: Pick<DeviceOrientationEvent, 'beta' | 'gamma'>): void;
+        injectScreenAngle(angle: number | null): void;
         windowReady(): boolean;
         windowFrames(): number;
         windowTracks(): readonly MediaStreamTrack[];

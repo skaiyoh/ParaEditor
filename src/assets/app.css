@@ -149,3 +149,28 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bo
   .range-row { grid-template-columns: 88px minmax(0, 1fr) 48px; gap: 6px; padding: 0 12px; }
   .build-meta [data-testid="isolation"] { display: none; }
 }
+
+/* The phone tier: phones in any orientation, and a tablet held upright (an iPad Pro is 834 or 1024 px wide in portrait). */
+@media (max-width: 760px), (max-height: 500px), (max-width: 1100px) and (orientation: portrait) {
+  .phone-editor { position: relative; display: block; height: 100dvh; min-height: 0; overflow: hidden; }
+  .phone-strip { height: 44px; }
+  .phone-strip .photo-name { flex: 1; }
+  .phone-stage { position: absolute; inset: 44px 0 0; display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; }
+  .has-photo .phone-stage { bottom: calc(70px + env(safe-area-inset-bottom)); }
+  .phone-stage .stage-canvas { width: 100%; height: 100%; object-fit: contain; touch-action: none; }
+  .phone-editor button, .phone-editor input[type="range"] { touch-action: manipulation; }
+  .phone-sheet { position: absolute; bottom: 0; left: 0; right: 0; max-height: calc(100% - 44px); display: flex; flex-direction: column; background: var(--panel); border-top: 1px solid var(--hairline); }
+  .has-photo .phone-sheet { bottom: calc(70px + env(safe-area-inset-bottom)); max-height: calc(100% - 114px - env(safe-area-inset-bottom)); }
+  .sheet-handle { position: relative; display: flex; align-items: center; flex-shrink: 0; width: 100%; height: 44px; padding: 8px 16px 0; border-radius: 0; text-align: left; }
+  .sheet-handle::before { content: ''; position: absolute; top: 2px; left: calc(50% - 18px); width: 36px; height: 4px; border-radius: 2px; background: var(--secondary); }
+  .sheet-handle .status-line { padding: 0; font-size: var(--type-ui); }
+  .phone-tools { min-height: 0; overflow-y: auto; }
+  .phone-tools .range-row { grid-template-columns: 96px minmax(0, 1fr) 48px; gap: 8px; padding: 0 16px; }
+  .phone-tools .swatch-grid { grid-template-columns: repeat(8, minmax(0, 40px)); }
+  .phone-toolbar { position: absolute; bottom: calc(12px + env(safe-area-inset-bottom)); left: 12px; right: 12px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 0; padding: 0; border: 1px solid var(--hairline); border-radius: var(--radius); background: var(--panel); }
+  .phone-toolbar button { min-width: 0; padding: 0 4px; }
+  .phone-toolbar .primary-action { color: var(--ground); background: var(--accent); font-size: var(--type-ui); font-weight: 600; }
+  .phone-toolbar .primary-action:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
+  .phone-toolbar .primary-action:active:not(:disabled) { filter: brightness(.9); }
+  .phone-toolbar .primary-action:disabled { background: var(--raised); color: var(--secondary); }
+}

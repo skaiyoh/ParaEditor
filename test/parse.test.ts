@@ -257,7 +257,9 @@ test("a migration that writes to its argument never reaches the caller's value",
 test('a value whose getters or proxy traps throw, before or after a migration, fails invalid and does not throw', () => {
   const throwingTitle = { ...minimalDocument(), get title(): string { throw new Error('title'); } };
   assert.equal(invalidDetail(parseDocument(throwingTitle)), 'the strict parse threw Error: title');
-  assert.equal(invalidDetail(parseDocumentWith(SYNTHETIC)(throwingTitle)), 'the document could not be copied for its migrations: Error: title');
+  assert.equal(invalidDetail(parseDocumentWith(SYNTHETIC)({
+    ...versionZeroDocument(), get title(): string { throw new Error('title'); },
+  })), 'the document could not be copied for its migrations: Error: title');
   const returnsGetter: Migration = () => ({ ...versionZeroDocument(), version: 1, get title(): never { throw new Error('boom'); } });
   assert.equal(invalidDetail(parseDocumentWith([returnsGetter])(versionZeroDocument())), 'the strict parse threw Error: boom');
   const throwingVersion: Migration = () => ({ get version(): never { throw new Error('version'); } });
@@ -365,7 +367,7 @@ test('parseDocumentWith types its documents at its table\'s length, and parseDoc
   assert.ok(result.ok);
   const version: 2 = result.value.version;
   assert.equal(version, 2);
-  // @ts-expect-error a document of the two-migration chain is not a document of the one-entry table
+  // Both the synthetic chain and the current document now have version 2.
   const current: SceneDocument = result.value;
   assert.equal(current.version, 2);
 });

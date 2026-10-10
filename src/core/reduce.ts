@@ -112,6 +112,7 @@ const SURFACE: Coercers<Partial<Surface>> = {
 const MOTION: Coercers<Partial<Motion>> = {
   enabled: keep,
   orbit: num('motion.orbit'),
+  parallax: num('motion.parallax'),
   loopSeconds: num('motion.loopSeconds'),
   focus: num('motion.focus'),
 };

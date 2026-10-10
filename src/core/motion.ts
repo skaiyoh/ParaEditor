@@ -2,7 +2,7 @@
 // frame count, the phase, the camera's path and the parallax it gives a point,
 // and the three object motions with the bound that keeps a moving object
 // inside the frame. The loop crop is written here and nowhere else: every
-// module that needs the margin or the zoom imports these constants.
+// module that needs the margin or the zoom imports them from here.
 // The functions over plain numbers are the reference the renderer's shaders
 // are to evaluate and be tested against.
 // Pure: no browser global, no Node API, no I/O, no clock, no randomness.
@@ -16,15 +16,25 @@ export type Vec2 = { readonly x: number; readonly y: number };
 // ---------------------------------------------------------------------------
 // the loop crop
 
-/** The frame fraction a loop with camera orbit hides on each side. */
+/** The frame fraction a loop at Parallax 1 hides on each side. */
 export const PARALLAX_MARGIN = 0.02;
+
+/** The crop and maximum camera travel on each axis at the given Parallax amount. */
+export function parallaxMargin(parallax: number): number {
+  return PARALLAX_MARGIN * parallax;
+}
+
+/** The zoom that keeps the effective margin covered, about the frame center. */
+export function loopZoom(parallax: number): number {
+  return 1 / (1 - 2 * parallaxMargin(parallax));
+}
 
 /**
  * The loop camera's zoom about the frame center while the effective orbit is
  * above 0: it shows the central `1 - 2 * PARALLAX_MARGIN` of each axis, so a
  * displacement of at most PARALLAX_MARGIN never uncovers the frame's edge.
  */
-export const LOOP_ZOOM = 1 / (1 - 2 * PARALLAX_MARGIN);
+export const LOOP_ZOOM = loopZoom(1);
 
 /**
  * The camera orbit a loop runs with: `motion.orbit` while motion is on, and 0

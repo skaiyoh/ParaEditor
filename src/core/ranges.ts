@@ -78,6 +78,7 @@ export const RANGES = {
   'surface.scale': unit,
 
   'motion.orbit': unit,
+  'motion.parallax': { min: 0.5, max: 3, kind: 'real' },
   'motion.loopSeconds': { min: 2, max: 6, kind: 'real' },
   'motion.focus': unit,
 

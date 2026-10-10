@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loopTapPoint } from '../src/session/loop.ts';
-import { LOOP_ZOOM, PARALLAX_MARGIN } from '../src/core/motion.ts';
+import { loopZoom, parallaxMargin } from '../src/core/motion.ts';
 import { frameAtElapsed, wrapFrame } from '../src/render/loop.ts';
 
 test('30 fps frame stepper boundaries, skipped callbacks and exact wrap', () => {
@@ -18,12 +18,15 @@ test('30 fps frame stepper boundaries, skipped callbacks and exact wrap', () => 
 });
 
 test('loop taps undo center zoom for the center and both corners', () => {
-  assert.deepEqual(loopTapPoint({ x: .5, y: .5 }), { x: .5, y: .5 });
-  const near = loopTapPoint({ x: 0, y: 0 }), far = loopTapPoint({ x: 1, y: 1 });
-  for (const value of [near.x, near.y]) assert.ok(Math.abs(value - PARALLAX_MARGIN) < 1e-12);
-  for (const value of [far.x, far.y]) assert.ok(Math.abs(value - (1 - PARALLAX_MARGIN)) < 1e-12);
-  // A stored corner projects outward by LOOP_ZOOM; its inverse lands back
-  // on the corner. A screen corner instead samples the cropped frame inset.
-  const projectedCorner = .5 - .5 * LOOP_ZOOM;
-  assert.deepEqual(loopTapPoint({ x: projectedCorner, y: projectedCorner }), { x: 0, y: 0 });
+  for (const parallax of [.5, 1, 2, 3]) {
+    const zoom = loopZoom(parallax), margin = parallaxMargin(parallax);
+    assert.deepEqual(loopTapPoint({ x: .5, y: .5 }, zoom), { x: .5, y: .5 });
+    const near = loopTapPoint({ x: 0, y: 0 }, zoom), far = loopTapPoint({ x: 1, y: 1 }, zoom);
+    for (const value of [near.x, near.y]) assert.ok(Math.abs(value - margin) < 1e-12);
+    for (const value of [far.x, far.y]) assert.ok(Math.abs(value - (1 - margin)) < 1e-12);
+    // A stored corner projects outward by the document's zoom; its inverse lands back
+    // on the corner. A screen corner instead samples the cropped frame inset.
+    const projectedCorner = .5 - .5 * zoom;
+    assert.deepEqual(loopTapPoint({ x: projectedCorner, y: projectedCorner }, zoom), { x: 0, y: 0 });
+  }
 });

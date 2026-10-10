@@ -79,10 +79,10 @@ test('the version-zero migration adds the disabled surface without changing any 
   const { surface: _surface, ...current } = fiveClusterDocument();
   const legacy = { ...current, version: 0 };
   const before = structuredClone(legacy);
-  assert.equal(SCENE_VERSION, 1);
-  assert.equal(MIGRATIONS.length, 1);
+  assert.equal(SCENE_VERSION, 2);
+  assert.equal(MIGRATIONS.length, 2);
   const parsed = parseDocument(legacy);
-  assert.deepEqual(parsed, { ok: true, value: { ...legacy, version: 1, surface: defaultSurface() } });
+  assert.deepEqual(parsed, { ok: true, value: { ...legacy, version: 2, surface: defaultSurface() } });
   assert.deepEqual(legacy, before);
   assert.deepEqual(parseDocument(JSON.parse(JSON.stringify(legacy))), parsed);
   const extra = parseDocument({ ...legacy, unexpected: 1 });

@@ -39,7 +39,8 @@ jobs:
           npm run build:production
       - name: Test without Chrome
         run: |
-          mapfile -t tests < <(find test -maxdepth 1 -name '*.test.ts' ! -name 'drive-chrome.test.ts' | sort)
+          # serve.test.ts and serve-production.test.ts can hang the runner (plan/findings.tsv F13); they run on the Mac before each export.
+          mapfile -t tests < <(find test -maxdepth 1 -name '*.test.ts' ! -name 'drive-chrome.test.ts' ! -name 'serve.test.ts' ! -name 'serve-production.test.ts' | sort)
           node --test --test-timeout=60000 "${tests[@]}" test/cloudflare-credentials.test.mjs
       - name: Deploy and verify Cloudflare
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')

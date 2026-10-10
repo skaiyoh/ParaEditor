@@ -9,7 +9,7 @@ import type { Oklch, Plane } from '../core/raster.ts';
 import { applyEdit } from '../core/reduce.ts';
 import type { Vec2 } from '../core/motion.ts';
 import { windowPlateNeeded } from './window.ts';
-import type { Orientation } from './tilt.ts';
+import { injectScreenAngle, type Orientation } from './tilt.ts';
 
 export type DemoTestSurface = {
   importFile(file: File): Promise<void>;
@@ -38,6 +38,7 @@ export type DemoTestSurface = {
   injectDepth(plane: Plane<'f32'> | null): void;
   injectFace(center: Vec2 | null): void;
   injectOrientation(orientation: Orientation): void;
+  injectScreenAngle(angle: number | null): void;
   windowReady(): boolean;
   windowFrames(): number;
   windowTracks(): readonly MediaStreamTrack[];
@@ -109,6 +110,7 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
     setFry: (f) => session.setFry(f),
     injectFace: (center) => session.injectFace(center),
     injectOrientation: (orientation) => session.injectOrientation(orientation),
+    injectScreenAngle,
     windowReady: () => session.windowReady(),
     windowFrames: () => session.windowFrames(),
     windowTracks: () => session.windowTracks(),

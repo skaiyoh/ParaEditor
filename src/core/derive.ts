@@ -7,7 +7,7 @@
 
 import { sameValue } from './equal.ts';
 import type { AssetId, NonEmpty, ObjectId } from './ids.ts';
-import { effectiveOrbit, motionBound, PARALLAX_MARGIN, type Vec2 } from './motion.ts';
+import { effectiveOrbit, motionBound, parallaxMargin, type Vec2 } from './motion.ts';
 import { sortedMasks } from './produce.ts';
 import type { ImagePoint, Plane, Rect, Size } from './raster.ts';
 import type { SceneDocument, SceneObject } from './types.ts';
@@ -267,7 +267,8 @@ function dilate(hole: Uint8Array, size: Size, radius: number): Uint8Array {
  * The hole an inpaint fills, at `size`: 255 at every texel whose center some
  * object's mask covers by maskCovers's rule, the union over every object
  * `masks` holds a mask for, then grown by a disc whose radius is 1% of the
- * long edge of `size`, rounded up to whole texels (21 at 2048); 0 elsewhere.
+ * long edge of `size`, rounded up to whole texels (21 at 2048), scaled by
+ * Parallax and rounded up again; 0 elsewhere.
  */
 export function holeMask(doc: SceneDocument, masks: ReadonlyMap<ObjectId, Plane<'u8'>>, size: Size): Plane<'u8'> {
   const hole = new Uint8Array(size.width * size.height);
@@ -275,8 +276,13 @@ export function holeMask(doc: SceneDocument, masks: ReadonlyMap<ObjectId, Plane<
     const mask = masks.get(object.id);
     if (mask !== undefined) markCovered(hole, size, mask);
   }
-  const radius = Math.ceil(Math.max(size.width, size.height) / 100);
+  const radius = holeRadius(doc, size);
   return { format: 'u8', size: { width: size.width, height: size.height }, data: dilate(hole, size, radius) };
+}
+
+/** Scale today's rounded dilation radius so Parallax 1 preserves it and 2 doubles it exactly. */
+export function holeRadius(doc: SceneDocument, size: Size): number {
+  return Math.ceil(Math.ceil(Math.max(size.width, size.height) / 100) * doc.motion.parallax);
 }
 
 // ---------------------------------------------------------------------------
@@ -316,14 +322,14 @@ export function anchorDisparity(doc: SceneDocument): number | null {
 
 /**
  * The largest camera offset, in frame fractions, at which no point moves
- * farther than PARALLAX_MARGIN: PARALLAX_MARGIN, since the parallax gain
+ * farther than the effective parallax margin, since the parallax gain
  * scales the farthest point from the anchor to move by exactly the offset;
  * 0 when the document has no depth map, even with a focus set, since then no
  * point has a disparity to move by. With a depth map, anchorDisparity is
  * never null.
  */
 export function parallaxClamp(doc: SceneDocument): number {
-  return doc.analysis.depth === null ? 0 : PARALLAX_MARGIN;
+  return doc.analysis.depth === null ? 0 : parallaxMargin(doc.motion.parallax);
 }
 
 /** The radius of the loop camera's circle, in frame fractions: the effective orbit times the parallax clamp, 0 while motion is off. */

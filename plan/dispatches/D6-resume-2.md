@@ -1,9 +1,0 @@
-# D6 resume 2: two checks the lead specified wrongly
-
-Your five fixes are in and 806 node tests pass; six scenarios pass. The two new checks fail, and in both cases the check is wrong, not the fix:
-
-1. `render.loop`, "left/right step near-edge cuts are symmetric within 4 px": measured `cutWidths.step = [21.6, 0.4]`. With a depth test that is the correct result: when the near half moves toward the far half the near side covers it (a cut of the far region equal to the near edge's displacement), and when it moves away the far region is revealed as a stretched gap, no cut. Replace the check with what the depth test actually guarantees: the near region is never occluded, meaning its visible extent along the scan line at the quarter and three-quarter frames is at least its frame-zero extent minus 1 px, in both directions; and record the far-side cut at the quarter frame for the log without asserting a value.
-2. `render.loop-objects`, "default simplify treats exposed plate pixels as background within 2 levels": `backgroundPixels [170,170,170]` against `backgroundReference [158,166,166]`. The reference was exported after `reset()`, where the object's pinned clusters are gone, so the palette differs and the comparison is meaningless. Replace the reference with pixels from the same frame: with the object present and Motion on, sample the background far from the disc (the fixture's plate and background are the same flat gray) in the same quarter-loop export, and assert the exposed plate pixels match those within 2 levels. That is the property the fix provides: the revealed plate is filtered like the rest of the background, not like the subject.
-
-Change only `test/browser/scenarios/loop.scenario.ts`.
-Run `npm run typecheck` and the node-test command from `AGENTS.md`, add a "Resume 2" line to the Return, and stop.

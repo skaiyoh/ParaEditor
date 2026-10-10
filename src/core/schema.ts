@@ -289,6 +289,7 @@ export const motionSchema = z
   .strictObject({
     enabled: z.boolean(),
     orbit: inRange('motion.orbit'),
+    parallax: inRange('motion.parallax'),
     loopSeconds: inRange('motion.loopSeconds'),
     focus: inRange('motion.focus').nullable(),
   })

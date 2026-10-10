@@ -1,10 +1,9 @@
 import { frameAtElapsed } from '../render/loop.ts';
-import { LOOP_ZOOM } from '../core/motion.ts';
 import type { ImagePoint } from '../core/raster.ts';
 
 /** Convert a zoomed preview point to the stored frame, about its center. */
-export function loopTapPoint(at: ImagePoint): ImagePoint {
-  return { x: .5 + (at.x - .5) / LOOP_ZOOM, y: .5 + (at.y - .5) / LOOP_ZOOM };
+export function loopTapPoint(at: ImagePoint, zoom: number): ImagePoint {
+  return { x: .5 + (at.x - .5) / zoom, y: .5 + (at.y - .5) / zoom };
 }
 
 /** The sole playback clock. A slow callback skips frames instead of stretching time. */

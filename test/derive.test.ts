@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { anchorDisparity, assetRefs, holeMask, labelAt, layers, maskCovers, plateNeeded } from '../src/core/derive.ts';
+import { anchorDisparity, assetRefs, holeMask, holeRadius, labelAt, layers, maskCovers, plateNeeded } from '../src/core/derive.ts';
 import type { AssetId, ObjectId } from '../src/core/ids.ts';
 import { isAssetId } from '../src/core/ids.ts';
 import { sortedMasks } from '../src/core/produce.ts';
@@ -262,7 +262,7 @@ function referenceHole(doc: SceneDocument, masks: ReadonlyMap<ObjectId, Plane<'u
       if (doc.objects.some((o) => { const mask = masks.get(o.id); return mask !== undefined && maskCovers(mask, at); })) union[y * width + x] = 1;
     }
   }
-  const radius = Math.ceil(Math.max(width, height) / 100);
+  const radius = Math.ceil(Math.ceil(Math.max(width, height) / 100) * doc.motion.parallax);
   const out = new Uint8Array(width * height);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -349,6 +349,25 @@ test('holeMask of no objects, or of objects whose masks are absent, is empty', (
   assert.ok(holeMask(fiveClusterDocument(), new Map(), size).data.every((v) => v === 0));
 });
 
+test('Parallax scales the rounded hole radius and its disc in portrait and landscape', () => {
+  const single = object(0, { bounds: box(0, 0, 10, 10), median: .5 });
+  const base = withObjects([single]);
+  for (const size of [{ width: 301, height: 200 }, { width: 200, height: 301 }]) {
+    const cx = Math.floor(size.width / 2), cy = Math.floor(size.height / 2);
+    const masks = new Map([[single.id, plane(size, (x, y) => x === cx && y === cy ? 255 : 0)]]);
+    for (const parallax of [.5, 1, 2, 3]) {
+      const doc = { ...base, motion: { ...base.motion, parallax } };
+      const radius = holeRadius(doc, size);
+      assert.equal(radius, Math.ceil(4 * parallax), `amount ${parallax}, ${size.width}x${size.height}`);
+      const hole = holeMask(doc, masks, size);
+      for (let y = 0; y < size.height; y++) for (let x = 0; x < size.width; x++) {
+        const expected = (x - cx) ** 2 + (y - cy) ** 2 <= radius ** 2 ? 255 : 0;
+        assert.equal(hole.data[y * size.width + x], expected, `amount ${parallax} at ${x},${y}`);
+      }
+    }
+  }
+});
+
 test('holeMask over four master-size masks at 2048 x 1536 runs in under two seconds', () => {
   const master = { width: 2048, height: 1536 };
   const { doc, masks } = ellipseScene([master, master, master, master]);
@@ -386,7 +405,7 @@ function plateScene(spec: { readonly enabled: boolean; readonly orbit: number; r
 }
 
 test('no plate is needed without objects, without anything moving, or when forMasks equals the sorted mask ids', () => {
-  const noObjects = { ...minimalDocument(), motion: { enabled: true, orbit: 1, loopSeconds: 3, focus: null } };
+  const noObjects = { ...minimalDocument(), motion: { enabled: true, orbit: 1, parallax: 1, loopSeconds: 3, focus: null } };
   assert.equal(plateNeeded(noObjects), false);
   assert.equal(plateNeeded(plateScene({ enabled: false, orbit: 1, motion: { kind: 'none' }, plate: 'none' })), false, 'motion off, no object motion');
   assert.equal(plateNeeded(plateScene({ enabled: true, orbit: 0, motion: { kind: 'none' }, plate: 'none' })), false, 'orbit 0, no object motion');

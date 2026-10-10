@@ -21,7 +21,16 @@ const addSurface: Migration = (json) => {
   return { ...json, version: 1, surface: { enabled: false, pattern: 'bars', relief: 0.5, refraction: 0.5, shine: 0.5, scale: 0.5 } };
 };
 
-export const MIGRATIONS = [addSurface] as const satisfies readonly Migration[];
+/** Version 1 to 2. Preserve the old camera travel for every existing scene. */
+const addParallax: Migration = (json) => {
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) return json;
+  const motion = 'motion' in json ? json.motion : null;
+  // Leave malformed motion untouched for the strict parse to report it.
+  const patch = typeof motion === 'object' && motion !== null && !Array.isArray(motion) ? { motion: { ...motion, parallax: 1 } } : {};
+  return { ...json, ...patch, version: 2 };
+};
+
+export const MIGRATIONS = [addSurface, addParallax] as const satisfies readonly Migration[];
 
 /** The table's length, typed as the tuple's literal length, so `SceneDocument['version']` is a literal type. */
 export const SCENE_VERSION = MIGRATIONS.length;

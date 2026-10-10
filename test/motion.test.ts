@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { anchorDisparity, cameraRadius, objectMotionBound, parallaxClamp } from '../src/core/derive.ts';
+import { anchorDisparity, cameraRadius, holeRadius, objectMotionBound, parallaxClamp } from '../src/core/derive.ts';
 import {
   BOB_AMPLITUDE,
   bobOffset,
@@ -16,10 +16,12 @@ import {
   effectiveOrbit,
   frameCount,
   LOOP_ZOOM,
+  loopZoom,
   loopPhase,
   motionBound,
   objectDisplacement,
   PARALLAX_MARGIN,
+  parallaxMargin,
   parallaxDisplacement,
   parallaxReach,
   SWAY_ANGLE,
@@ -74,7 +76,7 @@ function perimeter(bounds: Rect): readonly Vec2[] {
 
 test('effectiveOrbit is 0 with motion off and motion.orbit with it on', () => {
   for (const orbit of [0, 0.25, 0.6, 1]) {
-    const motion: Motion = { enabled: false, orbit, loopSeconds: 3, focus: null };
+    const motion: Motion = { enabled: false, orbit, parallax: 1, loopSeconds: 3, focus: null };
     assert.equal(effectiveOrbit(motion), 0, `off at orbit ${orbit}`);
     assert.equal(effectiveOrbit({ ...motion, enabled: true }), orbit, `on at orbit ${orbit}`);
   }
@@ -86,11 +88,32 @@ test('LOOP_ZOOM shows the central 1 - 2 * PARALLAX_MARGIN of each axis', () => {
   assert.ok(Math.abs(LOOP_ZOOM * (1 - 2 * PARALLAX_MARGIN) - 1) < 1e-15);
 });
 
+test('Parallax preserves the default crop and scales travel while zoom covers every allowed amount', () => {
+  assert.equal(parallaxMargin(1), PARALLAX_MARGIN);
+  assert.equal(loopZoom(1), LOOP_ZOOM);
+  assert.equal(parallaxMargin(2), 2 * PARALLAX_MARGIN);
+  assert.equal(loopZoom(2), 1 / (1 - 4 * PARALLAX_MARGIN));
+  for (const amount of [.5, 1, 1.7, 2, 3]) {
+    const margin = parallaxMargin(amount), zoom = loopZoom(amount);
+    for (const disparity of [0, .3, .5, 1]) {
+      for (const focus of [0, .2, .5, .9, 1]) {
+        for (const phase of PHASES) {
+          const displacement = parallaxDisplacement(cameraOffset(margin, phase), disparity, focus);
+          for (const delta of [displacement.x, displacement.y]) {
+            assert.ok((delta - .5) * zoom + .5 <= 1e-15, `${amount}: the leading edge covers the frame`);
+            assert.ok((delta + .5) * zoom + .5 >= 1 - 1e-15, `${amount}: the trailing edge covers the frame`);
+          }
+        }
+      }
+    }
+  }
+});
+
 // ---------------------------------------------------------------------------
 // frames and closure
 
 test('frameCount is round(loopSeconds * fps) with a half rounded up, as decimal arithmetic gives the half, and at least 1', () => {
-  const motion = (loopSeconds: number): Motion => ({ enabled: true, orbit: 0.6, loopSeconds, focus: null });
+  const motion = (loopSeconds: number): Motion => ({ enabled: true, orbit: 0.6, parallax: 1, loopSeconds, focus: null });
   assert.equal(frameCount(motion(3), 30), 90);
   assert.equal(frameCount(motion(3), 10), 30);
   assert.equal(frameCount(motion(3), 12.5), 38, '37.5 rounds up');
@@ -114,7 +137,7 @@ test('every periodic term at phase 1 equals its value at phase 0, bit for bit, a
   const counts = new Set<number>();
   for (const loopSeconds of [2, 2.5, 3, 4.7, 6]) {
     for (const fps of [30, 10, 12.5, 100 / 6, 100 / 7, 25]) {
-      const count = frameCount({ enabled: true, orbit: 1, loopSeconds, focus: null }, fps);
+      const count = frameCount({ enabled: true, orbit: 1, parallax: 1, loopSeconds, focus: null }, fps);
       counts.add(count);
       const last = loopPhase(count, count);
       assert.equal(last, 1, `frame ${count} of ${count} is phase 1`);
@@ -167,6 +190,31 @@ test('parallaxClamp never exceeds PARALLAX_MARGIN, and is 0 without a depth map,
   assert.equal(parallaxClamp(focused), 0);
   assert.equal(cameraRadius(focused), 0);
   assert.equal(cameraRadius(withMotion({ enabled: false, orbit: 1 })), 0, 'motion off: no camera circle');
+});
+
+test('Parallax 1 preserves the camera and hole, 2 doubles their travel, and the still has zero offset at every amount', () => {
+  const one = withMotion({ enabled: true, orbit: .6, parallax: 1 });
+  const two = withMotion({ enabled: true, orbit: .6, parallax: 2 });
+  assert.equal(parallaxClamp(one), .02);
+  assert.equal(cameraRadius(one), .6 * .02);
+  assert.equal(holeRadius(one, { width: 2048, height: 1536 }), 21);
+  assert.equal(parallaxClamp(two), 2 * parallaxClamp(one));
+  assert.equal(cameraRadius(two), 2 * cameraRadius(one));
+  assert.equal(holeRadius(two, { width: 2048, height: 1536 }), 2 * holeRadius(one, { width: 2048, height: 1536 }));
+  for (const phase of PHASES) {
+    const first = cameraOffset(cameraRadius(one), phase), doubled = cameraOffset(cameraRadius(two), phase);
+    assert.deepEqual(doubled, { x: 2 * first.x, y: 2 * first.y });
+  }
+  for (const parallax of [.5, 1, 1.7, 2, 3]) {
+    const still = withMotion({ enabled: false, orbit: 1, parallax });
+    assert.equal(cameraRadius(still), 0);
+    const offset = cameraOffset(cameraRadius(still), 0);
+    assert.deepEqual(offset, { x: 0, y: 0 });
+    for (const object of still.objects) assert.deepEqual(objectMotionBound(still, object.id), { x: 0, y: 0 });
+    const noDepth = { ...still, analysis: { ...still.analysis, depth: null } };
+    assert.equal(parallaxClamp(noDepth), 0);
+    assert.equal(cameraRadius({ ...still, motion: { ...still.motion, enabled: true, orbit: 0 } }), 0);
+  }
 });
 
 test('at orbit 1 the point farthest from the anchor moves by exactly the clamp, and no point farther', () => {
@@ -487,7 +535,7 @@ function generatedDocuments(): readonly Generated[] {
                   ...base,
                   frame: { ...base.frame, master: { ...base.frame.master, size: frame } },
                   analysis: { ...base.analysis, plate: null },
-                  motion: { enabled, orbit, loopSeconds: 3, focus },
+                  motion: { enabled, orbit, parallax: 1, loopSeconds: 3, focus },
                   objects,
                 };
                 out.push({ label: `${frame.width}x${frame.height}, motion ${enabled ? 'on' : 'off'}, orbit ${orbit}, focus ${focus}, ${placement}, ${kind} ${amount}`, doc });

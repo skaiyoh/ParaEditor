@@ -8,7 +8,7 @@ import type { NonEmpty, SceneId } from '../src/core/ids.ts';
 import { MIGRATIONS, SCENE_VERSION, type Migration } from '../src/core/migrate.ts';
 import { FLOORS, LENGTHS, RANGES, type FloorPath, type LengthPath, type NumberRange, type RangePath } from '../src/core/ranges.ts';
 import type { ImagePoint, ImageRef, Oklab, Oklch, PlaneRef, Rect, Size } from '../src/core/raster.ts';
-import { currentDocumentSchema, describeIssues, formatPath, sceneDocumentSchema } from '../src/core/schema.ts';
+import { currentDocumentSchema, describeIssues, formatPath, parseDocument, sceneDocumentSchema } from '../src/core/schema.ts';
 import type {
   Analysis,
   DepthProduct,
@@ -414,6 +414,7 @@ test("the document's primitives are core/raster.ts's types, and its ids and arra
     true satisfies Equal<Analysis['colors'], NonEmpty<Analysis['colors'][number]>>,
     true satisfies Equal<SceneDocument['objects'][number]['produced']['color']['clusters'], NonEmpty<Analysis['colors'][number]>>,
     true satisfies Equal<SceneDocument['motion']['focus'], number | null>,
+    true satisfies Equal<SceneDocument['motion']['parallax'], number>,
     true satisfies Equal<Extract<ObjectProduced['selection'], { kind: 'taps' }>['points'], NonEmpty<Extract<ObjectProduced['selection'], { kind: 'auto-subject' }>['seed']>>,
   ];
   assert.deepEqual(checks, checks.map(() => true));
@@ -421,28 +422,65 @@ test("the document's primitives are core/raster.ts's types, and its ids and arra
 
 test('the version is the migration table length, a literal type a document at another version does not satisfy', () => {
   assert.equal(SCENE_VERSION, MIGRATIONS.length);
-  assert.equal(SCENE_VERSION, 1);
-  const literal = true satisfies Equal<SceneDocument['version'], 1>;
+  assert.equal(SCENE_VERSION, 2);
+  const literal = true satisfies Equal<SceneDocument['version'], 2>;
   const current: SceneDocument = minimalDocument();
-  // @ts-expect-error a document at version 2 is not a document of the one-entry migration table
-  const newer: SceneDocument = { ...minimalDocument(), version: 2 };
+  // @ts-expect-error a document at version 3 is not a document of the two-entry migration table
+  const newer: SceneDocument = { ...minimalDocument(), version: 3 };
   assert.ok(literal);
-  assert.equal(current.version, 1);
-  assert.equal(newer.version, 2);
+  assert.equal(current.version, 2);
+  assert.equal(newer.version, 3);
   assert.deepEqual(failingPaths(newer), ['version']);
 });
 
-test('a two-entry migration table makes a schema and a type of version 2', () => {
+test('a three-entry migration table makes a schema and a type of version 3', () => {
   const add: Migration = (json) => json;
   const drop: Migration = (json) => json;
-  const chain = [add, drop] as const satisfies readonly Migration[];
+  const chain = [add, drop, add] as const satisfies readonly Migration[];
   const schema = sceneDocumentSchema(chain.length);
-  const literal = true satisfies Equal<SceneDocumentAt<typeof chain.length>['version'], 2>;
-  const inferred = true satisfies Equal<z.infer<typeof schema>['version'], 2>;
-  const atTwo: SceneDocumentAt<2> = { ...minimalDocument(), version: 2 };
-  // @ts-expect-error a document at the current version 1 is not a document of a two-entry table
-  const atCurrent: SceneDocumentAt<2> = minimalDocument();
+  const literal = true satisfies Equal<SceneDocumentAt<typeof chain.length>['version'], 3>;
+  const inferred = true satisfies Equal<z.infer<typeof schema>['version'], 3>;
+  const atThree: SceneDocumentAt<3> = { ...minimalDocument(), version: 3 };
+  // @ts-expect-error a document at the current version 2 is not a document of a three-entry table
+  const atCurrent: SceneDocumentAt<3> = minimalDocument();
   assert.ok(literal && inferred);
-  assert.ok(schema.safeParse(atTwo).success);
+  assert.ok(schema.safeParse(atThree).success);
   assert.ok(!schema.safeParse(atCurrent).success);
+});
+
+test('version 1 scenes migrate Parallax to 1 without changing their existing fields or input', () => {
+  const current = minimalDocument();
+  const { parallax: _parallax, ...motion } = current.motion;
+  const old = { ...current, version: 1, motion };
+  const before = structuredClone(old);
+  const parsed = parseDocument(old);
+  assert.ok(parsed.ok, parsed.ok ? '' : JSON.stringify(parsed.error));
+  assert.equal(parsed.value.motion.parallax, 1);
+  assert.deepEqual(parsed.value, { ...old, version: 2, motion: { ...motion, parallax: 1 } });
+  assert.deepEqual(old, before);
+});
+
+test('version 0 scenes run the surface and Parallax migrations in order', () => {
+  const { surface: _surface, ...current } = minimalDocument();
+  const { parallax: _parallax, ...motion } = current.motion;
+  const parsed = parseDocument({ ...current, version: 0, motion });
+  assert.ok(parsed.ok, parsed.ok ? '' : JSON.stringify(parsed.error));
+  assert.equal(parsed.value.version, 2);
+  assert.equal(parsed.value.motion.parallax, 1);
+  assert.equal(parsed.value.surface.enabled, false);
+});
+
+test('current scenes require Parallax, retain chosen values, and reject malformed legacy motion', () => {
+  const current = minimalDocument();
+  const { parallax: _parallax, ...motion } = current.motion;
+  assert.deepEqual(failingPaths({ ...current, motion }), ['motion.parallax']);
+  const chosen = { ...current, motion: { ...current.motion, parallax: 2.7 } };
+  const parsed = parseDocument(chosen);
+  assert.ok(parsed.ok);
+  assert.deepEqual(parsed.value, chosen);
+  for (const motion of [null, [], 'bad', { unexpected: true }]) {
+    const old = { ...current, version: 1, motion };
+    const rejected = parseDocument(old);
+    assert.ok(!rejected.ok && rejected.error.kind === 'invalid');
+  }
 });

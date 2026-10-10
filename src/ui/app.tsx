@@ -6,10 +6,26 @@ import { RANGES } from '../core/ranges.ts';
 import { Swatches } from './swatches.tsx';
 import { EnableSwitch, Node, RangeControl } from './controls.tsx';
 import { Layers } from './layers.tsx';
+import { PhoneFrame } from './phone.tsx';
+
+const PHONE_QUERY = '(max-width: 760px), (max-height: 500px), (max-width: 1100px) and (orientation: portrait)';
+
+function usePhoneFrame(): boolean {
+  const [query] = useState(() => window.matchMedia(PHONE_QUERY));
+  const [phone, setPhone] = useState(query.matches);
+  useLayoutEffect(() => {
+    const changed = (): void => setPhone(query.matches);
+    query.addEventListener('change', changed);
+    changed();
+    return () => query.removeEventListener('change', changed);
+  }, [query]);
+  return phone;
+}
 
 /** A fresh node, never given a 2D context. The session owns its renderer. */
-function Stage({ scene, session, onFit }: {
+function Stage({ scene, session, onFit, contained = false }: {
   readonly scene: DemoScene | null; readonly session: DemoSession; readonly onFit: (percent: number) => void;
+  readonly contained?: boolean;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useLayoutEffect(() => {
@@ -25,7 +41,16 @@ function Stage({ scene, session, onFit }: {
   return <canvas key="webgl-stage" ref={canvas} data-testid="stage" class="stage-canvas" hidden={scene === null} aria-label="Rendered photo"
     onClick={(event) => {
       const box = event.currentTarget.getBoundingClientRect();
-      if (box.width > 0 && box.height > 0) void session.tap({ x: (event.clientX - box.left) / box.width, y: (event.clientY - box.top) / box.height });
+      const node = event.currentTarget;
+      if (box.width <= 0 || box.height <= 0) return;
+      // The phone canvas fills the stage; object-fit contains its bitmap.
+      // Map taps to that bitmap and ignore the surrounding letterbox.
+      const scale = contained ? Math.min(box.width / node.width, box.height / node.height) : 1;
+      const width = contained ? node.width * scale : box.width;
+      const height = contained ? node.height * scale : box.height;
+      const x = (event.clientX - box.left - (box.width - width) / 2) / width;
+      const y = (event.clientY - box.top - (box.height - height) / 2) / height;
+      if (x >= 0 && x <= 1 && y >= 0 && y <= 1) void session.tap({ x, y });
     }} />;
 }
 
@@ -77,6 +102,8 @@ function Inspector({ scene, session }: { readonly scene: DemoScene | null; reado
       <Node name="Motion" expanded={expanded.Motion} onExpand={() => expand('Motion')}
         toggle={<EnableSwitch name="Motion" checked={scene.doc.motion.enabled} onChange={(enabled) => session.setMotion({ enabled })} />}>
         <RangeControl id="motion-orbit" label="Orbit" min={0} max={1} step={0.01} value={scene.doc.motion.orbit} onInput={(orbit) => session.setMotion({ orbit })} />
+        <RangeControl id="motion-parallax" label="Parallax" min={RANGES['motion.parallax'].min} max={RANGES['motion.parallax'].max} step={0.1}
+          value={scene.doc.motion.parallax} onInput={(parallax) => session.setMotion({ parallax })} />
         <RangeControl id="motion-loopSeconds" label="Loop seconds" min={2} max={6} step={0.1} value={scene.doc.motion.loopSeconds} onInput={(loopSeconds) => session.setMotion({ loopSeconds })} />
       </Node>
       <Node name="Symbols" expanded={expanded.Symbols} onExpand={() => expand('Symbols')}
@@ -111,6 +138,7 @@ function Inspector({ scene, session }: { readonly scene: DemoScene | null; reado
 export function DemoApp({ session, isolated, buildId, bootError }: {
   readonly session: DemoSession; readonly isolated: boolean; readonly buildId: string; readonly bootError: string | null;
 }) {
+  const phone = usePhoneFrame();
   const [state, setState] = useState(session.snapshot());
   const [fit, setFit] = useState(0);
   const input = useRef<HTMLInputElement>(null);
@@ -147,6 +175,19 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   const busy = state.status === 'Importing…';
   const status = bootError ?? (state.status === 'Ready' || state.status === 'Drop a photo' ? state.analysisStatus : state.status);
   const touch = navigator.maxTouchPoints > 0;
+  const toggleMotion = (): void => { if (scene !== null) session.setMotion({ enabled: !scene.doc.motion.enabled }); };
+  const toggleSymbols = (): void => { if (scene !== null) editSymbols(session, { enabled: !scene.doc.symbols.enabled }); };
+  const toggleWindow = (): void => { void session.setWindow(!state.windowEnabled); };
+  const toggleTilt = (): void => { void session.setTilt(!state.tiltEnabled); };
+  if (phone) return <main class={`editor phone-editor${scene === null ? '' : ' has-photo'}`} aria-label="Photo editor"
+    onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'; }}
+    onDrop={(event) => { event.preventDefault(); open(event.dataTransfer?.files[0]); }}>
+    <PhoneFrame state={state} session={session} status={status} busy={busy} touch={touch} modelsReady={analysis.modelsReady}
+      onOpen={open} onSample={sample} onDownload={() => { void download(); }}
+      onMotion={toggleMotion} onSymbols={toggleSymbols} onWindow={toggleWindow} onTilt={toggleTilt}>
+      <Stage scene={scene} session={session} onFit={setFit} contained />
+    </PhoneFrame>
+  </main>;
   return (
     <main class="editor" aria-label="Photo editor" onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'; }}
       onDrop={(event) => { event.preventDefault(); open(event.dataTransfer?.files[0]); }}>
@@ -196,10 +237,10 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
         <p class="status-line" data-testid="status" role="status">{status}{NOISY_DEV && state.analysisTiming !== null ? ` (${state.analysisTiming.stage}: ${Math.round(state.analysisTiming.ms)} ms)` : ''}</p>
         <div class="mode-rail" aria-label="Viewer modes">
           {scene !== null && <>
-            <button type="button" aria-pressed={scene.doc.motion.enabled} onClick={() => session.setMotion({ enabled: !scene.doc.motion.enabled })}>Motion</button>
-            <button type="button" aria-pressed={scene.doc.symbols.enabled} onClick={() => editSymbols(session, { enabled: !scene.doc.symbols.enabled })}>Symbols</button>
-            <button type="button" data-testid="window-enabled" aria-pressed={state.windowEnabled} disabled={!analysis.modelsReady} onClick={() => { void session.setWindow(!state.windowEnabled); }}>Window</button>
-            {touch && <button type="button" data-testid="tilt-enabled" aria-pressed={state.tiltEnabled} disabled={!analysis.modelsReady} onClick={() => { void session.setTilt(!state.tiltEnabled); }}>Tilt</button>}
+            <button type="button" aria-pressed={scene.doc.motion.enabled} onClick={toggleMotion}>Motion</button>
+            <button type="button" aria-pressed={scene.doc.symbols.enabled} onClick={toggleSymbols}>Symbols</button>
+            <button type="button" data-testid="window-enabled" aria-pressed={state.windowEnabled} disabled={!analysis.modelsReady} onClick={toggleWindow}>Window</button>
+            {touch && <button type="button" data-testid="tilt-enabled" aria-pressed={state.tiltEnabled} disabled={!analysis.modelsReady} onClick={toggleTilt}>Tilt</button>}
           </>}
         </div>
         <div class="build-meta"><small data-testid="isolation" title="Cross-origin isolation">{isolated ? 'isolated: yes' : 'isolated: no'}</small><small data-testid="build-id">build {buildId}</small></div>

@@ -49,7 +49,7 @@ test('symbols and motion start off, and lighting starts bright', () => {
   const doc = newScene();
   assert.deepEqual(doc.symbols, { enabled: false, cellSize: 12, amount: 0.3 });
   assert.deepEqual(doc.surface, { enabled: false, pattern: 'bars', relief: 0.5, refraction: 0.5, shine: 0.5, scale: 0.5 });
-  assert.deepEqual(doc.motion, { enabled: false, orbit: 0.6, loopSeconds: 3, focus: null });
+  assert.deepEqual(doc.motion, { enabled: false, orbit: 0.6, parallax: 1, loopSeconds: 3, focus: null });
   assert.deepEqual(doc.lighting, { ambient: 0.7, relief: 1 });
 });
 

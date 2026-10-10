@@ -23,7 +23,7 @@ import { labelAt, plateNeeded } from '../core/derive.ts';
 import { bundledLock } from '../analysis/bundled-lock.ts';
 import { maskedDepth, objectProduced } from './objects.ts';
 import { createLoopStepper, loopTapPoint } from './loop.ts';
-import { frameCount, effectiveOrbit, type Vec2 } from '../core/motion.ts';
+import { frameCount, effectiveOrbit, loopZoom, type Vec2 } from '../core/motion.ts';
 import { LOOP_FPS } from '../render/loop.ts';
 import { createWindowDriver } from './window.ts';
 import { createTiltDriver, type Orientation } from './tilt.ts';
@@ -229,7 +229,7 @@ export function createDemoSession() {
     // Undo the preview zoom only. Parallax displacement is not undone;
     // the remaining error is at most 2% of each frame axis.
     const zoomed = (viewEnabled() && state.scene.depth !== null) || (loop.running() && effectiveOrbit(state.scene.doc.motion) > 0);
-    const point = zoomed ? loopTapPoint(at) : at;
+    const point = zoomed ? loopTapPoint(at, loopZoom(state.scene.doc.motion.parallax)) : at;
     const current = generation, epoch = objectEpoch;
     const controller = new AbortController(); tapControllers.add(controller);
     const valid = (): boolean => current === generation && epoch === objectEpoch && !controller.signal.aborted;

@@ -1,7 +1,7 @@
-import { layers, maskCovers, holeMask, anchorDisparity, cameraRadius, parallaxClamp, plateNeeded } from '../core/derive.ts';
+import { layers, maskCovers, holeMask, holeRadius, anchorDisparity, cameraRadius, parallaxClamp, plateNeeded } from '../core/derive.ts';
 import type { ObjectId } from '../core/ids.ts';
 import type { Plane } from '../core/raster.ts';
-import { frameCount, loopPhase, cameraOffset, parallaxDisplacement, effectiveOrbit, LOOP_ZOOM, PARALLAX_MARGIN } from '../core/motion.ts';
+import { frameCount, loopPhase, cameraOffset, parallaxDisplacement, effectiveOrbit, loopZoom, parallaxMargin } from '../core/motion.ts';
 import type { Vec2 } from '../core/motion.ts';
 import { sortedMasks } from '../core/produce.ts';
 import { LOOP_FPS, wrapFrame } from './loop.ts';
@@ -357,7 +357,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       objectMeshes.set(object.id, { key, mask, mesh: gpu.mesh(objectGrid(object.produced.bounds, next.doc.frame.master.size, parallaxClamp(next.doc))),
         texture: gpu.texture(mask.size.width, mask.size.height, 'r8', mask.data, true) });
     }
-    const key = plate === null ? '' : JSON.stringify([next.master.width, next.master.height,
+    const key = plate === null ? '' : JSON.stringify([next.master.width, next.master.height, holeRadius(next.doc, next.doc.frame.master.size),
       next.doc.objects.map((object) => [object.id, object.produced.mask.asset, maskIdentity(next.masks.get(object.id))]).sort()]);
     if (key !== holeKey) {
       if (hole !== null) gpu.release(hole);
@@ -396,7 +396,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
     const lo = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(offset, 0, anchor);
     const hi = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(offset, 1, anchor);
     const displacement = { displacementX: { kind: 'vec3', value: [lo.x, hi.x, 0] },
-      displacementY: { kind: 'vec3', value: [lo.y, hi.y, 0] }, zoom: float(LOOP_ZOOM) } satisfies Record<string, Uniform>;
+      displacementY: { kind: 'vec3', value: [lo.y, hi.y, 0] }, zoom: float(loopZoom(scene.doc.motion.parallax)) } satisfies Record<string, Uniform>;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.color.framebuffer);
     gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0, 0, 0, 0]));
     gl.clearBufferfv(gl.COLOR, 1, new Float32Array(4)); gl.clearBufferfv(gl.COLOR, 2, new Float32Array(4));
@@ -504,7 +504,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
         seed: { kind: 'uint', value: scene.doc.seed }, pattern: int(patterns[coating.pattern]),
         relief: float(coating.relief), refraction: float(coating.refraction), shine: float(coating.shine), scale: float(coating.scale),
         phase: float(loopPhase(index, frameCount(scene.doc.motion, LOOP_FPS))),
-        cameraDirection: { kind: 'vec3', value: [drawCamera.x / PARALLAX_MARGIN, -drawCamera.y / PARALLAX_MARGIN, 1] } });
+        cameraDirection: { kind: 'vec3', value: [drawCamera.x / parallaxMargin(scene.doc.motion.parallax), -drawCamera.y / parallaxMargin(scene.doc.motion.parallax), 1] } });
       output = target;
     }
     if (style.grain !== 0 || style.colorNoise !== 0) {
