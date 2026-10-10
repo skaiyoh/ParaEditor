@@ -147,7 +147,7 @@ function randomEdit(random: Random, doc: SceneDocument): Edit {
     case 'symbols':
       return { kind, patch: { enabled: chance(random, 0.5), cellSize: value(random, 50) } };
     case 'motion':
-      return { kind, patch: chance(random, 0.3) ? { focus: null } : { orbit: value(random), loopSeconds: value(random, 7), focus: value(random) } };
+      return { kind, patch: chance(random, 0.3) ? { focus: null } : { drift: { direction: 'circle', amount: value(random) }, loopSeconds: value(random, 7), focus: value(random) } };
     case 'lighting':
       return { kind, patch: { ambient: value(random), relief: value(random, 4.5) } };
     case 'palette.target':

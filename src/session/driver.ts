@@ -1,6 +1,6 @@
 import { bundledLock } from '../analysis/bundled-lock.ts';
-import { openModelLoader, webLocks } from '../analysis/models.ts';
-import { createAnalysisService, type AnalysisEvent, type AnalysisService, type Decoder, type FaceTracker, type HeavyStage } from '../analysis/service.ts';
+import type { AnalysisEvent, AnalysisService, AnalysisServiceDeps, Decoder, FaceTracker, HeavyStage } from '../analysis/service.ts';
+import type { AnalysisBackend, ComposedAnalysisService } from '../analysis/composed.ts';
 import { holeMask, plateNeeded, reconcile } from '../core/derive.ts';
 import type { Produce } from '../core/edits.ts';
 import type { ModelId, NonEmpty } from '../core/ids.ts';
@@ -13,7 +13,13 @@ import { initialPolicy, nextWake, transition, type PolicyEvent, type Stage } fro
 import { productAsset, type Products } from './products.ts';
 import { windowPlateNeeded } from './window.ts';
 
+type ServiceFactory = (deps: Pick<AnalysisServiceDeps, 'diag' | 'threads' | 'lock'> & { readonly clock: ReturnType<typeof createBrowserClock> } & { readonly changed: () => void; readonly waiting: (stage: Stage) => void }) => ComposedAnalysisService;
+let serviceFactory: ServiceFactory | null = null;
+/** Installed by the app before it creates the session; the driver owns policy only. */
+export function injectAnalysisService(factory: ServiceFactory): void { serviceFactory = factory; }
+
 export type AnalysisSnapshot = {
+  readonly backend: AnalysisBackend;
   readonly status: string;
   readonly modelsReady: boolean;
   readonly depth: boolean;
@@ -105,26 +111,25 @@ export function createAnalysisDriver(host: Host) {
   const diag = createDiagnostics<AnalysisEvent>(clock);
   const threads = Math.max(2, Math.min(8, Math.floor(navigator.hardwareConcurrency || 2)));
   const lock = bundledLock();
-  const service = lock.ok ? createAnalysisService({
-    clock, diag, threads, lock: lock.value, ortBase: NOISY_ORT_DIR,
-    spawn: () => new Worker(NOISY_WORKER_URLS.sequence, { type: 'module', name: 'sequence' }),
-    spawnDecoder: () => new Worker(NOISY_WORKER_URLS.decode, { type: 'module', name: 'decode' }),
-    spawnFaceTracker: () => new Worker(NOISY_WORKER_URLS.face, { type: 'module', name: 'face' }),
-    loader: openModelLoader({ lock: lock.value, origin: window.location.origin, caches, fetch: (url, init) => window.fetch(url, init), subtle: crypto.subtle, locks: webLocks(navigator.locks), clock }),
+  let driver: ReturnType<typeof createDriver> | null = null;
+  const service = lock.ok && serviceFactory !== null ? serviceFactory({
+    clock, diag, threads, lock: lock.value, changed: host.changed,
+    waiting: (stage) => driver?.reportWaiting(stage),
   }) : null;
-  return createDriver(host, {
+  driver = createDriver(host, {
     clock, diag, service, threads, prepareGuide: makeGuide,
     models: lock.ok ? { kind: 'ready', ids: [...new Set(Object.values(lock.value.ops).map((op) => op.model))],
       depth: lock.value.ops.depth.model, inpaint: lock.value.ops.inpaint.model, count: Object.keys(lock.value.lock.models).length }
       : { kind: 'unavailable', message: lock.error },
   });
+  return driver;
 }
 
 /** Policy execution takes its service and guide boundary explicitly for lifecycle tests. */
 export function createDriver(host: Host, { clock, diag, service, threads, prepareGuide, models }: {
   readonly clock: Pick<ReturnType<typeof createBrowserClock>, 'now'>;
   readonly diag: Pick<ReturnType<typeof createDiagnostics<AnalysisEvent>>, 'log' | 'events'>;
-  readonly service: AnalysisService | null;
+  readonly service: (AnalysisService & { readonly backend?: AnalysisBackend }) | null;
   readonly threads: number;
   readonly prepareGuide: typeof makeGuide;
   readonly models: { readonly kind: 'ready'; readonly ids: readonly ModelId[]; readonly depth: ModelId; readonly inpaint: ModelId; readonly count: number }
@@ -312,23 +317,30 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
       }, controller.signal);
     } catch (error) { failed(plate ? 'inpaint' : 'depth', error); }
   }
-  queueMicrotask(() => {
+  let loadingModels = false;
+  function loadModels(): void {
+    if (loadingModels || policy.modelsReady) return;
     if (service === null || models.kind !== 'ready') { setStatus(`Models unavailable: ${models.kind === 'ready' ? 'service unavailable' : models.message}`); return; }
+    loadingModels = true;
+    setStatus('Fetching models 0%');
     const progress = new Map<string, number>();
     void service.fetchModels(['depth', 'encode', 'decode', 'inpaint', 'face'], fetchController.signal, (model, fraction) => {
       progress.set(model, fraction);
       const percent = Math.floor([...progress.values()].reduce((sum, value) => sum + value, 0) * 100 / models.ids.length);
       setStatus(`Fetching models ${percent}%`);
     }).then((result) => {
+      loadingModels = false;
       if (!result.ok) { setStatus(`Models unavailable: ${reason(result.error)}`); settle(status); return; }
       setStatus(host.read() === null ? 'Models ready - drop a photo' : 'Waiting to analyze');
       dispatch({ kind: 'models-ready' });
-    }).catch((error: unknown) => { setStatus(`Models unavailable: ${reason(error)}`); settle(status); });
-  });
+    }).catch((error: unknown) => { loadingModels = false; setStatus(`Models unavailable: ${reason(error)}`); settle(status); });
+  }
+  queueMicrotask(loadModels);
   return {
+    reportWaiting(stage: Stage): void { setStatus(stage === 'inpaint' ? 'preparing' : `Analyzing: ${stage === 'encode' ? 'encoder' : stage}`); },
     snapshot(): AnalysisSnapshot {
       const scene = host.read(); const products = scene === null ? null : host.products.forScene(scene.doc);
-      return { status, modelsReady: policy.modelsReady, depth: products?.depth !== null && products?.depth !== undefined, embeddings, decoderReady, plate: products?.plate !== null && products?.plate !== undefined, alive: service?.alive ?? { heavy: false, decoder: false }, timings: { ...timings } };
+      return { backend: service?.backend ?? { kind: 'device' }, status, modelsReady: policy.modelsReady, depth: products?.depth !== null && products?.depth !== undefined, embeddings, decoderReady, plate: products?.plate !== null && products?.plate !== undefined, alive: service?.alive ?? { heavy: false, decoder: false }, timings: { ...timings } };
     },
     generation: (): number => policy.generation,
     guide: (): Rgb8 | null => guide,
@@ -340,7 +352,7 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
     },
     lastTiming: (): { stage: string; ms: number } | null => lastTiming,
     diagnostics: () => ({ threads, generation: policy.generation, timings: { ...timings }, events: [...diag.events] }),
-    beginImport(): number { dispatch({ kind: 'import' }); return policy.generation; },
+    beginImport(): number { dispatch({ kind: 'import' }); if (!policy.modelsReady) loadModels(); return policy.generation; },
     importFailed(generation: number): void {
       if (!valid(generation)) return;
       dispatch({ kind: 'import-failed', generation }); settle('The photo could not be imported.');

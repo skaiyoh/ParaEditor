@@ -127,7 +127,7 @@ const stereoScenario: Scenario = {
     t.ok('JPG twin is exactly the left JPEG inside the MPO', sample.twinMatches);
 
     // Controlled foreground like render.view: the JPEG centroid must move with camera x.
-    await t.page.evaluate(z.null(), async () => {
+    const plateReadyMs = await t.page.evaluate(z.number(), async () => {
       const demo = window.__noisyTest?.demo; if (demo === undefined) throw new Error('No stereo demo.');
       const canvas = new OffscreenCanvas(4032, 3024), ctx = canvas.getContext('2d');
       if (ctx === null) throw new Error('No centroid fixture context.');
@@ -146,10 +146,14 @@ const stereoScenario: Scenario = {
       demo.injectMask({ ...size, data: mask }); await wait(() => demo.objects().length === 1);
       demo.injectDepth({ format: 'f32', size, data: depth }); demo.select(null);
       demo.setStyle({ simplify: 0, grain: 0, colorNoise: 0, clipping: 0, crunch: 0, outline: 0, colors: 12, bands: 6, saturation: 1 });
-      demo.setSymbols({ enabled: false }); demo.setMotion({ enabled: true, focus: 0, orbit: 1 });
+      demo.setSymbols({ enabled: false }); demo.setMotion({ enabled: true, focus: 0, drift: { direction: 'circle', amount: 1 } });
+      if (!demo.document()?.motion.enabled) throw new Error('Stereo fixture Motion edit was refused.');
+      const plateStart = performance.now();
       await demo.requestPlate(); await wait(() => demo.analysis().plate && !demo.products().plateNeeded);
-      demo.setMotion({ enabled: false }); return null;
+      const elapsed = performance.now() - plateStart;
+      demo.setMotion({ enabled: false }); return elapsed;
     });
+    await t.file('plate-ready.json', JSON.stringify({ plateReadyMs }, null, 2));
     const fixture = await exportThroughSession(t);
     t.ok('both JPEGs contain the foreground object', fixture.left.count > 100 && fixture.right.count > 100, { left: fixture.left, right: fixture.right });
     t.ok('foreground centroid shifts horizontally between the two cameras', Math.abs(fixture.left.centroid - fixture.right.centroid) > 1, { left: fixture.left.centroid, right: fixture.right.centroid });

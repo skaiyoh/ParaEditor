@@ -238,7 +238,7 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
   };
   if (action === 'baseline') {
     await demo.tap(0.38, 0.58);
-    demo.setMotion({ enabled: true, orbit: 0.1 });
+    demo.setMotion({ enabled: true, drift: { direction: 'circle', amount: 0.1 } });
     await demo.requestPlate();
   }
   const object = demo.document()?.objects[0];
@@ -395,6 +395,8 @@ export const scenarios: readonly Scenario[] = [
         const first = `[data-object-id="${ids[0]}"]`, second = `[data-object-id="${ids[1]}"]`;
         const button = (row: string, action: string): string => `${row} [data-testid="layer-${action}"]`;
         await page.click(`${first} .layer-select`);
+        t.equal(`${frame}: action ids distinguish row and inspector placements`, await page.evaluate(z.array(z.number()), () =>
+          ['layer-hide', 'layer-delete', 'object-hide', 'object-delete'].map((id) => document.querySelectorAll(`[data-testid="${id}"]`).length)), [2, 2, 1, 1]);
         const beginRename = async (): Promise<void> => {
           if (phone) await page.click('[data-testid="layer-rename"]');
           else await page.evaluate(z.literal(true), (selector) => {
@@ -426,7 +428,7 @@ export const scenarios: readonly Scenario[] = [
         // Observe the real Preparing sentence even when inpaint completes between driver polls.
         await page.evaluate(z.literal(true), () => {
           const observer = new MutationObserver(() => {
-            if (document.querySelector('[data-testid="preparing"]')?.textContent?.startsWith('Preparing')) document.body.dataset['layersPreparing'] = 'yes';
+            if (document.querySelector('[data-testid="preparing"]')?.textContent === 'Preparing: background') document.body.dataset['layersPreparing'] = 'yes';
             if (document.body.dataset['layersPreparing'] === 'yes') observer.disconnect();
           });
           observer.observe(document.body, { childList: true, subtree: true, characterData: true }); return true;
@@ -442,7 +444,7 @@ export const scenarios: readonly Scenario[] = [
           hidden.undimmed.some((value, i) => value !== before.undimmed[i]), hidden);
         t.equal(`${frame}: Preparing appeared then cleared`, await page.evaluate(z.boolean(), () => document.body.dataset['layersPreparing'] === 'yes'), true);
         t.ok(`${frame}: hidden PNG matches undimmed screen and restores selection overlay`, hidden.exportMatches && hidden.overlayRestored, hidden);
-        await page.click(button(second, 'hide'));
+        await page.click('[data-testid="object-hide"]');
         const shown = await page.evaluate(LayerPixels, layerPixels);
         t.equal(`${frame}: Show restores the center pixel`, shown.undimmed, before.undimmed);
         await page.click(button(second, 'hide'));
@@ -454,13 +456,13 @@ export const scenarios: readonly Scenario[] = [
         }, button(first, 'hide'));
         await page.screenshot(phone ? 'layers-phone-402' : 'layers-1440');
         const maskBefore = await page.evaluate(z.string(), () => JSON.stringify([...(window.__noisyTest?.demo.projectMasks() ?? [])].sort((a, b) => a.asset.localeCompare(b.asset))));
-        await page.click(button(first, 'delete'));
+        await page.click(phone ? '[data-testid="object-delete"]' : button(first, 'delete'));
         const deleted = await page.evaluate(z.object({ rows: z.number(), selected: z.boolean(), swatches: z.boolean(), masks: z.number() }), () => ({
           rows: document.querySelectorAll('.layer-row[data-object-id]').length,
           selected: window.__noisyTest?.demo.objects().some((object) => object.selected) ?? true,
           swatches: document.querySelector('[data-testid="swatches"]') !== null, masks: window.__noisyTest?.demo.products().masks,
         }));
-        t.equal(`${frame}: delete removes row and products and selects scene`, deleted, { rows: 1, selected: false, swatches: false, masks: 1 });
+        t.equal(`${frame}: delete removes row, selects scene and retains history masks`, deleted, { rows: 1, selected: false, swatches: false, masks: 2 });
         await page.click('[data-testid="history-undo"]'); await page.click('[data-testid="history-undo"]');
         t.equal(`${frame}: undo twice restores first and shows second`, await page.evaluate(z.array(z.object({ name: z.string(), hidden: z.boolean() })), () =>
           window.__noisyTest?.demo.objects().map(({ name, hidden }) => ({ name, hidden }))), [{ name: 'Red disc', hidden: false }, { name: 'Object 2', hidden: false }]);
@@ -519,7 +521,7 @@ export const scenarios: readonly Scenario[] = [
       const grown = await t.page.evaluate(RefineResult, refineChecks, 'finish');
       t.equal('meter disappears after release', grown.meter.visible, false);
       t.ok('lift commits a larger mask, new asset and size above .5', grown.area > before.area && grown.asset !== before.asset && grown.size > 0.5, grown);
-      t.equal('commit leaves the plate stale and drops the original mask', [grown.plateNeeded, grown.maskCount, grown.refining], [true, 1, false]);
+      t.equal('commit leaves the plate stale and retains the original history mask', [grown.plateNeeded, grown.maskCount, grown.refining], [true, 2, false]);
       t.equal('gesture introduces no status sentence', [live.status, grown.status], [before.status, before.status]);
       await t.page.screenshot('refine-grown');
       await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.requestPlate(); return true; });
@@ -529,7 +531,7 @@ export const scenarios: readonly Scenario[] = [
       const cancellations = [];
       for (const action of ['escape', 'back', 'second', 'cancel'] satisfies readonly ('escape' | 'back' | 'second' | 'cancel')[]) {
         const result = await t.page.evaluate(RefineResult, refineChecks, action);
-        t.ok(`${action} restores exact document, asset, products and plate`, result.cancelledDocumentEqual && result.cancelledProductsEqual && !result.refining && !result.plateNeeded && result.maskCount === 1, result);
+        t.ok(`${action} restores exact document, asset, products and plate`, result.cancelledDocumentEqual && result.cancelledProductsEqual && !result.refining && !result.plateNeeded && result.maskCount === shrunk.maskCount, result);
         t.equal(`${action} hides the meter`, result.meter.visible, false);
         cancellations.push({ action, result });
       }

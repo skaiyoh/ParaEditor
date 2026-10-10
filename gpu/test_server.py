@@ -46,12 +46,12 @@ class StateTests(unittest.TestCase):
 
     def test_sliding_expiry_and_deleted_session_never_returns(self):
         state = server.State(Engine())
-        session = server.Session(None, b"", None, 2, 2, touched=0)
+        session = server.Session(None, b"", None, 2, 2, created=0, touched=0)
         state.sessions["first"] = session
         with patch.object(server.time, "monotonic", return_value=1799):
-            self.assertIs(state.get("first"), session)
+            self.assertIs(state.get("first", touch=True), session)
         with patch.object(server.time, "monotonic", return_value=3598):
-            self.assertIs(state.get("first"), session)
+            self.assertIs(state.get("first", touch=True), session)
         with patch.object(server.time, "monotonic", return_value=5398):
             with self.assertRaises(server.Problem) as raised:
                 state.get("first")
@@ -62,6 +62,53 @@ class StateTests(unittest.TestCase):
             self.assertNotIn("next", state.sessions)
         # A running request may still hold its reference after deletion.
         self.assertEqual(session.width, 2)
+
+    def test_absolute_expiry_despite_accepted_touches(self):
+        for reap in (False, True):
+            with self.subTest(reap=reap):
+                state = server.State(Engine())
+                session = server.Session(None, b"", None, 2, 2, created=0, touched=0)
+                state.sessions["first"] = session
+                for now in (1799, 3598, 5397, 7196, 7199):
+                    with patch.object(server.time, "monotonic", return_value=now):
+                        self.assertIs(state.get("first", touch=True), session)
+                with patch.object(server.time, "monotonic", return_value=7200):
+                    if reap:
+                        state.reap()
+                    with self.assertRaises(server.Problem) as raised:
+                        state.get("first", touch=True)
+                    self.assertEqual(raised.exception.status, 404)
+                    self.assertNotIn("first", state.sessions)
+                    with patch.object(server, "MAX_SESSIONS", 1), state.reserve("new"):
+                        self.assertEqual(state.pending, 1)
+
+    def test_lookup_does_not_refresh_idle_expiry_and_reaper_honors_it(self):
+        state = server.State(Engine())
+        session = server.Session(None, b"", None, 2, 2, created=0, touched=0)
+        state.sessions["first"] = session
+        with patch.object(server.time, "monotonic", return_value=1799):
+            self.assertIs(state.get("first"), session)
+            self.assertEqual(session.touched, 0)
+        with patch.object(server.time, "monotonic", return_value=1800):
+            state.reap()
+            self.assertNotIn("first", state.sessions)
+
+    def test_capacity_rejections_do_not_charge_creation_budget(self):
+        state = server.State(Engine())
+        with patch.object(server, "MAX_SESSIONS", 1), state.reserve("busy"):
+            for _ in range(12):
+                with self.assertRaises(server.Problem) as raised:
+                    with state.reserve("waiting"):
+                        self.fail("Full service granted a reservation")
+                self.assertEqual(raised.exception.status, 503)
+            self.assertEqual(list(state.rates.get("waiting", [])), [])
+        for _ in range(10):
+            with state.reserve("waiting"):
+                pass
+        with self.assertRaises(server.Problem) as raised:
+            with state.reserve("waiting"):
+                self.fail("Eleventh granted reservation escaped the rate limit")
+        self.assertEqual(raised.exception.status, 429)
 
     def test_capacity_and_rate_limit_by_address(self):
         state = server.State(Engine())
@@ -96,6 +143,73 @@ class HTTPTests(unittest.TestCase):
         cls.http.shutdown()
         cls.http.server_close()
         cls.thread.join()
+
+    def setUp(self):
+        self.state.sessions["sample"] = server.Session(None, b"", None, 2, 2)
+
+    def test_health_exposes_both_session_limits(self):
+        with closing(http.client.HTTPConnection(*self.http.server_address, timeout=2)) as client:
+            client.request("GET", "/v1/health")
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["sessionLimits"],
+                             {"idleSeconds": 1800, "maxLifetimeSeconds": 7200})
+
+    def test_accepted_depth_refreshes_idle_but_not_absolute_lifetime(self):
+        session = server.Session(None, b"depth", None, 2, 2, created=0, touched=5399)
+        self.state.sessions["sample"] = session
+        for now, expected in ((7198, 200), (7199, 200), (7200, 404)):
+            with patch.object(server.time, "monotonic", return_value=now):
+                with closing(http.client.HTTPConnection(*self.http.server_address, timeout=2)) as client:
+                    client.request("GET", "/v1/sessions/sample/depth")
+                    response = client.getresponse()
+                    self.assertEqual(response.status, expected)
+                    response.read()
+                self.assertEqual(session.created, 0)
+                self.assertEqual(session.touched, min(now, 7199))
+
+    def test_accepted_taps_and_inpaint_refresh_idle_after_admission(self):
+        for operation, body, headers, method, result in [
+            ("taps", json.dumps({"points": [{"x": .5, "y": .5, "label": "include"}]}),
+             {"Content-Type": "application/json"}, "taps", (b"masks", [1, 1, 1], 2, 2)),
+            ("inpaint", b"mask", {"Content-Type": "application/octet-stream", "X-Width": "2", "X-Height": "2"},
+             "inpaint", b"png"),
+        ]:
+            with self.subTest(operation=operation):
+                session = server.Session(None, b"", None, 2, 2, created=0, touched=0)
+                self.state.sessions["sample"] = session
+                with patch.object(server.time, "monotonic", return_value=1799), \
+                     patch.object(self.state.engine, method, return_value=result, create=True):
+                    with closing(http.client.HTTPConnection(*self.http.server_address, timeout=2)) as client:
+                        client.request("POST", "/v1/sessions/sample/" + operation, body, headers)
+                        response = client.getresponse()
+                        self.assertEqual(response.status, 200)
+                        response.read()
+                self.assertEqual(session.touched, 1799)
+                self.assertEqual(session.created, 0)
+
+    def test_invalid_requests_do_not_touch_session(self):
+        session = server.Session(None, b"", None, 2, 2, created=0, touched=0)
+        self.state.sessions["sample"] = session
+        with patch.object(server.time, "monotonic", return_value=1799):
+            for operation, body, headers in [
+                ("taps", b"{}", {"Content-Type": "application/json"}),
+                ("inpaint", b"", {"Content-Type": "application/octet-stream", "X-Width": "2", "X-Height": "2"}),
+                ("depth", b"", {}),
+            ]:
+                with self.subTest(operation=operation):
+                    self.assertEqual(self.request("/v1/sessions/sample/" + operation, body, headers), 400)
+                    self.assertEqual(session.touched, 0)
+        with patch.object(server.time, "monotonic", return_value=1800):
+            self.assertEqual(self.request("/v1/sessions/sample/taps", b"{}", {"Content-Type": "application/json"}), 404)
+
+    def test_queue_rejection_does_not_touch_session(self):
+        session = self.state.sessions["sample"]
+        touched = session.touched
+        with patch.object(server, "QUEUE_SECONDS", .02), self.state.inference(), self.state.inference():
+            self.assertEqual(self.request("/v1/sessions/sample/taps", json.dumps({"points": [
+                {"x": .5, "y": .5, "label": "include"}]}), {"Content-Type": "application/json"}), 503)
+        self.assertEqual(session.touched, touched)
 
     def request(self, path, body, headers):
         with closing(http.client.HTTPConnection(*self.http.server_address, timeout=2)) as client:

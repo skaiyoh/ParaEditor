@@ -6,6 +6,7 @@ import { appendFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { z } from '../../../src/core/zod.ts';
 import type { MessagePattern, Scenario, ScenarioContext } from '../scenario.ts';
 import type { Browser, ConsoleEntry, ConsoleLevel, RequestEntry } from './browser.ts';
 import { EnvironmentError, type Cleanup } from './processes.ts';
@@ -113,7 +114,9 @@ function matches(pattern: MessagePattern, entry: ConsoleEntry): boolean {
 /** The third-party origins the header contract admits (headers.json): Cloudflare Web Analytics, kept by Nathan on 2026-10-10. */
 const ADMITTED_ORIGINS: ReadonlySet<string> = new Set(['https://static.cloudflareinsights.com', 'https://cloudflareinsights.com']);
 
-function foreignRequests(requests: readonly RequestEntry[], origin: string): readonly RequestEntry[] {
+export function foreignRequests(requests: readonly RequestEntry[], origin: string, gpu = ''): readonly RequestEntry[] {
+  const configured = gpu === '' ? null : new URL(gpu, origin);
+  const gpuOrigin = configured !== null && ['http:', 'https:'].includes(configured.protocol) ? configured.origin : null;
   return requests.filter((r) => {
     let url: URL;
     try {
@@ -121,7 +124,7 @@ function foreignRequests(requests: readonly RequestEntry[], origin: string): rea
     } catch {
       return true;
     }
-    return !LOCAL_SCHEMES.has(url.protocol) && url.origin !== origin && !ADMITTED_ORIGINS.has(url.origin);
+    return !LOCAL_SCHEMES.has(url.protocol) && url.origin !== origin && url.origin !== gpuOrigin && !ADMITTED_ORIGINS.has(url.origin);
   });
 }
 
@@ -174,6 +177,7 @@ async function runOne(scenario: Scenario, options: RunOptions, recorder: Recorde
   const origin = new URL(server.url).origin;
   const serverHint = server.logFile === null ? `the server at ${server.url}` : `the server's output is in ${server.logFile}`;
   try {
+    const { gpu } = z.object({ gpu: z.string().default('') }).parse(await (await fetch(new URL('/build.json', server.url))).json());
     // An attached dev server keeps its fault state between scenarios; one started for this scenario starts clear.
     const sharedFaults = !server.started && server.devSurfaces;
     // Registered before the first lever call, so an interruption at any point clears what the scenario set.
@@ -228,7 +232,7 @@ async function runOne(scenario: Scenario, options: RunOptions, recorder: Recorde
       await writeFile(path.join(dir, 'browser-console.jsonl'), entries.map((e) => `${JSON.stringify(e)}\n`).join(''));
       await writeFile(path.join(dir, 'browser-requests.jsonl'), requests.map((r) => `${JSON.stringify(r)}\n`).join(''));
 
-      const foreign = foreignRequests(requests, origin);
+      const foreign = foreignRequests(requests, origin, gpu);
       record('I6 every request is same-origin', foreign.length === 0, ['I6'], { expected: [], actual: foreign, evidence: { origin, requests: requests.length } });
       const browserCsp = page.cspViolations();
       record('I6 no CSP violation reported by the browser', browserCsp.length === 0, ['I6'], { expected: [], actual: browserCsp });

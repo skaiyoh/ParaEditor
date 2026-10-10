@@ -66,7 +66,8 @@ def validate(root, depth_size, candidates_only=False):
         assert all(x % 2 == 0 and 2 <= x <= 2048 for x in size)
         master = Image.open(root / 'masters' / (photo['id'] + '.png')).convert('RGB')
         assert master.size == size
-        assert hashlib.sha256(master.tobytes()).hexdigest() == photo['master_rgb_sha256']
+        if hashlib.sha256(master.tobytes()).hexdigest() != photo['master_rgb_sha256']:
+            raise RuntimeError('Master pixel SHA-256 mismatch')
         names = ['depth-small-fp32', 'moge2', 'sam21-large', 'lama']
         if not candidates_only:
             names += ['baseline']
@@ -83,7 +84,8 @@ def validate(root, depth_size, candidates_only=False):
                 baseline_times.append({'photo': photo['id'], 'total_ms': meta['totalMs'], 'worker': meta['workerTimings']})
             else:
                 assert meta['device'] == 'cuda:0' and 'Radeon' in meta['device_name'] and meta['hip']
-                assert meta['master_rgb_sha256'] == photo['master_rgb_sha256']
+                if meta['master_rgb_sha256'] != photo['master_rgb_sha256']:
+                    raise RuntimeError('Master pixel SHA-256 mismatch')
             if name in {'baseline', 'depth-small-fp32', 'moge2'}:
                 depth = raw_depth(group / 'depth.f32', depth_size(*size))
                 assert Image.open(group / 'depth.png').size == depth.size

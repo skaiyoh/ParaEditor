@@ -189,7 +189,7 @@ function generatedDocuments(): readonly { readonly label: string; readonly doc: 
                   return { ...base, subject: n === 0, motion: n === 0 ? objectMotion : { kind: 'none' }, produced: { ...base.produced, mask: { ...base.produced.mask, asset: assetId(0x400 - n) } } };
                 });
                 const base = minimalDocument();
-                const draft: SceneDocument = { ...base, objects, motion: { ...base.motion, enabled, orbit } };
+                const draft: SceneDocument = { ...base, objects, motion: { ...base.motion, enabled, drift: { direction: 'circle', amount: orbit } } };
                 const forMasks = plate === 'current' ? sortedMasks(draft) : [assetId(0x3ff), assetId(0x3ff)];
                 const doc: SceneDocument = {
                   ...draft,

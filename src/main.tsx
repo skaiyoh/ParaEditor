@@ -1,4 +1,5 @@
 import { render } from 'preact';
+import { composeAnalysis } from './app/analysis.ts';
 import { bootRoot, type Root } from './app/root.ts';
 import { installTestSurface } from './app/test-surface.ts';
 import { err, ok, type Result } from './core/result.ts';
@@ -13,6 +14,7 @@ function boot(): Result<Root, string> {
   }
 }
 
+composeAnalysis(window);
 const session = createDemoSession();
 const booted = boot();
 if (booted.ok && NOISY_DEV) installTestSurface(window, booted.value, session);

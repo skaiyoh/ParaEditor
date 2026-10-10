@@ -52,7 +52,7 @@ const viewScenario: Scenario = {
       demo.select(null);
       demo.setStyle({ simplify: 0, grain: 0, colorNoise: 0, clipping: 0, crunch: 0, outline: 0 });
       demo.setSymbols({ enabled: false });
-      demo.setMotion({ enabled: true, orbit: 1, focus: 0, loopSeconds: 3 });
+      demo.setMotion({ enabled: true, drift: { direction: 'circle', amount: 1 }, focus: 0, loopSeconds: 3 });
       await demo.requestPlate();
       await wait(() => demo.analysis().plate && !demo.products().plateNeeded);
       demo.setMotion({ enabled: false });
@@ -106,7 +106,7 @@ const viewScenario: Scenario = {
       renderer.renderFrame(0); const motionOffSamples = sameSamples(centerPixels, capture());
       renderer.renderView({ x: radius, y: 0 }); const positive = centroid(), positivePixels = capture();
       renderer.renderView({ x: -radius, y: 0 }); const negative = centroid();
-      demo.setMotion({ orbit: 0 });
+      demo.setMotion({ drift: { direction: 'circle', amount: 0 } });
       renderer.renderView({ x: radius, y: 0 });
       const independentCamera = equal(positivePixels, capture()) && centroid().object === positive.object;
       renderer.renderView({ x: reach, y: -reach }); const bounded = capture();

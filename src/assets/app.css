@@ -228,3 +228,9 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bo
 .motion-export > span { flex: 1; color: var(--secondary); font-size: var(--type-label); }
 .motion-export button { background: var(--raised); padding-inline: 12px; white-space: nowrap; }
 .motion-export button:hover:not(:disabled) { background: var(--hairline); }
+
+.motion-drift { padding: 0 16px; font-size: var(--type-label); }
+.motion-drift-label { display: flex; align-items: center; min-height: 44px; }
+.motion-directions { display: flex; gap: 4px; }
+.motion-directions button { flex: 1; min-width: 0; padding-inline: 8px; font-size: var(--type-label); }
+.motion-directions button[aria-pressed="true"] { background: var(--raised); outline: 1px solid var(--accent); outline-offset: -1px; }

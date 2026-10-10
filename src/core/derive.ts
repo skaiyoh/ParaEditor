@@ -328,7 +328,7 @@ export function parallaxClamp(doc: SceneDocument): number {
   return doc.analysis.depth === null ? 0 : parallaxMargin(doc.motion.parallax);
 }
 
-/** The radius of the loop camera's circle, in frame fractions: the effective orbit times the parallax clamp, 0 while motion is off. */
+/** The loop camera's path amplitude, in frame fractions: effective Drift times the parallax clamp, 0 while motion is off. */
 export function cameraRadius(doc: SceneDocument): number {
   return effectiveOrbit(doc.motion) * parallaxClamp(doc);
 }

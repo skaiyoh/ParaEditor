@@ -10,7 +10,7 @@ const WORKER_TIMEOUT_MS = 15_000;
 
 /** A supplied view camera can uncover layers even when the loop is disabled. */
 export function windowPlateNeeded(doc: SceneDocument): boolean {
-  return plateNeeded({ ...doc, motion: { ...doc.motion, enabled: true, orbit: 1 } });
+  return plateNeeded({ ...doc, motion: { ...doc.motion, enabled: true, drift: { ...doc.motion.drift, amount: 1 } } });
 }
 
 /** Face tracking supplies mirrored selfie targets to the shared view clock. */

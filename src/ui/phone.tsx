@@ -1,5 +1,7 @@
 import type { ComponentChildren } from 'preact';
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { RANGES } from '../core/ranges.ts';
+import type { Motion } from '../core/types.ts';
 import type { DemoSession } from '../session/scene.ts';
 import { Node, RangeControl } from './controls.tsx';
 import { Layers, ObjectInspector } from './layers.tsx';
@@ -54,7 +56,7 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
           <section class="node" aria-label="Fry">
             <RangeControl id="style-fry" label="Fry" min={0} max={1} step={0.01} value={scene.doc.style.fry} onInput={(value) => session.setFry(value)} />
           </section>
-          {scene.doc.motion.enabled && <section class="node" aria-label="Motion"><MotionExport session={session} /></section>}
+          {scene.doc.motion.enabled && <section class="node" aria-label="Motion"><MotionControls motion={scene.doc.motion} session={session} /><MotionExport session={session} /></section>}
           <ParallaxNode enabled={parallaxEnabled} available={modelsReady} onParallax={onParallax} debug={debug} onDebug={onDebug} />
           {selected !== undefined && <ObjectInspector key={selected.id} object={selected} session={session} />}
           <Layers scene={scene} session={session} />
@@ -85,6 +87,26 @@ export function ParallaxNode({ enabled, available, onParallax, debug, onDebug }:
     <div class="parallax-actions"><button type="button" data-testid="parallax-debug-toggle" aria-pressed={debug}
       aria-controls="parallax-debug-panel" onClick={onDebug}>Debug</button></div>
   </Node>;
+}
+
+/** The same motion controls in the desktop inspector and phone sheet. */
+export function MotionControls({ motion, session }: { readonly motion: Motion; readonly session: DemoSession }) {
+  return <>
+    <RangeControl id="motion-parallax" label="Depth" min={RANGES['motion.parallax'].min} max={RANGES['motion.parallax'].max} step={0.1}
+      value={motion.parallax} onInput={(parallax) => session.setMotion({ parallax })} />
+    <div class="motion-drift" role="group" aria-label="Drift">
+      <span class="motion-drift-label">Drift</span>
+      <div class="motion-directions">
+        {([['side', 'Side to side'], ['vertical', 'Up and down'], ['circle', 'Circle']] satisfies readonly (readonly [Motion['drift']['direction'], string])[]).map(([direction, label]) =>
+          <button type="button" key={direction} data-testid={`motion-drift-${direction}`} aria-pressed={motion.drift.direction === direction}
+            onClick={() => session.setMotion({ drift: { ...motion.drift, direction } })}>{label}</button>)}
+      </div>
+    </div>
+    <RangeControl id="motion-drift-amount" label="Amount" min={RANGES['motion.drift.amount'].min} max={RANGES['motion.drift.amount'].max} step={0.01}
+      value={motion.drift.amount} onInput={(amount) => session.setMotion({ drift: { ...motion.drift, amount } })} />
+    <RangeControl id="motion-loopSeconds" label="Loop seconds" min={2} max={6} step={0.1}
+      value={motion.loopSeconds} onInput={(loopSeconds) => session.setMotion({ loopSeconds })} />
+  </>;
 }
 
 /** One export row shared by the inspector and the phone's Motion node. */

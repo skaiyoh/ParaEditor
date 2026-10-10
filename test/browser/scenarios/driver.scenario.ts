@@ -618,4 +618,177 @@ const analysisScenarios: readonly Scenario[] = [
   },
 ];
 
-export const scenarios: readonly Scenario[] = [...harnessScenarios, ...analysisScenarios];
+// GPU stub is opt-in for this page via its deployed configuration. Other
+// dev scenarios still receive the ordinary gpu-empty build.json.
+const GpuView = z.object({
+  backend: z.union([z.object({ kind: z.literal('device') }), z.object({ kind: z.literal('gpu'), name: z.string() })]),
+  fact: z.string(), status: z.string(), sceneStatus: z.string(), candidates: z.array(z.number()), asset: z.string().nullable(), area: z.number(),
+});
+function readGpu(): unknown {
+  const demo = window.__noisyTest?.demo;
+  if (demo === undefined) throw new Error('The GPU scenario needs the demo hooks.');
+  const asset = demo.document()?.objects[0]?.produced.mask.asset ?? null;
+  const mask = demo.projectMasks().find((m) => m.asset === asset);
+  return { backend: demo.analysis().backend, fact: document.querySelector('[data-testid=analysis-backend]')?.textContent ?? '',
+    status: demo.analysis().status, sceneStatus: demo.scene().status, candidates: demo.refinement()?.candidateAreas.map((c) => c.area) ?? [], asset,
+    area: mask?.bytes.filter((v) => v >= 128).length ?? 0 };
+}
+function gpuPointer(type: string, travel: number): true {
+  const stage = document.querySelector<HTMLCanvasElement>('[data-testid=stage]');
+  if (stage === null) throw new Error('The stage is missing.');
+  const box = stage.getBoundingClientRect();
+  stage.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 91, pointerType: 'mouse', isPrimary: true,
+    button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: box.left + box.width * 0.5 + travel, clientY: box.top + box.height * 0.5 }));
+  return true;
+}
+const ColdTimeline = z.array(z.object({ kind: z.enum(['fetch', 'worker', 'watchdog', 'status']), detail: z.string(), t: z.number() }));
+/** Page-only instrumentation: keep the production clock and watchdog unchanged. */
+async function traceColdGpuFallback(): Promise<true> {
+  for (const key of await caches.keys()) if (key.startsWith('noisy-models-')) await caches.delete(key);
+  const entries: { kind: 'fetch' | 'worker' | 'watchdog' | 'status'; detail: string; t: number }[] = [];
+  const record = (kind: typeof entries[number]['kind'], detail: string): void => {
+    entries.push({ kind, detail, t: performance.now() });
+    document.body.dataset['coldGpuTimeline'] = JSON.stringify(entries);
+  };
+  const fetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+    if (url.pathname.startsWith('/models/')) record('fetch', url.pathname);
+    return fetch(input, init);
+  };
+  const NativeWorker = window.Worker;
+  window.Worker = class extends NativeWorker {
+    constructor(url: string | URL, options?: WorkerOptions) {
+      super(url, options); record('worker', options?.name ?? String(url));
+    }
+  };
+  const timers: Pick<Window, 'setTimeout'> = window;
+  const timeout = timers.setTimeout.bind(window);
+  timers.setTimeout = (handler, ms, ...args) => {
+    if (ms !== undefined && ms >= 59_000 && ms <= 60_000) record('watchdog', String(ms));
+    return timeout(handler, ms, ...args);
+  };
+  const line = document.querySelector('[data-testid=status]');
+  if (line === null) throw new Error('The status line is missing.');
+  const status = (): void => record('status', line.textContent ?? '');
+  status(); new MutationObserver(status).observe(line, { childList: true, characterData: true, subtree: true });
+  return true;
+}
+const gpuScenario: Scenario = {
+  id: 'driver.gpu', title: 'GPU import, three candidates, refinement and plate; a 503 falls back; a stalled tap retries once then reports',
+  target: 'dev', covers: [], timeoutMs: 360_000,
+  async run(t) {
+    t.expectMessage({ because: 'the GPU session creation deliberately answers 503', channel: 'log', source: 'network', level: 'error', url: /\/dev\/gpu\/v1\/sessions$/ });
+    t.expectMessage({ because: 'both GPU plate attempts deliberately answer 503', channel: 'log', source: 'network', level: 'error', url: /\/dev\/gpu\/v1\/sessions\/[^/]+\/inpaint$/ });
+    t.expectMessage({ because: 'boot recovery deliberately fails health once', channel: 'log', source: 'network', level: 'error', url: /\/dev\/gpu\/v1\/health$/ });
+    t.expectMessage({ because: 'boot recovery deliberately fails the cold local depth download once', channel: 'log', source: 'network', level: 'error', url: /\/models\/depth-[^/]+\.onnx$/ });
+    try {
+      await t.page.intercept([{ method: 'GET', path: '/build.json', action: { kind: 'respond', status: 200, body: JSON.stringify({ gpu: '/dev/gpu' }) } }]);
+      await t.page.goto('/');
+      await t.page.waitFor('GPU composition has fetched the local face model', z.literal(true), () => window.__noisyTest?.demo.analysis().modelsReady ? true : null, { timeoutMs: 120_000 });
+      await t.page.waitFor('status trace', z.literal(true), traceDriver);
+      await t.page.evaluate(z.literal(true), driverImport, 1024, 768, 0);
+      await t.page.waitFor('GPU depth, encoder and decoder reach Ready to tap', z.literal(true), () => {
+        const d = window.__noisyTest?.demo, a = d?.analysis(); return a?.status === 'Ready to tap' && a.decoderReady && a.backend.kind === 'gpu' ? true : null;
+      }, { timeoutMs: 60_000 });
+      const ready = await t.page.evaluate(GpuView, readGpu);
+      t.equal('Scene identifies the GPU instance', [ready.backend, ready.fact], [{ kind: 'gpu', name: 'GPU stub' }, 'GPU · GPU stub']);
+      const statuses = await t.page.evaluate(z.array(z.string()), () => JSON.parse(document.body.dataset['analysisStatuses'] ?? '[]'));
+      for (const status of ['Analyzing: depth', 'Analyzing: encoder', 'Ready to tap']) t.ok(`rehearsal sentence ${status} is unchanged`, statuses.some((s) => s.startsWith(status)), statuses);
+      t.ok('GPU analysis spawned no local sequence or decoder worker', !t.page.workers().some((worker) => ['sequence', 'decode'].includes(worker.title)), t.page.workers());
+      await t.page.evaluate(z.literal(true), () => { window.__noisyTest?.demo.setMotion({ enabled: true }); return true; });
+      await t.page.click('[data-testid=stage]');
+      await t.page.waitFor('a tap creates one object and its GPU plate', z.literal(true), () => {
+        const d = window.__noisyTest?.demo; return d?.objects().length === 1 && d.analysis().plate && !d.products().plateNeeded ? true : null;
+      }, { timeoutMs: 60_000 });
+      const before = await t.page.evaluate(GpuView, readGpu);
+      await t.page.evaluate(z.literal(true), gpuPointer, 'pointerdown', 0);
+      await t.page.waitFor('the hold receives three candidates', z.literal(true), () => window.__noisyTest?.demo.refinement()?.candidateAreas.length === 3 ? true : null);
+      const held = await t.page.evaluate(GpuView, readGpu);
+      t.ok('the three candidate masks are ordered by increasing area', held.candidates.length === 3 && held.candidates.every((area, i) => i === 0 || area > (held.candidates[i - 1] ?? Infinity)), held);
+      await t.page.evaluate(z.literal(true), gpuPointer, 'pointermove', 120);
+      await t.page.waitFor('the drag previews a larger mask', z.literal(true), () => {
+        const r = window.__noisyTest?.demo.refinement(); return r?.previewAsset !== null && r?.previewAsset !== undefined ? true : null;
+      });
+      await t.page.screenshot('driver-gpu-refinement');
+      await t.page.evaluate(z.literal(true), gpuPointer, 'pointerup', 120);
+      await t.page.waitFor('refinement commits and the GPU repaints the plate', z.literal(true), () => {
+        const d = window.__noisyTest?.demo; return d?.refinement() === null && d.analysis().plate && !d.products().plateNeeded ? true : null;
+      }, { timeoutMs: 60_000 });
+      const after = await t.page.evaluate(GpuView, readGpu);
+      t.ok('refinement changes the committed mask without adding an object', after.asset !== before.asset && after.area > before.area, { before, after });
+      await t.page.screenshot('driver-gpu-ready');
+      let log = await t.server.requestLog();
+      const tapPath = log.find((r) => r.path.endsWith('/taps'))?.path;
+      if (tapPath === undefined) throw new Error('No GPU tap was recorded.');
+      const platePath = log.find((r) => r.path.endsWith('/inpaint'))?.path;
+      if (platePath === undefined) throw new Error('No GPU plate was recorded.');
+      await t.server.setFaults([`path:${platePath}:http503:method=POST:times=2`]);
+      await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(0.1, 0.1); return true; });
+      await t.page.waitFor('both plate failures leave the decoder ready', z.literal(true), () => {
+        const d = window.__noisyTest?.demo, a = d?.analysis(); return a?.status.startsWith('Analysis failed at inpaint') && a.decoderReady && d?.objects().length === 2 ? true : null;
+      }, { timeoutMs: 15_000 });
+      const plateFailed = await t.page.evaluate(GpuView, readGpu);
+      await t.page.screenshot('driver-gpu-plate-failed');
+      const tapsBeforeRecovery = (await t.server.requestLog()).filter((r) => r.path === tapPath).length;
+      await t.server.clearFaults();
+      await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(0.85, 0.85); return true; });
+      await t.page.waitFor('a real GPU tap after failed inpaint creates another object and plate', z.literal(true), () => {
+        const d = window.__noisyTest?.demo; return d?.objects().length === 3 && d.analysis().decoderReady && d.analysis().status === 'Ready to tap' && !d.products().plateNeeded ? true : null;
+      }, { timeoutMs: 30_000 });
+      log = await t.server.requestLog();
+      t.equal('post-failure tap sends one GPU request', log.filter((r) => r.path === tapPath).length - tapsBeforeRecovery, 1);
+      t.equal('failed plate cleanup keeps the same GPU session', log.filter((r) => r.method === 'POST' && r.path === '/dev/gpu/v1/sessions').length, 1);
+      const beforeTaps = log.filter((r) => r.path === tapPath).length;
+      await t.server.setFaults([`path:${tapPath}:stall`]);
+      const began = Date.now();
+      await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(0.9, 0.1); return true; });
+      const failed = await t.page.evaluate(GpuView, readGpu);
+      const retries = (await t.server.requestLog()).filter((r) => r.path === tapPath).length - beforeTaps;
+      t.equal('stalled tap attempts exactly twice', retries, 2);
+      t.ok('the status reports the tap failure after two five-second deadlines', failed.sceneStatus.startsWith('Tapping failed:') && Date.now() - began >= 10_000 && Date.now() - began < 15_000, failed);
+      await t.page.screenshot('driver-gpu-tap-failed');
+      t.ok('local heavy models are cold before fallback', !t.page.requests().some((r) => new URL(r.url).pathname.startsWith('/models/') && !new URL(r.url).pathname.includes('/face-')), t.page.requests());
+      await t.page.evaluate(z.literal(true), traceColdGpuFallback);
+      await t.server.setFaults(['path:/dev/gpu/v1/sessions:http503:method=POST:times=1', 'path:/models/:slow=1000']);
+      const fallbackStarted = Date.now();
+      await t.page.evaluate(z.literal(true), driverImport, 1024, 768, 1);
+      await t.page.waitFor('failed GPU creation selects on-device analysis within 20 seconds', z.literal(true), () => {
+        const d = window.__noisyTest?.demo; return d?.analysis().backend.kind === 'device' && document.querySelector('[data-testid=analysis-backend]')?.textContent === 'on device' ? true : null;
+      }, { timeoutMs: 20_000 });
+      t.ok('503 fallback begins within the session deadline', Date.now() - fallbackStarted < 20_000);
+      await t.page.waitFor('device fallback completes depth and the warmed decoder', z.literal(true), () => {
+        const a = window.__noisyTest?.demo.analysis(); return a?.decoderReady && a.depth && a.status === 'Ready to tap' ? true : null;
+      }, { timeoutMs: 150_000 });
+      t.equal('fallback Scene fact says on device', (await t.page.evaluate(GpuView, readGpu)).fact, 'on device');
+      const coldTimeline = await t.page.evaluate(ColdTimeline, () => JSON.parse(document.body.dataset['coldGpuTimeline'] ?? '[]'));
+      const worker = coldTimeline.find((entry) => entry.kind === 'worker' && entry.detail === 'sequence');
+      const timers = coldTimeline.filter((entry) => entry.kind === 'watchdog');
+      t.ok('cold model fetches precede the local depth worker', worker !== undefined && coldTimeline.some((entry) => entry.kind === 'fetch' && entry.detail.includes('/depth-') && entry.t < worker.t), coldTimeline);
+      t.ok('the depth watchdog is armed only after the local depth worker starts', worker !== undefined && timers.length > 0 && timers.every((entry) => entry.t >= worker.t), coldTimeline);
+      t.ok('the cold fallback timeline contains no depth watchdog failure', !coldTimeline.some((entry) => entry.kind === 'status' && entry.detail.includes('Analysis timed out at depth')), coldTimeline);
+      await t.page.screenshot('driver-gpu-fallback');
+      const fallbackRequests = await t.server.requestLog();
+      t.ok('one-shot fallback fault is applied only to session POST', fallbackRequests.some((r) => r.method === 'POST' && r.path === '/dev/gpu/v1/sessions' && r.status === 503) && !fallbackRequests.some((r) => r.method === 'DELETE' && r.status === 503), fallbackRequests.filter((r) => r.path.startsWith('/dev/gpu/')));
+      await t.page.evaluate(z.literal(true), async () => { for (const key of await caches.keys()) if (key.startsWith('noisy-models-')) await caches.delete(key); return true; });
+      await t.server.setFaults(['path:/dev/gpu/v1/health:http503:method=GET:times=1', 'path:/models/depth-:http503:method=GET:times=1']);
+      await t.page.goto('/');
+      const bootFailed = await t.page.waitFor('failed health and cold model download report boot failure', Analysis, () => {
+        const a = window.__noisyTest?.demo.analysis(); return a?.status.startsWith('Models unavailable:') ? a : null;
+      }, { timeoutMs: 30_000 });
+      t.equal('failed boot has not marked models ready', bootFailed.modelsReady, false);
+      const probesBeforeRecovery = (await t.server.requestLog()).filter((r) => r.path === '/dev/gpu/v1/health').length;
+      await t.server.clearFaults();
+      await t.page.evaluate(z.literal(true), driverImport, 1024, 768, 2);
+      await t.page.waitFor('a new import retries boot preparation and recovers through GPU', z.literal(true), () => {
+        const a = window.__noisyTest?.demo.analysis(); return a?.modelsReady && a.backend.kind === 'gpu' && a.decoderReady && a.status === 'Ready to tap' ? true : null;
+      }, { timeoutMs: 120_000 });
+      const recovered = await t.page.evaluate(GpuView, readGpu);
+      t.ok('failed boot recovery performs another health probe', (await t.server.requestLog()).filter((r) => r.path === '/dev/gpu/v1/health').length > probesBeforeRecovery);
+      await t.page.screenshot('driver-gpu-recovered');
+      await t.file('gpu-evidence.json', JSON.stringify({ ready, held, before, after, plateFailed, failed, retries, coldTimeline, bootFailed, recovered, requests: await t.server.requestLog() }, null, 2));
+    } finally { await t.server.clearFaults(); await t.page.intercept([]); }
+  },
+};
+
+export const scenarios: readonly Scenario[] = [...harnessScenarios, ...analysisScenarios, gpuScenario];

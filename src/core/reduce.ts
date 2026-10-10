@@ -111,7 +111,7 @@ const SURFACE: Coercers<Partial<Surface>> = {
 /** `focus` may be null, which passes through. */
 const MOTION: Coercers<Partial<Motion>> = {
   enabled: keep,
-  orbit: num('motion.orbit'),
+  drift: fields({ amount: num('motion.drift.amount') }),
   parallax: num('motion.parallax'),
   loopSeconds: num('motion.loopSeconds'),
   focus: num('motion.focus'),

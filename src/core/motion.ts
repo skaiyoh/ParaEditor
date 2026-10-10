@@ -37,13 +37,13 @@ export function loopZoom(parallax: number): number {
 export const LOOP_ZOOM = loopZoom(1);
 
 /**
- * The camera orbit a loop runs with: `motion.orbit` while motion is on, and 0
+ * The camera orbit a loop runs with: `motion.drift.amount` while motion is on, and 0
  * while it is off. The loop camera, which the renderer is to build, is to be
  * the identity at 0, so a loop keeps the still's framing, and to zoom by
  * LOOP_ZOOM above 0.
  */
 export function effectiveOrbit(motion: Motion): number {
-  return motion.enabled ? motion.orbit : 0;
+  return motion.enabled ? motion.drift.amount : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,11 +102,17 @@ export const CAMERA_CYCLES = 1;
  * `s = cycleTurn(CAMERA_CYCLES, phase)`. The radius is the effective orbit
  * times the parallax clamp. The circle is in frame fractions of each axis,
  * so on a frame that is not square it is an ellipse in pixels, and the
- * margin, a fraction of each axis, is used in full on both.
+ * margin, a fraction of each axis, is used in full on both. Side and vertical
+ * retain only their named axis; every path closes exactly at phase 1.
  */
-export function cameraOffset(radius: number, phase: number): Vec2 {
+export function cameraOffset(radius: number, phase: number, direction: Motion['drift']['direction'] = 'circle'): Vec2 {
   const angle = 2 * Math.PI * cycleTurn(CAMERA_CYCLES, phase);
-  return { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+  switch (direction) {
+    case 'side': return { x: radius * Math.cos(angle), y: 0 };
+    case 'vertical': return { x: 0, y: radius * Math.sin(angle) };
+    case 'circle': return { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+    default: { const exhaustive: never = direction; return exhaustive; }
+  }
 }
 
 /**

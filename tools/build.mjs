@@ -15,7 +15,6 @@ import { copyFile, cp, mkdir, readdir, readFile, realpath, rename, rm, stat, wri
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import * as esbuild from 'esbuild';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const META = 'build.json';
@@ -48,6 +47,7 @@ const USAGE = `usage: node tools/build.mjs [--mode dev|production] [--outdir <di
   --outdir      output directory (default build/<mode>); replaced whole on success
   --src         source root holding main.tsx, the worker entries, index.html, and dev/ (default src)
   --lock        the model lock the bundles carry as NOISY_MODEL_LOCK (default models.lock.json)
+  --gpu         analysis service base URL (default NOISY_GPU_URL or empty)
   --migrations  dev only: a module that replaces <src>/core/migrate.ts`;
 
 function die(sentence) {
@@ -65,6 +65,7 @@ function parseFlags() {
         src: { type: 'string' },
         lock: { type: 'string' },
         migrations: { type: 'string' },
+        gpu: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     }));
@@ -79,8 +80,11 @@ function parseFlags() {
   if (values.mode === 'production' && values.migrations !== undefined) {
     die('--migrations is a dev-only harness flag and a production build refuses it, so nothing was written.');
   }
+  let gpu;
+  try { gpu = gpuUrl(values.gpu ?? process.env.NOISY_GPU_URL ?? ''); } catch (error) { die(error.message); }
   return {
     mode: values.mode,
+    gpu,
     outdir: path.resolve(values.outdir ?? path.join(REPO, 'build', values.mode)),
     src: path.resolve(values.src ?? path.join(REPO, 'src')),
     lock: path.resolve(values.lock ?? MODEL_LOCK),
@@ -288,6 +292,8 @@ async function assertReplaceable(outdir) {
 
 async function main() {
   const flags = parseFlags();
+  // Header helpers are also used by the dependency-free server.
+  const esbuild = await import('esbuild');
   if (flags.migrations !== null && !existsSync(flags.migrations)) die(`--migrations module ${flags.migrations} does not exist.`);
   for (const rel of [APP, ...Object.values(WORKERS), 'index.html', ...STATIC]) {
     if (!existsSync(path.join(flags.src, rel))) die(`source ${path.join(flags.src, rel)} does not exist.`);
@@ -356,7 +362,10 @@ async function main() {
     for (const file of ORT_FILES) await copyFile(path.join(ORT_PACKAGE, 'dist', file), path.join(ortOut, file));
 
     const files = await listFiles(staging);
+    const headerContract = JSON.parse(await readFile(path.join(REPO, 'headers.json'), 'utf8'));
     const meta = {
+      gpu: flags.gpu,
+      headers: gpuHeaders(headerContract, flags.gpu),
       mode: flags.mode,
       buildId: id,
       app: appUrl,
@@ -380,4 +389,22 @@ async function main() {
   }
 }
 
-await main();
+/** Validate configuration before it reaches a URL or a CSP directive. */
+export function gpuUrl(value) {
+  if (value === '') return '';
+  const url = new URL(value);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.hostname.includes('*')) throw new Error('GPU URL must be an HTTP(S) base URL without credentials, query or fragment.');
+  return url.href.replace(/\/$/, '');
+}
+
+/** Keep the source policy closed; admit only the configured service origin. */
+export function gpuHeaders(contract, gpu) {
+  const all = { ...contract.all };
+  if (gpu !== '') {
+    const origin = new URL(gpuUrl(gpu)).origin;
+    all['Content-Security-Policy'] = all['Content-Security-Policy'].split(';').map((directive) => directive.trim().startsWith('connect-src ') ? `${directive} ${origin}` : directive).join(';');
+  }
+  return { ...contract, all };
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) await main();

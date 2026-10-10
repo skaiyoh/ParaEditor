@@ -20,6 +20,7 @@ import { scenarios as models } from './models.scenario.ts';
 import { scenarios as production } from './production.scenario.ts';
 import { scenarios as render } from './render.scenario.ts';
 import { scenarios as cameraStage } from './camera-stage.scenario.ts';
+import { scenarios as motionEdges } from './motion-edges.scenario.ts';
 import { scenarios as loop } from './loop.scenario.ts';
 import { scenarios as view } from './view.scenario.ts';
 import { scenarios as windowScenarios } from './window.scenario.ts';
@@ -58,6 +59,7 @@ export const SCENARIO_FILES = {
   'symbols.scenario.ts': symbols,
   'surface.scenario.ts': surface,
   'loop.scenario.ts': loop,
+  'motion-edges.scenario.ts': motionEdges,
   'view.scenario.ts': view,
   'window.scenario.ts': windowScenarios,
   'phone.scenario.ts': phone,

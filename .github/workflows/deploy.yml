@@ -34,6 +34,8 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Build development and production
+        env:
+          NOISY_GPU_URL: ${{ vars.NOISY_GPU_URL }}
         run: |
           npm run build
           npm run build:production
@@ -45,6 +47,7 @@ jobs:
       - name: Deploy and verify Cloudflare
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
+          NOISY_GPU_URL: ${{ vars.NOISY_GPU_URL }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}

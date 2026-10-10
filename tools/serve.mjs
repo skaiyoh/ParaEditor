@@ -18,9 +18,14 @@
 // docs/ARCHITECTURE.md ("Dev server") documents every route, the fault
 // grammar, and the file formats.
 
+import { execFile } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
+import { deflateSync } from 'node:zlib';
+import { gpuHeaders } from './build.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, createReadStream, createWriteStream, mkdirSync } from 'node:fs';
-import { mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
@@ -34,7 +39,7 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_ROW_BYTES = 1024 * 1024;
 /** Largest binary capture the sink accepts. */
 const MAX_CAPTURE_BYTES = 256 * 1024 * 1024;
-const FAULT_PREFIXES = ['/models/', '/vendor/ort/', '/api/projects'];
+const FAULT_PREFIXES = ['/models/', '/vendor/ort/', '/api/projects', '/dev/gpu/'];
 /** Longest delay a slow fault takes: setTimeout's limit. */
 const MAX_SLOW_MS = 2 ** 31 - 1;
 /** Where browsers send the report-only CSP's violation reports, in dev mode. */
@@ -65,6 +70,7 @@ const DEV_ONLY_SEGMENTS = new Set(['dev', 'api']);
 
 const USAGE = `usage: node tools/serve.mjs --mode dev|production [flags]
   --mode         dev (with the fault state, sink, request log, and CSP reports) or production (none of them)
+  --gpu-stub     dev only: point build.json at the synthetic GPU service
   --port         port (default 8790; 0 picks a free port)
   --host         bind address (default 127.0.0.1; 0.0.0.0 for LAN access)
   --tls          certificate directory containing server.pem and server-key.pem (default HTTP)
@@ -89,6 +95,7 @@ function parseFlags() {
     ({ values } = parseArgs({
       options: {
         mode: { type: 'string' },
+        'gpu-stub': { type: 'boolean', default: false },
         port: { type: 'string', default: '8790' },
         host: { type: 'string', default: '127.0.0.1' },
         tls: { type: 'string' },
@@ -109,7 +116,7 @@ function parseFlags() {
     process.exit(0);
   }
   if (values.mode === undefined || !Object.hasOwn(MODES, values.mode)) die(`--mode must be one of ${Object.keys(MODES).join(', ')}.\n${USAGE}`);
-  if (!MODES[values.mode].dev && (values.results !== undefined || values['request-log'] !== undefined)) {
+  if (!MODES[values.mode].dev && (values.results !== undefined || values['request-log'] !== undefined || values['gpu-stub'])) {
     die(`--results and --request-log place the dev surfaces' files, and ${values.mode} mode has no dev surfaces.`);
   }
   const port = Number(values.port);
@@ -118,6 +125,7 @@ function parseFlags() {
   if (values.host.trim() === '') die('--host must be a nonempty address.');
   return {
     mode: values.mode,
+    gpuStub: values['gpu-stub'],
     port,
     host: values.host,
     tls: values.tls === undefined ? null : path.resolve(values.tls),
@@ -137,7 +145,7 @@ const WHOLE = /^[1-9]\d*$/;
 /**
  * Parses one fault rule (docs/ARCHITECTURE.md, "Fault grammar"):
  *   no-isolation
- *   path:<prefix>:<kind>[:times=<n>]
+ *   path:<prefix>:<kind>[:method=<verb>][:times=<n>]
  *   kind = http500 | corrupt | truncate=<bytes> | stall | slow=<ms>
  * Returns { ok: true, rule } or { ok: false, error }.
  */
@@ -146,25 +154,30 @@ function parseFaultRule(spec) {
   if (typeof spec !== 'string') return fail('must be a string');
   if (spec === 'no-isolation') return { ok: true, rule: { spec, kind: 'no-isolation', remaining: null } };
   const parts = spec.split(':');
-  if (parts[0] !== 'path' || parts.length < 3 || parts.length > 4) return fail('is not "no-isolation" or "path:<prefix>:<kind>[:times=<n>]"');
-  const [, prefix, kindSpec, timesSpec] = parts;
+  if (parts[0] !== 'path' || parts.length < 3 || parts.length > 5) return fail('is not "no-isolation" or "path:<prefix>:<kind>[:method=<verb>][:times=<n>]"');
+  const [, prefix, kindSpec, ...qualifiers] = parts;
   if (!FAULT_PREFIXES.some((p) => prefix.startsWith(p))) return fail(`the prefix must start with ${FAULT_PREFIXES.join(' or ')}`);
-  let remaining = null;
-  if (timesSpec !== undefined) {
-    const n = /^times=(.*)$/.exec(timesSpec)?.[1];
-    if (n === undefined || !WHOLE.test(n)) return fail('the fourth field must be times=<n> with n at least 1');
-    remaining = Number(n);
+  let remaining = null, method = null;
+  for (const qualifier of qualifiers) {
+    if (qualifier.startsWith('method=')) {
+      if (method !== null || !/^method=(GET|HEAD|POST|PUT|DELETE|OPTIONS)$/.test(qualifier)) return fail('method must be one HTTP verb, without duplicates');
+      method = qualifier.slice(7);
+    } else {
+      const n = /^times=(.*)$/.exec(qualifier)?.[1];
+      if (remaining !== null || n === undefined || !WHOLE.test(n)) return fail('times must be one whole number at least 1, without duplicates');
+      remaining = Number(n);
+    }
   }
-  if (kindSpec === 'http500' || kindSpec === 'corrupt' || kindSpec === 'stall') {
-    return { ok: true, rule: { spec, prefix, kind: kindSpec, remaining } };
+  if (kindSpec === 'http503' || kindSpec === 'http500' || kindSpec === 'corrupt' || kindSpec === 'stall') {
+    return { ok: true, rule: { spec, prefix, method, kind: kindSpec, remaining } };
   }
   const [, name, arg] = /^(truncate|slow)=(.*)$/.exec(kindSpec) ?? [];
   if (name === undefined || arg === undefined || !WHOLE.test(arg)) {
     return fail('the kind must be http500, corrupt, truncate=<bytes>, stall, or slow=<ms>, with numbers at least 1');
   }
-  if (name === 'truncate') return { ok: true, rule: { spec, prefix, kind: name, bytes: Number(arg), remaining } };
+  if (name === 'truncate') return { ok: true, rule: { spec, prefix, method, kind: name, bytes: Number(arg), remaining } };
   if (Number(arg) > MAX_SLOW_MS) return fail(`slow=<ms> takes at most ${MAX_SLOW_MS} ms`);
-  return { ok: true, rule: { spec, prefix, kind: name, ms: Number(arg), remaining } };
+  return { ok: true, rule: { spec, prefix, method, kind: name, ms: Number(arg), remaining } };
 }
 
 function createFaultState() {
@@ -186,8 +199,8 @@ function createFaultState() {
       return !rules.some((r) => r.kind === 'no-isolation');
     },
     /** The first live path rule matching urlPath, with its count consumed. */
-    take(urlPath) {
-      const rule = rules.find((r) => r.kind !== 'no-isolation' && r.remaining !== 0 && urlPath.startsWith(r.prefix));
+    take(urlPath, method) {
+      const rule = rules.find((r) => r.kind !== 'no-isolation' && r.remaining !== 0 && urlPath.startsWith(r.prefix) && (r.method === null || r.method === method));
       if (!rule) return null;
       rule.hits += 1;
       if (rule.remaining !== null) rule.remaining -= 1;
@@ -356,6 +369,7 @@ function createServer(options, contract, firstSeq, tls) {
   const projectQueues = new Map();
   const projectTombstones = new Set();
   let projectSerialization = null;
+  const gpuSessions = new Map();
   let seq = firstSeq;
 
   const csp = contract.all['Content-Security-Policy'];
@@ -371,6 +385,16 @@ function createServer(options, contract, firstSeq, tls) {
     const headers = expectedHeaders(contract, urlPath, { isolation: isolation(), status });
     if (contentType !== null) headers['Content-Type'] = contentType;
     Object.assign(headers, extra);
+    if (mode.dev && urlPath.startsWith('/dev/gpu/')) {
+      headers['Cache-Control'] = 'no-store';
+      const origin = req.headers.origin;
+      if (typeof origin === 'string' && /^(http:\/\/127\.0\.0\.1:\d+|https:\/\/(nathan\.fish|(?:[a-z0-9-]+\.)?noisy-demo\.pages\.dev))$/.test(origin)) {
+        headers['Access-Control-Allow-Origin'] = origin; headers['Vary'] = 'Origin';
+        headers['Access-Control-Allow-Methods'] = 'GET, POST, DELETE';
+        headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Width, X-Height';
+        headers['Access-Control-Expose-Headers'] = 'X-Width, X-Height, X-Guide-Width, X-Guide-Height, X-Scores';
+      }
+    }
     const fault = appliedFault.get(res) ?? null;
     if (mode.dev) {
       if (csp !== undefined) headers['Content-Security-Policy-Report-Only'] = `${csp}; report-uri ${CSP_REPORT_PATH}`;
@@ -416,7 +440,7 @@ function createServer(options, contract, firstSeq, tls) {
 
   async function serveFile(req, res, urlPath, { dir: root }, rel, fault) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return sendText(req, res, 405, urlPath, 'method not allowed');
-    if (fault?.kind === 'http500') return sendText(req, res, 500, urlPath, 'fault: http500');
+    if (fault?.kind === 'http500' || fault?.kind === 'http503') return sendText(req, res, fault.kind === 'http503' ? 503 : 500, urlPath, `fault: ${fault.kind}`);
     if (fault?.kind === 'slow') await wait(fault.ms);
     const found = await resolveUnder(root, rel === '' ? 'index.html' : rel);
     if (found === null) return badPath(req, res, urlPath, 'bad path');
@@ -585,7 +609,7 @@ function createServer(options, contract, firstSeq, tls) {
     catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   }
   async function handleProjects(req, res, urlPath, fault) {
-    if (fault?.kind === 'http500') return sendJson(req, res, 500, urlPath, { error: 'The project store is unavailable.' });
+    if (fault?.kind === 'http500' || fault?.kind === 'http503') return sendJson(req, res, fault.kind === 'http503' ? 503 : 500, urlPath, { error: 'The project store is unavailable.' });
     const sendBytes = (status, bytes, contentType) => {
       head(req, res, status, urlPath, { 'Content-Length': String(bytes.length) }, { contentType });
       if (fault?.kind === 'corrupt') return res.end(bytes.map((value) => value ^ 0xff));
@@ -696,6 +720,79 @@ function createServer(options, contract, firstSeq, tls) {
     finally { if (projectQueues.get(id) === queued) projectQueues.delete(id); }
   }
 
+  async function handleGpu(req, res, urlPath, fault) {
+    if (req.method === 'OPTIONS') { head(req, res, 204, urlPath); return res.end(); }
+    const bad = (status, error) => sendJson(req, res, status, urlPath, { error });
+    const body = req.method === 'POST' ? await readBody(req, 24 * 1024 * 1024) : null;
+    if (req.method === 'POST' && body === null) return bad(413, 'The photo is too large.');
+    if (fault?.kind === 'slow') await wait(fault.ms);
+    if (fault?.kind === 'http503' || fault?.kind === 'http500') return bad(fault.kind === 'http503' ? 503 : 500, 'The GPU is busy.');
+    if (fault?.kind === 'stall') {
+      const resource = urlPath.split('/').at(-1);
+      const session = gpuSessions.get(urlPath.split('/')[5]);
+      const width = session?.width ?? 2, height = session?.height ?? 2, scale = 1024 / Math.max(width, height);
+      head(req, res, resource === 'sessions' ? 201 : 200, urlPath, { 'X-Width': width, 'X-Height': height, 'X-Guide-Width': Math.round(width * scale), 'X-Guide-Height': Math.round(height * scale), 'X-Scores': '0.95,0.85,0.75' }, { contentType: resource === 'inpaint' ? 'image/png' : ['sessions', 'health'].includes(resource) ? 'application/json' : 'application/octet-stream' }); res.flushHeaders(); return;
+    }
+    const binary = (bytes, type, headers = {}) => {
+      head(req, res, 200, urlPath, { ...headers, 'Content-Length': String(bytes.length) }, { contentType: type });
+      res.end(bytes);
+    };
+    if (urlPath === '/dev/gpu/v1/health' && req.method === 'GET') return sendJson(req, res, 200, urlPath, { ok: true, gpu: 'GPU stub', models: { depth: 'stub-depth', segment: 'stub-segment', inpaint: 'stub-inpaint' } });
+    for (const [id, session] of gpuSessions) if (session.expires < Date.now()) gpuSessions.delete(id);
+    if (urlPath === '/dev/gpu/v1/sessions' && req.method === 'POST') {
+      const width = Number(req.headers['x-width']), height = Number(req.headers['x-height']);
+      if (![width, height].every((n) => Number.isInteger(n) && n >= 1 && n <= 2048) || !['image/jpeg', 'image/png'].includes(req.headers['content-type'])) return bad(400, 'The master dimensions or content type are invalid.');
+      if (gpuSessions.size >= 16) return bad(503, 'The stub has too many sessions.');
+      let pixels;
+      try { pixels = await gpuPixels(body, width, height); }
+      catch (error) { return bad(400, `The photo could not be decoded: ${error.message}`); }
+      if (res.destroyed) return;
+      const id = randomBytes(16).toString('hex');
+      const expires = Date.now() + 30 * 60_000;
+      gpuSessions.set(id, { width, height, pixels, expires });
+      return sendJson(req, res, 201, urlPath, { id, master: { width, height }, expiresAt: new Date(expires).toISOString() });
+    }
+    const match = /^\/dev\/gpu\/v1\/sessions\/([a-f0-9]{32})(?:\/(depth|taps|inpaint))?$/.exec(urlPath);
+    if (match === null) return bad(404, 'The GPU route was not found.');
+    const [, id, resource] = match;
+    const session = gpuSessions.get(id);
+    if (session === undefined) return bad(404, 'The analysis session was not found.');
+    session.expires = Date.now() + 30 * 60_000;
+    const { width, height, pixels } = session, count = width * height;
+    if (resource === undefined && req.method === 'DELETE') { gpuSessions.delete(id); return sendJson(req, res, 200, urlPath, { ok: true }); }
+    if (resource === 'depth' && req.method === 'GET') {
+      const bytes = Buffer.alloc(count * 4);
+      for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) bytes.writeFloatLE((x / Math.max(1, width - 1) + y / Math.max(1, height - 1)) / 2, (y * width + x) * 4);
+      return binary(bytes, 'application/octet-stream', { 'X-Width': width, 'X-Height': height });
+    }
+    if (resource === 'taps' && req.method === 'POST') {
+      let points;
+      try { points = JSON.parse(body.toString('utf8')).points; } catch { return bad(400, 'The taps must be JSON.'); }
+      if (!Array.isArray(points) || points.length < 1 || points.length > 8 || !points.every((p) => p !== null && [p.x, p.y].every((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1) && ['include', 'exclude'].includes(p.label))) return bad(400, 'One to eight frame-fraction taps are required.');
+      const scale = 1024 / Math.max(width, height), gw = Math.max(1, Math.round(width * scale)), gh = Math.max(1, Math.round(height * scale));
+      const bytes = Buffer.alloc(gw * gh * 3);
+      for (let c = 0; c < 3; c++) for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
+        const radius = Math.min(gw, gh) * (0.12 + c * 0.06);
+        const includes = points.filter((p) => p.label === 'include');
+        const excludes = points.filter((p) => p.label === 'exclude');
+        const distance = Math.min(...includes.map((p) => Math.hypot(x - p.x * gw, y - p.y * gh)));
+        const excluded = excludes.some((p) => Math.hypot(x - p.x * gw, y - p.y * gh) < radius / 2);
+        bytes[c * gw * gh + y * gw + x] = excluded ? 0 : Math.round(Math.max(0, Math.min(255, 128 + (radius - distance) * 64)));
+      }
+      return binary(bytes, 'application/octet-stream', { 'X-Guide-Width': gw, 'X-Guide-Height': gh, 'X-Scores': '0.95,0.85,0.75' });
+    }
+    if (resource === 'inpaint' && req.method === 'POST') {
+      if (Number(req.headers['x-width']) !== width || Number(req.headers['x-height']) !== height || req.headers['content-type'] !== 'application/octet-stream' || body.length !== count) return bad(400, 'The hole must match the master.');
+      const sum = [0, 0, 0]; let outside = 0;
+      for (let i = 0; i < count; i++) if (body[i] === 0) { outside++; for (let c = 0; c < 3; c++) sum[c] += pixels[i * 3 + c]; }
+      if (outside === 0) { outside = count; for (let i = 0; i < pixels.length; i++) sum[i % 3] += pixels[i]; }
+      const mean = sum.map((s) => Math.round(s / outside)), plate = Buffer.from(pixels);
+      for (let i = 0; i < count; i++) if (body[i] !== 0) for (let c = 0; c < 3; c++) plate[i * 3 + c] = mean[c];
+      return binary(gpuPng(plate, width, height), 'image/png');
+    }
+    return bad(405, 'The GPU method is not allowed.');
+  }
+
   /**
    * POST stores one CSP violation report, in any media type browsers use
    * (application/csp-report, application/reports+json), as a line of
@@ -772,15 +869,24 @@ function createServer(options, contract, firstSeq, tls) {
         return res.end();
       }
       if (!mode.dev && namesDevOnly(urlPath)) return sendText(req, res, 404, urlPath, 'not found');
+      if (mode.dev && urlPath.startsWith('/dev/gpu/')) {
+        const fault = faults.take(urlPath, req.method);
+        if (fault !== null) appliedFault.set(res, fault.spec);
+        return await handleGpu(req, res, urlPath, fault);
+      }
+      if (mode.dev && options.gpuStub && urlPath === '/build.json' && req.method === 'GET') {
+        const info = JSON.parse(await readFile(path.join(options.root, 'build.json'), 'utf8'));
+        return sendJson(req, res, 200, urlPath, { ...info, gpu: '/dev/gpu' });
+      }
       if (mode.dev && (urlPath === '/api/projects' || urlPath.startsWith('/api/projects/'))) {
-        const fault = faults.take(urlPath);
+        const fault = faults.take(urlPath, req.method);
         if (fault !== null) appliedFault.set(res, fault.spec);
         return await handleProjects(req, res, urlPath, fault);
       }
       if (Object.hasOwn(endpoints, urlPath)) return await endpoints[urlPath](req, res, urlPath, query);
       const mount = mounts.find((m) => urlPath.startsWith(m.prefix));
       const readable = req.method === 'GET' || req.method === 'HEAD';
-      const fault = mount.faultable && readable ? faults.take(urlPath) : null;
+      const fault = mount.faultable && readable ? faults.take(urlPath, req.method) : null;
       if (fault !== null) appliedFault.set(res, fault.spec);
       return await serveFile(req, res, urlPath, mount, urlPath.slice(mount.prefix.length), fault);
     } catch (e) {
@@ -798,11 +904,48 @@ function sanitizeName(name) {
   return clean === '' ? 'capture.bin' : clean;
 }
 
+// macOS dev fixture only: sips is supplied by the OS, never shipped to hosting.
+const runImageTool = promisify(execFile);
+async function gpuPixels(photo, width, height) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'noisy-gpu-'));
+  try {
+    const input = path.join(dir, 'master'), output = path.join(dir, 'master.bmp');
+    await writeFile(input, photo);
+    await runImageTool('/usr/bin/sips', ['-s', 'format', 'bmp', input, '--out', output], { timeout: 10_000, maxBuffer: 64 * 1024 });
+    const bmp = await readFile(output);
+    if (bmp.length < 54 || bmp.toString('ascii', 0, 2) !== 'BM' || bmp.readInt32LE(18) !== width || Math.abs(bmp.readInt32LE(22)) !== height || bmp.readUInt16LE(28) !== 24 || bmp.readUInt32LE(30) !== 0) throw new Error('Unsupported BMP dimensions or format.');
+    const offset = bmp.readUInt32LE(10), stride = Math.ceil(width * 3 / 4) * 4;
+    if (bmp.length < offset + stride * height) throw new Error('Truncated BMP.');
+    const pixels = Buffer.alloc(width * height * 3), topDown = bmp.readInt32LE(22) < 0;
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const from = offset + (topDown ? y : height - y - 1) * stride + x * 3, to = (y * width + x) * 3;
+      pixels[to] = bmp[from + 2]; pixels[to + 1] = bmp[from + 1]; pixels[to + 2] = bmp[from];
+    }
+    return pixels;
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+function gpuPng(pixels, width, height) {
+  const chunk = (type, data) => {
+    const name = Buffer.from(type), body = Buffer.concat([name, data]);
+    let crc = 0xffffffff;
+    for (const byte of body) { crc ^= byte; for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); }
+    const size = Buffer.alloc(4), check = Buffer.alloc(4); size.writeUInt32BE(data.length); check.writeUInt32BE((crc ^ 0xffffffff) >>> 0);
+    return Buffer.concat([size, body, check]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const raw = Buffer.alloc(height * (width * 3 + 1));
+  for (let y = 0; y < height; y++) pixels.copy(raw, y * (width * 3 + 1) + 1, y * width * 3, (y + 1) * width * 3);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
 async function main() {
   const options = parseFlags();
   let contract;
   try {
     contract = await loadHeaderContract(options.headers);
+    let gpu = '';
+    try { gpu = JSON.parse(await readFile(path.join(options.root, 'build.json'), 'utf8')).gpu ?? ''; } catch { /* Fixture roots may omit build.json. */ }
+    contract = gpuHeaders(contract, gpu);
   } catch (e) {
     die(e.message);
   }

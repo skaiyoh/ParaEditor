@@ -32,7 +32,7 @@ declare global {
         setRecolor(color: Oklch | null): void;
         reset(): void;
         objects(): readonly { readonly id: string; readonly name: string; readonly hidden: boolean; readonly subject: boolean; readonly recolor: SceneDocument['objects'][number]['recolor']; readonly bounds: SceneDocument['objects'][number]['produced']['bounds']; readonly depth: SceneDocument['objects'][number]['produced']['depth']; readonly selected: boolean }[];
-        analysis(): { status: string; modelsReady: boolean; depth: boolean; embeddings: boolean; decoderReady: boolean; plate: boolean; alive: { heavy: boolean; decoder: boolean }; timings: Record<string, number> };
+        analysis(): { backend: { kind: 'device' } | { kind: 'gpu'; name: string }; status: string; modelsReady: boolean; depth: boolean; embeddings: boolean; decoderReady: boolean; plate: boolean; alive: { heavy: boolean; decoder: boolean }; timings: Record<string, number> };
         analysisDiagnostics(): ReturnType<AnalysisDriver['diagnostics']>;
         requestPlate(): Promise<void>;
         injectMask(plane: { width: number; height: number; data: Uint8Array }): void;
@@ -68,7 +68,7 @@ declare global {
         windowReady(): boolean;
         windowFrames(): number;
         windowTracks(): readonly MediaStreamTrack[];
-        readonly render: (RendererDebug & SymbolsDebug & LoopDebug & SelectionDebug & { profileCamera(): Readonly<Record<string, number>>; hashCells(): readonly number[] }) | null;
+        readonly render: (RendererDebug & SymbolsDebug & LoopDebug & SelectionDebug & { profileCamera(): Readonly<Record<string, number>>; hashCells(): readonly number[]; motionCamera(): Vec2; setMotionFeather(enabled: boolean): void }) | null;
       };
       diagnostics(): readonly DiagnosticEvent[];
       environment(): Promise<EnvironmentSnapshot>;

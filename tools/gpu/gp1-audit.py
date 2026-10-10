@@ -6,11 +6,16 @@ h=runpy.run_path('/workspace/GP0/remote-prepare.py');root=Path('/workspace/gp1')
 base=dict(os.environ);base.pop('PYTHONPATH',None)
 freeze=h['command'](['/opt/venv/bin/python','-m','pip','freeze'],base)
 (root/'freeze-after.txt').write_text(freeze)
-assert freeze==(root/'freeze-before.txt').read_text(),'Protected pip freeze changed'
+if freeze != (root / 'freeze-before.txt').read_text():
+    raise RuntimeError('Protected pip freeze changed')
 versions=h['versions'](dict(base,PYTHONPATH='/workspace/pydeps'))
-old=json.loads((root/'versions-before.json').read_text());assert all(versions[k]==v for k,v in old.items()),'Protected versions changed'
-assert all(str(path).startswith('/opt/venv/') for path in versions['paths'].values()),'Protected packages shadowed'
-assert not {'torch','torchvision','torchaudio','numpy','PIL'}.intersection(p.name for p in Path('/workspace/pydeps').iterdir()),'Protected overlay package detected'
+old=json.loads((root/'versions-before.json').read_text())
+if not (all(versions[k]==v for k,v in old.items())):
+    raise RuntimeError('Protected versions changed')
+if not (all(str(path).startswith('/opt/venv/') for path in versions['paths'].values())):
+    raise RuntimeError('Protected packages shadowed')
+if {'torch', 'torchvision', 'torchaudio', 'numpy', 'PIL'}.intersection((p.name for p in Path('/workspace/pydeps').iterdir())):
+    raise RuntimeError('Protected overlay package detected')
 packages=[]
 for d in importlib.metadata.distributions(path=['/workspace/pydeps']):
  packages.append(dict(name=d.metadata['Name'],version=d.version,license=d.metadata.get('License'),license_expression=d.metadata.get('License-Expression'),classifiers=d.metadata.get_all('Classifier')))

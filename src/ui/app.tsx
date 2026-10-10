@@ -5,7 +5,7 @@ import { applyEdit } from '../core/reduce.ts';
 import { RANGES } from '../core/ranges.ts';
 import { EnableSwitch, Node, RangeControl } from './controls.tsx';
 import { Layers, ObjectInspector } from './layers.tsx';
-import { MotionExport, ParallaxNode, PhoneFrame } from './phone.tsx';
+import { MotionControls, MotionExport, ParallaxNode, PhoneFrame } from './phone.tsx';
 import { Projects } from './projects.tsx';
 
 const PHONE_QUERY = '(max-width: 760px), (max-height: 500px), (max-width: 1100px) and (orientation: portrait)';
@@ -257,10 +257,7 @@ function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, d
       </Node>
       <Node name="Motion" expanded={expanded.Motion} onExpand={() => expand('Motion')}
         toggle={<EnableSwitch name="Motion" checked={scene.doc.motion.enabled} onChange={(enabled) => session.setMotion({ enabled })} />}>
-        <RangeControl id="motion-orbit" label="Orbit" min={0} max={1} step={0.01} value={scene.doc.motion.orbit} onInput={(orbit) => session.setMotion({ orbit })} />
-        <RangeControl id="motion-parallax" label="Parallax" min={RANGES['motion.parallax'].min} max={RANGES['motion.parallax'].max} step={0.1}
-          value={scene.doc.motion.parallax} onInput={(parallax) => session.setMotion({ parallax })} />
-        <RangeControl id="motion-loopSeconds" label="Loop seconds" min={2} max={6} step={0.1} value={scene.doc.motion.loopSeconds} onInput={(loopSeconds) => session.setMotion({ loopSeconds })} />
+        <MotionControls motion={scene.doc.motion} session={session} />
         {scene.doc.motion.enabled && <MotionExport session={session} />}
       </Node>
       <ParallaxNode enabled={parallaxEnabled} available={modelsReady} onParallax={onParallax} debug={debug} onDebug={onDebug} />
@@ -346,7 +343,6 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   const status = bootError ?? (state.parallaxEnabled && state.analysisStatus === 'preparing' ? `${state.status} - preparing` :
     tapUnavailable || state.status === 'Ready' || state.status === 'Drop a photo' ? state.analysisStatus : state.status);
   const preparing = state.exportProgress ?? (scene === null ? null : tapUnavailable ? state.analysisStatus
-    : state.analysisStatus === 'Analyzing: inpaint' ? 'Preparing: background'
     : state.analysisStatus.startsWith('Analyzing: ') ? state.analysisStatus.replace('Analyzing: ', 'Preparing: ')
     : state.analysisStatus === 'preparing' ? 'Preparing: background'
     : state.analysisStatus === 'Warming decoder' ? state.analysisStatus
@@ -395,6 +391,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
           <section class="scene-info" aria-labelledby="scene-heading">
             <h2 id="scene-heading" class="panel-heading">Scene</h2>
             <dl class="scene-facts">
+              <div><dt>Analysis</dt><dd data-testid="analysis-backend">{analysis.backend.kind === 'gpu' ? `GPU · ${analysis.backend.name}` : 'on device'}</dd></div>
               <div><dt>Master</dt><dd>{scene === null ? 'No photo' : `${scene.master.width} × ${scene.master.height}`}</dd></div>
               <div><dt>Depth</dt><dd class={scene?.depth != null ? 'fact-ready' : ''}>{scene?.depth != null ? 'Ready' : 'Pending'}<span class="fact-time">{elapsed('depth')}</span></dd></div>
               <div><dt>Encoder</dt><dd class={analysis.decoderReady ? 'fact-ready' : ''}>{analysis.decoderReady ? 'Ready' : 'Pending'}<span class="fact-time">{elapsed('encode')}</span></dd></div>

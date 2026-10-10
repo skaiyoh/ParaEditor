@@ -203,7 +203,7 @@ const SETTERS: Readonly<Partial<Record<ClampPath, Setter>>> = {
   'surface.refraction': { doc: fiveClusterDocument, edit: (refraction) => ({ kind: 'surface', patch: { refraction } }), read: (doc) => doc.surface.refraction },
   'surface.shine': { doc: fiveClusterDocument, edit: (shine) => ({ kind: 'surface', patch: { shine } }), read: (doc) => doc.surface.shine },
   'surface.scale': { doc: fiveClusterDocument, edit: (scale) => ({ kind: 'surface', patch: { scale } }), read: (doc) => doc.surface.scale },
-  'motion.orbit': { doc: fiveClusterDocument, edit: (orbit) => ({ kind: 'motion', patch: { orbit } }), read: (doc) => doc.motion.orbit },
+  'motion.drift.amount': { doc: fiveClusterDocument, edit: (amount) => ({ kind: 'motion', patch: { drift: { direction: 'circle', amount } } }), read: (doc) => doc.motion.drift.amount },
   'motion.loopSeconds': { doc: fiveClusterDocument, edit: (loopSeconds) => ({ kind: 'motion', patch: { loopSeconds } }), read: (doc) => doc.motion.loopSeconds },
   'motion.parallax': { doc: fiveClusterDocument, edit: (parallax) => ({ kind: 'motion', patch: { parallax } }), read: (doc) => doc.motion.parallax },
   'motion.focus': { doc: minimalDocument, edit: (focus) => ({ kind: 'motion', patch: { focus } }), read: (doc) => doc.motion.focus },

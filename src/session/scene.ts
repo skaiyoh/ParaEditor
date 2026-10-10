@@ -15,7 +15,7 @@ import { renderStereo, STEREO_3DS_SIZE } from '../export/stereo.ts';
 import type { Size } from '../core/raster.ts';
 import { readBuildId } from '../platform/build-id.ts';
 import { applyEdit, applyEdits } from '../core/reduce.ts';
-import { EMPTY_HISTORY, coalesceKey, push, undo, redo, type History, type HistoryEntry } from '../core/history.ts';
+import { EMPTY_HISTORY, coalesceKey, push, undo, redo, referencedAssets, type History, type HistoryEntry } from '../core/history.ts';
 import type { Edit, StylePatch } from '../core/edits.ts';
 import { createRenderer } from '../render/renderer.ts';
 import { renderPng } from '../export/png.ts';
@@ -248,6 +248,9 @@ export function createDemoSession() {
       loop.stop(); renderer.renderStill();
     }
   }
+  function retainMasks(doc: SceneDocument): void {
+    products.retainMasks(new Set([...referencedAssets(history), ...doc.objects.map((object) => object.produced.mask.asset)]));
+  }
   function record(edit: Edit, inverse: HistoryEntry['inverse'], doc: SceneDocument): void {
     const masks = new Map<AssetId, Plane<'u8'>>();
     for (const action of [edit, ...inverse]) {
@@ -257,7 +260,7 @@ export function createDemoSession() {
       if (asset !== null && mask !== undefined) masks.set(asset, mask);
     }
     history = push(history, { key: coalesceKey(edit), at: performance.now(), forward: [edit], inverse, masks }, doc);
-    products.retainMasks(new Set(doc.objects.map((object) => object.produced.mask.asset)));
+    retainMasks(doc);
   }
   function edit(edit: Edit): void {
     cancelRefinement();
@@ -281,7 +284,7 @@ export function createDemoSession() {
     if (result.kind === 'refused') { publish({ ...state, status: `The edit was refused: ${result.detail}` }); return; }
     for (const [asset, mask] of entry.masks ?? []) products.putMask(asset, mask);
     history = step.history;
-    products.retainMasks(new Set(result.doc.objects.map((object) => object.produced.mask.asset)));
+    retainMasks(result.doc);
     setDocument(result.doc);
   }
   async function requestPlateIfNeeded(): Promise<void> {
@@ -356,7 +359,7 @@ export function createDemoSession() {
   }
   function dropPreview(current: Refinement): void {
     const asset = current.preview?.mask.asset;
-    if (asset !== undefined && asset !== current.original.mask.asset &&
+    if (asset !== undefined && asset !== current.original.mask.asset && !referencedAssets(history).has(asset) &&
       !state.scene?.doc.objects.some((object) => object.produced.mask.asset === asset)) dropMask(asset);
   }
   function dropMask(asset: AssetId): void {

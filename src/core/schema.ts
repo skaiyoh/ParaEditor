@@ -288,7 +288,7 @@ export const surfaceSchema = z
 export const motionSchema = z
   .strictObject({
     enabled: z.boolean(),
-    orbit: inRange('motion.orbit'),
+    drift: z.strictObject({ direction: z.enum(['side', 'vertical', 'circle']), amount: inRange('motion.drift.amount') }).readonly(),
     parallax: inRange('motion.parallax'),
     loopSeconds: inRange('motion.loopSeconds'),
     focus: inRange('motion.focus').nullable(),

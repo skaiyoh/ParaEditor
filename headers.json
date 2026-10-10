@@ -8,6 +8,10 @@
   },
   "byPath": [
     {
+      "path": "/build.json",
+      "headers": { "Cache-Control": "no-cache" }
+    },
+    {
       "path": "/assets/*",
       "headers": {
         "Cache-Control": "public, max-age=31536000, immutable"

@@ -49,7 +49,7 @@ function someOf<T>(random: Random, items: readonly T[]): T | undefined {
 const GAPS = [0, 30, 200, 599, 600, 601, 2000] as const;
 
 const EDIT_KINDS = [
-  'saturation', 'saturation', 'grain', 'fry', 'target', 'target', 'target', 'orbit', 'title',
+  'saturation', 'saturation', 'grain', 'fry', 'target', 'target', 'target', 'drift', 'title',
   'thickness', 'motion', 'light.at', 'light.intensity',
   'object.add', 'object.remove', 'object.refine', 'light.add', 'light.remove',
 ] as const;
@@ -73,8 +73,8 @@ function randomEdit(random: Random, doc: SceneDocument, fresh: () => number, kin
       const cluster = index === 0 && random() < 0.5 ? -0 : index;
       return { kind: 'palette.target', cluster, color: random() < 0.2 ? null : { l: 0.5, c: 0.1, h: Math.floor(random() * 4) * 90 } };
     }
-    case 'orbit':
-      return { kind: 'motion', patch: { orbit: Math.round(random() * 4) / 4 } };
+    case 'drift':
+      return { kind: 'motion', patch: { drift: { direction: 'circle', amount: Math.round(random() * 4) / 4 } } };
     case 'title':
       return { kind: 'title', title: `Title ${Math.floor(random() * 3)}` };
     case 'thickness':

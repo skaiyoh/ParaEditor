@@ -79,7 +79,7 @@ test('coalesceKey gives one key per field or swatch, and null for every edit tha
     [{ kind: 'style', patch: {} }, null],
     [{ kind: 'fry', fry: 0.4 }, 'fry'],
     [{ kind: 'symbols', patch: { amount: 0.5 } }, 'symbols:amount'],
-    [{ kind: 'motion', patch: { orbit: 0.5 } }, 'motion:orbit'],
+    [{ kind: 'motion', patch: { drift: { direction: 'circle', amount: 0.5 } } }, 'motion:drift'],
     [{ kind: 'lighting', patch: { relief: 2 } }, 'lighting:relief'],
     [{ kind: 'palette.target', cluster: 2, color: { l: 0.5, c: 0.1, h: 3 } }, 'palette.target:2'],
     [{ kind: 'palette.target', cluster: 2, color: null }, 'palette.target:2'],
@@ -370,4 +370,15 @@ test('history owns a deleted mask through undo and redo without copying its byte
   assert.ok(back);
   const forward = redo(back.history);
   assert.equal(forward?.history.undo[0]?.masks?.get(object.produced.mask.asset), plane);
+});
+
+
+test('discarding redo releases masks referenced only by that history branch', () => {
+  const asset = assetId(0x70);
+  let session = edit(open(fiveClusterDocument()), { kind: 'object.add', object: maskedObject(0, asset) }, 0);
+  session = stepBack(session, 1000);
+  assert.equal(session.doc.objects.some((object) => object.produced.mask.asset === asset), false);
+  assert.ok(referencedAssets(session.history).has(asset));
+  session = edit(session, { kind: 'title', title: 'A different branch' }, 2000);
+  assert.equal(referencedAssets(session.history).has(asset), false);
 });

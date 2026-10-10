@@ -61,7 +61,7 @@ export const scenarios: readonly Scenario[] = [
   },
   {
     id: 'shell.workers',
-    title: 'each worker entry loads as a module worker: the gif stub answers with its name and the build id, and the sequence, decode and face workers throw a message they cannot parse',
+    title: 'each worker entry loads as a module worker: the gif worker answers a message it cannot parse with a failed reply, and the sequence, decode and face workers throw one',
     target: 'dev',
     covers: ['B3'],
     async run(t) {
@@ -78,7 +78,9 @@ export const scenarios: readonly Scenario[] = [
           const article = name === 'face' ? 'The' : 'the';
           t.equal(`the ${name} worker loads and throws the message it cannot parse`, answer, { error: `Uncaught Error: ${article} ${name} worker cannot read a request: (message): Invalid input: expected object, received string` }, { url });
         } else {
-          t.equal(`the ${name} worker answers as a stub`, answer, { reply: { kind: 'stub', worker: name, buildId: t.build.buildId } }, { url });
+          // The gif worker (EXP1) parses every message too, and answers what it cannot read with a failed reply instead of throwing.
+          const reply = z.object({ reply: z.object({ kind: z.string(), detail: z.string() }) }).safeParse(answer);
+          t.ok(`the ${name} worker loads and answers the message it cannot parse with a failed reply`, reply.success && reply.data.reply.kind === 'failed' && /expected object, received string/.test(reply.data.reply.detail), answer);
         }
       }
     },

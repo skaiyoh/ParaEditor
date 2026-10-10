@@ -52,6 +52,25 @@ function Eye({ hidden }: { readonly hidden: boolean }) {
   </svg>;
 }
 
+function ObjectActions({ object, session, placement }: {
+  readonly object: SceneObject; readonly session: DemoSession; readonly placement: 'layer' | 'object';
+}) {
+  const row = placement === 'layer';
+  return <div class={`${placement}-actions`}>
+    <button class={row ? 'layer-icon' : undefined} type="button" data-testid={`${placement}-hide`}
+      aria-label={`${object.hidden ? 'Show' : 'Hide'} ${object.name}`}
+      onClick={() => session.setObjectHidden(object.id, !object.hidden)}>
+      {row ? <Eye hidden={object.hidden} /> : object.hidden ? 'Show' : 'Hide'}
+    </button>
+    <button class={row ? 'layer-icon' : undefined} type="button" data-testid={`${placement}-delete`}
+      aria-label={`Delete ${object.name}`} onClick={() => session.deleteObject(object.id)}>
+      {row ? <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <path d="M2 4h12M6 4V2h4v2M4 4l1 10h6l1-10M6.5 6v5M9.5 6v5" />
+      </svg> : 'Delete'}
+    </button>
+  </div>;
+}
+
 export function ObjectInspector({ object, session }: { readonly object: SceneObject; readonly session: DemoSession }) {
   const [renaming, setRenaming] = useState(false);
   return <section class="object-node" aria-label="Object">
@@ -61,12 +80,7 @@ export function ObjectInspector({ object, session }: { readonly object: SceneObj
       {!renaming && <button type="button" data-testid="layer-rename" onClick={() => setRenaming(true)}>Rename</button>}
     </div>
     <Swatches session={session} recolor={object.recolor} />
-    <div class="object-actions">
-      <button type="button" data-testid="layer-hide" aria-label={`${object.hidden ? 'Show' : 'Hide'} ${object.name}`}
-        onClick={() => session.setObjectHidden(object.id, !object.hidden)}>{object.hidden ? 'Show' : 'Hide'}</button>
-      <button type="button" data-testid="layer-delete" aria-label={`Delete ${object.name}`}
-        onClick={() => session.deleteObject(object.id)}>Delete</button>
-    </div>
+    <ObjectActions object={object} session={session} placement="object" />
   </section>;
 }
 
@@ -80,16 +94,7 @@ function ObjectRow({ object, scene, session }: { readonly object: SceneObject; r
       {!renaming && <span class="layer-name" title={object.name}>{object.name}</span>}
     </button>
     {renaming && <NameInput object={object} session={session} onFinish={() => setRenaming(false)} />}
-    <div class="layer-actions">
-      <button class="layer-icon" type="button" data-testid="layer-hide" aria-label={`${object.hidden ? 'Show' : 'Hide'} ${object.name}`}
-        onClick={() => session.setObjectHidden(object.id, !object.hidden)}><Eye hidden={object.hidden} /></button>
-      <button class="layer-icon" type="button" data-testid="layer-delete" aria-label={`Delete ${object.name}`}
-        onClick={() => session.deleteObject(object.id)}>
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-          <path d="M2 4h12M6 4V2h4v2M4 4l1 10h6l1-10M6.5 6v5M9.5 6v5" />
-        </svg>
-      </button>
-    </div>
+    <ObjectActions object={object} session={session} placement="layer" />
   </div>;
 }
 

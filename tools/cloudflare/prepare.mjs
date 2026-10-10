@@ -1,4 +1,5 @@
 import { build } from 'esbuild';
+import { gpuHeaders, gpuUrl } from '../build.mjs';
 import { createHash } from 'node:crypto';
 import { cp, mkdir, readFile, readdir, lstat, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -15,6 +16,7 @@ export const BUCKET = 'noisy-demo-models';
 export const DOMAIN = 'nathan.fish';
 const hashedScript = z.string().regex(/^\/assets\/[a-z-]+-[A-Z0-9]{8}\.js$/);
 const Build = z.object({
+  gpu: z.string().default(''),
   mode: z.literal('production'), buildId: z.string(), app: hashedScript,
   workers: z.object({ sequence: hashedScript, decode: hashedScript, gif: hashedScript, face: hashedScript }),
   devPages: z.record(z.string(), z.never()), devWorkers: z.record(z.string(), z.never()),
@@ -65,7 +67,8 @@ export async function prepare() {
     ...ortFiles.map((name) => `${info.ort.dir.slice(1)}${name}`),
   ])].sort();
   if (JSON.stringify(assets) !== JSON.stringify(await inventory(source)) || JSON.stringify(assets) !== JSON.stringify([...info.files].sort())) throw new Error('Production build contains unexpected or missing files; refusing to publish.');
-  const contract = await loadHeaderContract(path.join(ROOT, 'headers.json'));
+  const gpu = gpuUrl(process.env.NOISY_GPU_URL ?? info.gpu);
+  const contract = gpuHeaders(await loadHeaderContract(path.join(ROOT, 'headers.json')), gpu);
   const routes = Object.fromEntries(['/', ...assets.map((name) => `/${name}`)].map((url) => [url, { kind: 'asset', headers: expectedHeaders(contract, url) }]));
   for (const file of await lockedFiles()) routes[file.served] = { kind: 'model', key: path.basename(file.served), bytes: file.bytes, headers: expectedHeaders(contract, file.served) };
   const config = { routes, errors: { ...expectedHeaders(contract, '/', { status: 404 }), 'Content-Type': 'text/plain; charset=utf-8' } };
@@ -76,6 +79,7 @@ export async function prepare() {
     await mkdir(path.dirname(path.join(OUTPUT, asset)), { recursive: true });
     await cp(path.join(source, asset), path.join(OUTPUT, asset));
   }
+  await writeFile(path.join(OUTPUT, 'build.json'), JSON.stringify({ ...JSON.parse(await readFile(path.join(source, 'build.json'), 'utf8')), gpu, headers: contract }, null, 2));
   await writeFile(path.join(OUTPUT, '_routes.json'), JSON.stringify({ version: 1, include: ['/*'], exclude: [] }));
   await build({
     stdin: { contents: `import { createHandler } from './worker.ts'; export default createHandler(${JSON.stringify(config)});`, resolveDir: path.join(ROOT, 'tools/cloudflare'), sourcefile: 'hosting-entry.ts', loader: 'ts' },

@@ -74,9 +74,9 @@ function perimeter(bounds: Rect): readonly Vec2[] {
 // ---------------------------------------------------------------------------
 // the loop crop and the effective orbit
 
-test('effectiveOrbit is 0 with motion off and motion.orbit with it on', () => {
+test('effectiveOrbit is 0 with motion off and motion.drift.amount with it on', () => {
   for (const orbit of [0, 0.25, 0.6, 1]) {
-    const motion: Motion = { enabled: false, orbit, parallax: 1, loopSeconds: 3, focus: null };
+    const motion: Motion = { enabled: false, drift: { direction: 'circle', amount: orbit }, parallax: 1, loopSeconds: 3, focus: null };
     assert.equal(effectiveOrbit(motion), 0, `off at orbit ${orbit}`);
     assert.equal(effectiveOrbit({ ...motion, enabled: true }), orbit, `on at orbit ${orbit}`);
   }
@@ -113,7 +113,7 @@ test('Parallax preserves the default crop and scales travel while zoom covers ev
 // frames and closure
 
 test('frameCount is round(loopSeconds * fps) with a half rounded up, as decimal arithmetic gives the half, and at least 1', () => {
-  const motion = (loopSeconds: number): Motion => ({ enabled: true, orbit: 0.6, parallax: 1, loopSeconds, focus: null });
+  const motion = (loopSeconds: number): Motion => ({ enabled: true, drift: { direction: 'circle', amount: 0.6 }, parallax: 1, loopSeconds, focus: null });
   assert.equal(frameCount(motion(3), 30), 90);
   assert.equal(frameCount(motion(3), 10), 30);
   assert.equal(frameCount(motion(3), 12.5), 38, '37.5 rounds up');
@@ -137,7 +137,7 @@ test('every periodic term at phase 1 equals its value at phase 0, bit for bit, a
   const counts = new Set<number>();
   for (const loopSeconds of [2, 2.5, 3, 4.7, 6]) {
     for (const fps of [30, 10, 12.5, 100 / 6, 100 / 7, 25]) {
-      const count = frameCount({ enabled: true, orbit: 1, parallax: 1, loopSeconds, focus: null }, fps);
+      const count = frameCount({ enabled: true, drift: { direction: 'circle', amount: 1 }, parallax: 1, loopSeconds, focus: null }, fps);
       counts.add(count);
       const last = loopPhase(count, count);
       assert.equal(last, 1, `frame ${count} of ${count} is phase 1`);
@@ -184,17 +184,17 @@ test('parallaxClamp never exceeds PARALLAX_MARGIN, and is 0 without a depth map,
   assert.ok(minimal !== undefined && minimal.analysis.depth === null && anchorDisparity(minimal) === null);
   assert.equal(parallaxClamp(minimal), 0);
   // A focus set before depth exists gives an anchor, but no point has a disparity, so the camera stays still.
-  const focused: SceneDocument = { ...minimal, motion: { ...minimal.motion, enabled: true, orbit: 1, focus: 0.4 } };
+  const focused: SceneDocument = { ...minimal, motion: { ...minimal.motion, enabled: true, drift: { direction: 'circle', amount: 1 }, focus: 0.4 } };
   assert.ok(parseDocument(focused).ok);
   assert.equal(anchorDisparity(focused), 0.4);
   assert.equal(parallaxClamp(focused), 0);
   assert.equal(cameraRadius(focused), 0);
-  assert.equal(cameraRadius(withMotion({ enabled: false, orbit: 1 })), 0, 'motion off: no camera circle');
+  assert.equal(cameraRadius(withMotion({ enabled: false, drift: { direction: 'circle', amount: 1 } })), 0, 'motion off: no camera circle');
 });
 
 test('Parallax 1 preserves the camera and hole, 2 doubles their travel, and the still has zero offset at every amount', () => {
-  const one = withMotion({ enabled: true, orbit: .6, parallax: 1 });
-  const two = withMotion({ enabled: true, orbit: .6, parallax: 2 });
+  const one = withMotion({ enabled: true, drift: { direction: 'circle', amount: .6 }, parallax: 1 });
+  const two = withMotion({ enabled: true, drift: { direction: 'circle', amount: .6 }, parallax: 2 });
   assert.equal(parallaxClamp(one), .02);
   assert.equal(cameraRadius(one), .6 * .02);
   assert.equal(holeRadius(one, { width: 2048, height: 1536 }), 21);
@@ -206,20 +206,20 @@ test('Parallax 1 preserves the camera and hole, 2 doubles their travel, and the 
     assert.deepEqual(doubled, { x: 2 * first.x, y: 2 * first.y });
   }
   for (const parallax of [.5, 1, 1.7, 2, 3]) {
-    const still = withMotion({ enabled: false, orbit: 1, parallax });
+    const still = withMotion({ enabled: false, drift: { direction: 'circle', amount: 1 }, parallax });
     assert.equal(cameraRadius(still), 0);
     const offset = cameraOffset(cameraRadius(still), 0);
     assert.deepEqual(offset, { x: 0, y: 0 });
     for (const object of still.objects) assert.deepEqual(objectMotionBound(still, object.id), { x: 0, y: 0 });
     const noDepth = { ...still, analysis: { ...still.analysis, depth: null } };
     assert.equal(parallaxClamp(noDepth), 0);
-    assert.equal(cameraRadius({ ...still, motion: { ...still.motion, enabled: true, orbit: 0 } }), 0);
+    assert.equal(cameraRadius({ ...still, motion: { ...still.motion, enabled: true, drift: { direction: 'circle', amount: 0 } } }), 0);
   }
 });
 
 test('at orbit 1 the point farthest from the anchor moves by exactly the clamp, and no point farther', () => {
   for (const focus of [0, 0.1, 0.3, 0.5, 0.7, 0.95, 1]) {
-    const doc = withMotion({ enabled: true, orbit: 1, focus });
+    const doc = withMotion({ enabled: true, drift: { direction: 'circle', amount: 1 }, focus });
     const anchor = anchorDisparity(doc);
     assert.equal(anchor, focus);
     if (anchor === null) continue;
@@ -237,7 +237,7 @@ test('at orbit 1 the point farthest from the anchor moves by exactly the clamp, 
       }
     }
     // At orbit 0.5 the farthest point moves by half the clamp.
-    const half = withMotion({ enabled: true, orbit: 0.5, focus });
+    const half = withMotion({ enabled: true, drift: { direction: 'circle', amount: 0.5 }, focus });
     const halfMoved = parallaxDisplacement(cameraOffset(cameraRadius(half), 0), farthest, anchor);
     assert.equal(Math.hypot(halfMoved.x, halfMoved.y), clamp / 2);
   }
@@ -247,14 +247,14 @@ test('at orbit 1 the point farthest from the anchor moves by exactly the clamp, 
 
 test('setting focus to a disparity makes a point at that disparity move by zero', () => {
   for (const focus of [0, 0.25, 0.42, 0.7, 1]) {
-    const doc = withMotion({ enabled: true, orbit: 1, focus });
+    const doc = withMotion({ enabled: true, drift: { direction: 'circle', amount: 1 }, focus });
     for (const phase of PHASES) {
       const moved = parallaxDisplacement(cameraOffset(cameraRadius(doc), phase), focus, focus);
       assert.ok(isZero(moved.x) && isZero(moved.y), `focus ${focus}, phase ${phase}`);
     }
   }
   // Without a focus the anchor is the subject's median, and the subject stays still.
-  const doc = withMotion({ enabled: true, orbit: 1, focus: null });
+  const doc = withMotion({ enabled: true, drift: { direction: 'circle', amount: 1 }, focus: null });
   const subjectMedian = doc.objects.find((object) => object.subject)?.produced.depth?.median;
   assert.equal(anchorDisparity(doc), subjectMedian);
 });
@@ -352,7 +352,7 @@ test('every object motion is at rest at phase 0, so frame 0 of a loop shows each
 
 test('with motion off no object moves, whatever motion it keeps', () => {
   const objects = MOVING_KINDS.map((kind, i) => objectWith(i, { kind, amount: 1 }, { x: 600, y: 400, width: 500, height: 400 }));
-  for (const doc of [withMotion({ enabled: false, orbit: 1 }, objects), withMotion({ enabled: false, orbit: 0 }), { ...fiveClusterDocument(), motion: { ...fiveClusterDocument().motion, enabled: false } }]) {
+  for (const doc of [withMotion({ enabled: false, drift: { direction: 'circle', amount: 1 } }, objects), withMotion({ enabled: false, drift: { direction: 'circle', amount: 0 } }), { ...fiveClusterDocument(), motion: { ...fiveClusterDocument().motion, enabled: false } }]) {
     for (const object of doc.objects) {
       const bound = objectMotionBound(doc, object.id);
       assert.deepEqual(bound, { x: 0, y: 0 }, `${object.name}'s bound`);
@@ -366,7 +366,7 @@ test('with motion off no object moves, whatever motion it keeps', () => {
     assert.equal(cameraRadius(doc), 0);
   }
   // The same objects move once motion is on.
-  const on = withMotion({ enabled: true, orbit: 0 }, objects);
+  const on = withMotion({ enabled: true, drift: { direction: 'circle', amount: 0 } }, objects);
   for (const object of on.objects) assert.notDeepEqual(objectMotionBound(on, object.id), { x: 0, y: 0 });
   assert.deepEqual(objectMotionBound(on, objectId(99)), { x: 0, y: 0 }, 'an unknown id');
 });
@@ -417,7 +417,7 @@ test('objectMotionBound is motionBound of the object over the master size while 
       for (const kind of [...MOVING_KINDS, 'none'] as const) {
         const motion: ObjectMotion = { kind, amount: 0.6 };
         const object = objectWith(i, motion, bounds);
-        const base = withMotion({ enabled: true, orbit: 0.5 }, [object]);
+        const base = withMotion({ enabled: true, drift: { direction: 'circle', amount: 0.5 } }, [object]);
         const doc: SceneDocument = { ...base, frame: { ...base.frame, master: { ...base.frame.master, size: frame } } };
         assert.deepEqual(objectMotionBound(doc, object.id), motionBound(motion, bounds, frame), `${kind} at (${bounds.x}, ${bounds.y}) in ${frame.width}x${frame.height}`);
       }
@@ -535,7 +535,7 @@ function generatedDocuments(): readonly Generated[] {
                   ...base,
                   frame: { ...base.frame, master: { ...base.frame.master, size: frame } },
                   analysis: { ...base.analysis, plate: null },
-                  motion: { enabled, orbit, parallax: 1, loopSeconds: 3, focus },
+                  motion: { enabled, drift: { direction: 'circle', amount: orbit }, parallax: 1, loopSeconds: 3, focus },
                   objects,
                 };
                 out.push({ label: `${frame.width}x${frame.height}, motion ${enabled ? 'on' : 'off'}, orbit ${orbit}, focus ${focus}, ${placement}, ${kind} ${amount}`, doc });
@@ -621,4 +621,20 @@ test('on the fixtures and generated documents no frame-edge point moves inward p
   }
   assert.ok(generated.length > 4000, `${generated.length} generated documents`);
   assert.ok(edgePoints > 100_000, `${edgePoints} edge points checked`);
+});
+
+
+test('Drift restricts each axis, retains the legacy circle, and closes at every loop length', () => {
+  for (const direction of ['side', 'vertical', 'circle'] as const) {
+    for (const radius of [0, .006, .02, .06]) {
+      for (const phase of [0, .125, .25, .5, .75, 1]) {
+        const offset = cameraOffset(radius, phase, direction);
+        const circle = cameraOffset(radius, phase, 'circle');
+        assert.equal(offset.x, direction === 'vertical' ? 0 : circle.x);
+        assert.equal(offset.y, direction === 'side' ? 0 : circle.y);
+        assert.ok(Math.abs(offset.x) <= radius && Math.abs(offset.y) <= radius);
+      }
+      assert.deepEqual(cameraOffset(radius, 1, direction), cameraOffset(radius, 0, direction));
+    }
+  }
 });

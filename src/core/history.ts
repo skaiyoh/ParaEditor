@@ -29,7 +29,7 @@ export type HistoryEntry = {
   readonly at: number;
   readonly forward: NonEmpty<Edit>;
   readonly inverse: NonEmpty<Edit>;
-  /** Session-owned mask products, released from the active store on deletion. */
+  /** Session-owned mask products, shared with the active store while this step is retained. */
   readonly masks?: ReadonlyMap<AssetId, Plane<'u8'>>;
 };
 

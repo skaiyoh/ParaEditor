@@ -399,13 +399,13 @@ function plateScene(spec: { readonly enabled: boolean; readonly orbit: number; r
   const forMasks = spec.plate === 'current' ? sortedMasks(doc) : [assetId(0x300)];
   return {
     ...doc,
-    motion: { ...doc.motion, enabled: spec.enabled, orbit: spec.orbit },
+    motion: { ...doc.motion, enabled: spec.enabled, drift: { direction: 'circle', amount: spec.orbit } },
     analysis: { ...doc.analysis, plate: spec.plate === 'none' ? null : plateProduct(0, forMasks) },
   };
 }
 
 test('no plate is needed without objects, without anything moving, or when forMasks equals the sorted mask ids', () => {
-  const noObjects = { ...minimalDocument(), motion: { enabled: true, orbit: 1, parallax: 1, loopSeconds: 3, focus: null } };
+  const noObjects = { ...minimalDocument(), motion: { enabled: true, drift: { direction: 'circle' as const, amount: 1 }, parallax: 1, loopSeconds: 3, focus: null } };
   assert.equal(plateNeeded(noObjects), false);
   assert.equal(plateNeeded(plateScene({ enabled: false, orbit: 1, motion: { kind: 'none' }, plate: 'none' })), false, 'motion off, no object motion');
   assert.equal(plateNeeded(plateScene({ enabled: true, orbit: 0, motion: { kind: 'none' }, plate: 'none' })), false, 'orbit 0, no object motion');

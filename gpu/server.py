@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 
 MAX_BODY = 24 * 1024 * 1024
 TTL = 30 * 60
+MAX_LIFETIME = 2 * 60 * 60
 QUEUE_SECONDS = 30
 MAX_SESSIONS = 32
 
@@ -35,8 +36,12 @@ class Session:
     predictor: object
     width: int
     height: int
+    created: float = field(default_factory=time.monotonic)
     touched: float = field(default_factory=time.monotonic)
     lock: object = field(default_factory=threading.Lock)
+
+    def expired(self, now):
+        return now - self.touched >= TTL or now - self.created >= MAX_LIFETIME
 
 
 class State:
@@ -51,16 +56,18 @@ class State:
     def reap(self):
         now = time.monotonic()
         with self.lock:
-            self.sessions = {k: v for k, v in self.sessions.items() if now - v.touched < TTL}
+            self.sessions = {k: v for k, v in self.sessions.items() if not v.expired(now)}
             self.rates = {k: v for k, v in self.rates.items() if v and now - v[-1] < 60}
 
-    def get(self, sid, delete=False):
+    def get(self, sid, delete=False, touch=False):
         with self.lock:
             s = self.sessions.get(sid)
-            if s is None or time.monotonic() - s.touched >= TTL:
+            now = time.monotonic()
+            if s is None or s.expired(now):
                 self.sessions.pop(sid, None)
                 raise Problem(404, "This session does not exist or has expired.")
-            s.touched = time.monotonic()
+            if touch:
+                s.touched = now
             if delete:
                 del self.sessions[sid]
             return s
@@ -75,9 +82,9 @@ class State:
                 events.popleft()
             if len(events) >= 10:
                 raise Problem(429, "Please wait a minute before creating more sessions.")
-            events.append(now)
             if len(self.sessions) + self.pending >= MAX_SESSIONS:
                 raise Problem(503, "The service has no free session capacity; please try again.")
+            events.append(now)
             self.pending += 1
         try:
             yield
@@ -232,7 +239,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "OPTIONS":
             return self.reply(204, b"")
         if path.path == "/v1/health" and self.command == "GET":
-            return self.reply(200, state.engine.health())
+            return self.reply(200, {**state.engine.health(), "sessionLimits": {"idleSeconds": TTL, "maxLifetimeSeconds": MAX_LIFETIME}})
         if path.path == "/v1/sessions" and self.command == "POST":
             self.media({"image/jpeg", "image/png"})
             w, h = self.dimensions()
@@ -258,6 +265,7 @@ class Handler(BaseHTTPRequestHandler):
         session = state.get(sid)
         dims = {"X-Width": session.width, "X-Height": session.height}
         if operation == "depth" and self.command == "GET":
+            state.get(sid, touch=True)
             return self.reply(200, session.depth, "application/octet-stream", dims)
         if operation == "taps" and self.command == "POST":
             self.media({"application/json"})
@@ -274,6 +282,7 @@ class Handler(BaseHTTPRequestHandler):
                 if any(type(p.get(k)) not in {int, float} or not 0 <= p[k] <= 1 or not math.isfinite(p[k]) for k in ("x", "y")):
                     raise Problem(400, "Tap coordinates must be finite frame fractions from zero to one.")
             with state.inference(session):
+                state.get(sid, touch=True)
                 masks, scores, w, h = state.engine.taps(session.predictor, points, session.width, session.height)
             return self.reply(200, masks, "application/octet-stream", {
                 "X-Width": w, "X-Height": h, "X-Guide-Width": w, "X-Guide-Height": h,
@@ -290,6 +299,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(body) != session.width * session.height:
                 raise Problem(400, "The mask must contain one byte per master pixel.")
             with state.inference(session):
+                state.get(sid, touch=True)
                 plate = state.engine.inpaint(session.rgb, body, fill[0])
             return self.reply(200, plate, "image/png", dims)
         raise Problem(400, "This method is not supported for the endpoint.")

@@ -29,7 +29,8 @@ async function isCurrentMain() {
 
 async function run(script, ...args) {
   await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [script, ...args], { cwd: ROOT, stdio: 'inherit' });
+    // NOISY_GPU_URL is a public Actions variable, never a credential.
+    const child = spawn(process.execPath, [script, ...args], { cwd: ROOT, stdio: 'inherit', env: { ...process.env, NOISY_GPU_URL: process.env.NOISY_GPU_URL ?? '' } });
     child.once('error', reject);
     child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`${script}: ${signal ?? `exit ${code}`}`)));
   });

@@ -77,7 +77,7 @@ export const RANGES = {
   'surface.shine': unit,
   'surface.scale': unit,
 
-  'motion.orbit': unit,
+  'motion.drift.amount': unit,
   'motion.parallax': { min: 0.5, max: 3, kind: 'real' },
   'motion.loopSeconds': { min: 2, max: 6, kind: 'real' },
   'motion.focus': unit,

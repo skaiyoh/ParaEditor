@@ -243,6 +243,7 @@ In both modes it also copies the vendored model runtime (see "Vendored model run
 | `--mode production` | minified, no source maps, `NOISY_DEV` false, and esbuild's `drop: ['console', 'debugger']`, so no bundle it writes carries a `console.` call, the bundled third-party code's included |
 | `--outdir <dir>` | the output directory; default `build/dev` or `build/production` |
 | `--src <dir>` | the source root holding the four entries, `index.html`, `manifest.webmanifest`, `icon.svg`, and the optional `dev/`; default `src`; tests point it at throwaway trees |
+| `--gpu <url>` | analysis service base URL, default `NOISY_GPU_URL` or empty; only its origin is added to `connect-src` |
 | `--lock <file>` | the model lock the bundles carry as `NOISY_MODEL_LOCK`; default `models.lock.json` (see "The model loader") |
 | `--migrations <module>` | dev builds only: every import that resolves to `<src>/core/migrate.ts` loads `<module>` instead, through an esbuild resolve rule |
 
@@ -273,6 +274,11 @@ Output layout:
 
 Every content-hashed bundle is under `/assets/`, and the runtime under a directory named for its version, which is what the contract's immutable caching rules key on.
 `index.html` has no inline `<script>` or `<style>`, since the CSP has no `'unsafe-inline'`.
+
+`build.json` also carries `gpu` (empty by default) and the generated `headers` contract.
+The app reads `gpu` once at boot; the server applies the configured origin to the source header contract without widening other directives.
+The hosted prepare step takes `NOISY_GPU_URL` from the environment, falling back to the production build configuration, and writes the same GPU URL and policy into the hosted `build.json` and routing worker.
+For local hosted preparation, load `.local/cloudflare.env` into the environment before running the command.
 
 `build.json` records the build for tests and drivers:
 
@@ -796,7 +802,36 @@ The same probe with the decode worker's `threads` set to 2 read 75,890,688 bytes
 
 `src/analysis/service.ts` is the page's one owner of the two analysis workers.
 `createAnalysisService(deps)` returns an `AnalysisService`, which runs an ordered list of heavy stages in one sequence worker, hands each product to its caller as it lands, terminates the worker on every path out of a sequence, and records the termination a cooldown is counted from; opens the resident decode worker and hands back the `Decoder` that decodes on it (see "The decoder"); fetches models through the model loader; and logs the analysis part of the diagnostic vocabulary.
-Deciding what to run, the watchdogs, the cooldowns, the retries, and when a decoder is opened and released are its caller's, and that caller is not built yet; the composition root does not build a service yet either, and the analysis service page, the decoder page, and the memory harness page do (see "The analysis service page", "The decoder page", and "The memory harness").
+The session driver owns stage policy, watchdogs, cooldowns, and decoder warm-up.
+`src/main.tsx` installs the service factory from `src/app/analysis.ts` before creating the session.
+The dev service, decoder, and memory harness pages continue to construct the local service directly.
+
+### Remote analysis and automatic fallback
+
+`src/analysis/remote.ts` implements the same interface over [the GPU contract](../plan/gpu-contract.md).
+Depth, the segmenter encoder and taps, and inpaint run remotely; the face model and tracker remain local.
+The master is uploaded as JPEG at quality 92.
+The adapter validates response dimensions, lengths, finite normalized depth, and scores before handing products to the session.
+The embeddings callback carries a small opaque token, retained only in a WeakMap owned by the adapter; it is never sent to a local decoder or persisted.
+Depth statistics use the same nearest-rank implementation as the local service.
+The depth and mask planes, decoded RGB plate, callbacks, and rehearsal status sentences remain the driver's existing interface.
+The Scene facts show `GPU · <health name>` or `on device` in an Analysis row.
+
+`src/analysis/composed.ts` probes health once at boot, then again on an import after a failed probe or a failed remote operation.
+Selection belongs to one import, including its decoder and subsequent plate requests.
+An unsuccessful initial remote sequence before any product is delivered falls back to local model fetching and the local sequence.
+The composition displays `Analyzing: depth` while initial GPU requests run and buffers their phase callbacks until the first product.
+Failed initial requests therefore fetch cold device models before the local worker's session callback arms the existing depth watchdog.
+Session creation is bounded at 20 seconds, depth at 10 seconds, taps at 5 seconds, and inpaint at 30 seconds; the health probe is bounded at 5 seconds.
+The deadlines include response bodies and PNG decoding, so headers alone cannot keep a stalled request alive.
+An established session retries a failed tap or inpaint once, then returns the existing analysis error shape to the status path.
+A failed attempt invalidates cached health immediately, so the next import re-probes even if the retry succeeds or the driver's 60-second inpaint watchdog cancels the second attempt.
+Heavy cancellation aborts sequence requests without retry and settles the sequence once.
+A resident decoder keeps its import controller and session through plate failure or timeout; full cleanup deletes the session when that decoder is released, or when a new import replaces it.
+A decoder release without preceding heavy cleanup cancels only that decoder, leaving the session available for a plate.
+The driver retries failed boot model preparation on a new import; the composition re-probes health first, so a recovered GPU can bypass the failed local analysis download while still fetching the local face model.
+Remote sequences report no local heavy termination, so they add no local worker cooldown.
+With `gpu` empty, no remote request occurs and all model operations use the local service.
 
 ### Its dependencies
 
@@ -1081,7 +1116,10 @@ It gives `/models/*` `Cache-Control: no-store`: the server does not check a mode
 Every other path, `/` and `/index.html` named explicitly, gets `Cache-Control: no-cache`.
 `errors` gives every error `Cache-Control: no-store`, so a browser never caches a `404` for a hashed file that a later build puts back.
 `.wasm` is served as `application/wasm`.
-The file itself is the authority for the exact values.
+The source file is the authority for the base values.
+A GPU build records its generated policy in `build.json`: the configured service origin alone is appended to `connect-src`.
+An empty `gpu` preserves the base policy byte for byte.
+`test/headers.test.ts` builds and serves both forms, and checks that a service URL path cannot inject a policy directive.
 
 `tools/check-headers.mjs <base-url> [--path <path>]... [--headers <file>]` fetches `/`, `/index.html`, every same-origin `src` and `href` in the index page, and each `--path`, and compares each response with what the contract requires for that path, `Content-Type` included.
 It prints one JSON line per path (`{ path, status, ok, mismatches }`) and exits 0 when every response is a 200 that carries every required header with the required value, 1 when one does not, 2 on a usage error (a malformed `--path` included), and 3 with one sentence on stderr when a request gets no response, such as an unreachable host.
@@ -1104,6 +1142,7 @@ It stops on SIGINT or SIGTERM and closes any open connection.
 | `--models` | `models` | the directory served at `/models/` |
 | `--vendor-ort` | `<root>/vendor/ort`, the build's copy of the runtime | the directory served at `/vendor/ort/` |
 | `--headers` | `headers.json` | the header contract |
+| `--gpu-stub` | false | dev only: serve `build.json` with `gpu: "/dev/gpu"` |
 | `--results` | `test-results` | dev mode only: the results sink's directory |
 | `--request-log` | `test-results/requests.jsonl` | dev mode only: the request log |
 
@@ -1129,6 +1168,7 @@ In dev mode the server checks at startup that it can write the request log and c
 | `/dev/requests` | GET | dev | the request log as a JSON array; `?since=<seq>` returns rows after that seq |
 | `/api/log` | POST | dev | the results sink (below) |
 | `/dev/csp-report` | POST, GET | dev | CSP violation reports (below) |
+| `/dev/gpu/v1/...` | GET, POST, DELETE | dev | synthetic GPU contract, including health, sessions, depth, taps, inpaint, and deletion |
 | `/dev/synth/master` | GET, HEAD | dev | the synth fixture's master as raw RGBA bytes (below) |
 | anything else | GET, HEAD | all | a file under `--root`; `/` is `index.html` |
 
@@ -1143,6 +1183,20 @@ A missing file or a directory answers `404`.
 
 `MODES` in `serve.mjs` lists each mode with a `dev` flag and the build output it serves at `/` by default: `dev` with `dev: true` and `build/dev`, `production` with `dev: false` and `build/production`.
 Only a mode with `dev: true` creates the fault state, the sink, the request log, and their routes.
+
+### GPU contract stub
+
+The dev server exposes the GPU contract under `/dev/gpu` without enabling remote analysis for ordinary dev runs.
+`--gpu-stub` changes the served configuration to opt into it; `driver.gpu` opts in for its own page by intercepting only the configuration request.
+The scenario is registered through the existing driver scenario export in `test/browser/scenarios/index.ts`.
+The stub decodes JPEG or PNG uploads using macOS's built-in `/usr/bin/sips`, in a temporary directory removed after conversion.
+This OS tool is dev-only; neither hosting nor the browser acquires a dependency.
+It returns a normalized depth gradient, three soft candidate discs of increasing radii around include taps (exclude taps remove regions), and a PNG plate filled with the mean outside-hole color.
+Pixels outside the hole remain equal to the decoded uploaded master.
+The stub retains at most 16 sessions and expires them after 30 idle minutes.
+Its responses are no-store and implement the contract's CORS allowlist and preflight; production exposes none of these routes.
+The existing fault grammar accepts `/dev/gpu/` prefixes and `http503`, `slow=<ms>`, and `stall`, consuming a rule per request including POST requests.
+A stall flushes valid resource headers without a body, exercising the client's body deadline.
 
 ### Production mode
 
@@ -1169,21 +1223,25 @@ If any rule is invalid the server answers `400` with the reason and the state do
 `GET /dev/fault` returns the state, and `DELETE /dev/fault` clears it; each answers `{"isolation": <bool>, "rules": [{"spec", "hits", "remaining"}, ...]}`.
 
 ```
-rule     = "no-isolation" | "path:" prefix ":" kind [ ":times=" n ]
-prefix   = a path starting with "/models/" or "/vendor/ort/", with no ":"
-kind     = "http500" | "corrupt" | "truncate=" n | "stall" | "slow=" n
+rule     = "no-isolation" | "path:" prefix ":" kind [ ":method=" verb ] [ ":times=" n ]
+prefix   = a path starting with "/models/", "/vendor/ort/", "/api/projects" or "/dev/gpu/", with no ":"
+kind     = "http500" | "http503" | "corrupt" | "truncate=" n | "stall" | "slow=" n
+verb     = "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "OPTIONS"
 n        = a whole number, at least 1; for slow, at most 2147483647
 ```
 
 Examples: `path:/models/:http500`, `path:/models/depth:truncate=1000:times=1`, `path:/vendor/ort/:slow=2000`, `no-isolation`.
 
-A GET or HEAD whose decoded path starts with a rule's prefix matches it.
+A request on a faultable route whose decoded path starts with a rule's prefix and whose method matches the optional verb matches it.
+Without a method qualifier the existing route rules apply; file routes accept GET and HEAD, and GPU and project routes accept their supported methods.
+`path:/dev/gpu/v1/sessions:http503:method=POST:times=1` fails session creation without consuming the fault on old-session DELETE.
 The first live rule in list order applies, and it consumes one of its `times` whatever the response turns out to be; without `times` a rule never runs out.
 A rule that has run out stays in the list with `remaining: 0` and no longer matches.
 
 | Kind | Behavior |
 | --- | --- |
 | `http500` | answers `500` with a short text body |
+| `http503` | answers `503`; GPU and project routes use their JSON error shape, file routes use a short text body |
 | `corrupt` | answers as usual (`200` or `206`, the same `Content-Length`) with every body byte inverted (XOR `0xff`) |
 | `truncate=<bytes>` | declares the full length, sends the first `<bytes>` bytes of the body, then closes the connection; a body no longer than `<bytes>` is sent whole |
 | `stall` | sends the status and headers, then nothing until the client disconnects or the server stops |
@@ -1973,7 +2031,7 @@ effectiveOrbit(motion: Motion): number;
 frameCount(motion: Motion, fps: number): number;
 loopPhase(frame: number, count: number): number;
 cycleTurn(cycles: number, phase: number): number;
-cameraOffset(radius: number, phase: number): Vec2;
+cameraOffset(radius: number, phase: number, direction?: Motion['drift']['direction']): Vec2;
 parallaxReach(anchor: number): number;
 parallaxDisplacement(offset: Vec2, disparity: number, anchor: number): Vec2;
 bobOffset(amount: number, boundY: number, height: number, phase: number): number;
@@ -1989,9 +2047,21 @@ cameraRadius(doc: SceneDocument): number;
 objectMotionBound(doc: SceneDocument, id: ObjectId): Vec2;
 ```
 
-The renderer is not built yet.
-The functions over plain numbers, `cycleTurn`, `cameraOffset`, `parallaxReach`, `parallaxDisplacement`, `bobOffset`, `swayAngle`, `swayDisplacement`, and `wobbleDisplacement`, with `objectDisplacement`'s choice among them, are the formulas the geometry pass and object motion are to evaluate on the GPU and test their shaders against.
-`frameCount`, `loopPhase`, `parallaxClamp`, `cameraRadius`, and `objectMotionBound` are computed once per frame or per scene on the CPU and are to reach the shaders as inputs.
+The renderer evaluates `cameraOffset` and `parallaxDisplacement` on the CPU and sends displacement endpoints to its geometry vertex shader.
+The per-object bob, sway, and wobble formulas exist in core but are not animated by this renderer; the UI therefore exposes no Sway control.
+
+### Object coverage in the renderer
+
+The hard geometry pass writes source color, labels, and disparity with the original mask threshold.
+A fourth attachment holds styled color composited from the plate upward in layer order.
+Each layer reuses the existing palette and outline or Symbols passes, then a color-only geometry draw feathers its coverage inward over two master pixels with a radius-two triangular kernel.
+Every kernel sample thresholds the mask before filtering, keeping the radius in master pixels even when the mask is smaller than the master.
+This ordering keeps palette quantization and glyph filling from discarding coverage.
+The color draw tests equal to the hard pass's resolved depth, disables depth writes, and blends RGB while retaining opaque output alpha, so folds cannot blend twice and hard labels/disparity remain unchanged.
+Selection's white boundary still reads the hard labels after the downstream effects.
+The shared path serves loop preview, frame PNG, GIF/movie capture, stereo views, and stills with hidden objects; ordinary stills keep their existing path and pixels.
+The additional styling work scales with visible object count; no new shaders duplicate palette or glyph math.
+The dev renderer exposes `motionCamera()` and `setMotionFeather()` for direction readback and comparison with the preceding hard compositor.
 
 ### Loop exports
 
@@ -2058,7 +2128,7 @@ The node switch and the rail's `parallax-enabled` button share the session state
 ### The loop crop
 
 `PARALLAX_MARGIN` is 0.02, the frame fraction a loop with camera orbit hides on each side, and `LOOP_ZOOM` is `1 / (1 - 2 * PARALLAX_MARGIN)`, the zoom about the frame center that shows the central 96% of each axis.
-`effectiveOrbit(motion)` is `motion.orbit` while `motion.enabled` is true and 0 while it is false; at 0 the loop camera is to be the identity, so a loop keeps the still's framing.
+`effectiveOrbit(motion)` retains its helper name and reads `motion.drift.amount` while `motion.enabled` is true and 0 while it is false; at 0 the loop camera is to be the identity, so a loop keeps the still's framing.
 
 ### Frames and phase
 
@@ -2073,7 +2143,12 @@ The camera, bob, and sway run 1 cycle per loop; wobble runs 2 along x and 3 alon
 
 ### The camera
 
-`cameraOffset(radius, phase)` is the camera's offset in frame fractions, `(radius cos 2 pi s, radius sin 2 pi s)` with `s = cycleTurn(1, phase)`, a circle about the still's position.
+`motion.drift` stores `{ direction: 'side' | 'vertical' | 'circle', amount }`, with amount in 0..1.
+The version-3-to-4 migration maps `motion.orbit` to Circle at the exact old amount and removes `orbit`.
+New documents start at Side to side with amount 0.6.
+`cameraOffset(radius, phase, direction)` uses `(radius cos 2 pi s, radius sin 2 pi s)` with `s = cycleTurn(1, phase)` for Circle; Side to side sets y to zero, and Up and down sets x to zero.
+The optional direction defaults to Circle for numerical callers; the renderer always passes the document's direction.
+The Motion controls read Depth (`motion.parallax`), Drift direction, Amount, Loop seconds, then Export on desktop and phone.
 `cameraRadius(doc)` is `effectiveOrbit(doc.motion) * parallaxClamp(doc)`, 0 while motion is off.
 
 `parallaxDisplacement(offset, d, anchor)` is the displacement of a point at disparity `d`, in frame fractions: `offset * (d - anchor) * gain`, with the gain `1 / parallaxReach(anchor)` and `parallaxReach(anchor) = max(anchor, 1 - anchor)`.

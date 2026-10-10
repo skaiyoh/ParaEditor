@@ -49,7 +49,7 @@ test('symbols and motion start off, and lighting starts bright', () => {
   const doc = newScene();
   assert.deepEqual(doc.symbols, { enabled: false, cellSize: 12, amount: 0.3 });
   assert.deepEqual(doc.surface, { enabled: false, pattern: 'bars', relief: 0.5, refraction: 0.5, shine: 0.5, scale: 0.5 });
-  assert.deepEqual(doc.motion, { enabled: false, orbit: 0.6, parallax: 2, loopSeconds: 3, focus: null });
+  assert.deepEqual(doc.motion, { enabled: false, drift: { direction: 'side', amount: 0.6 }, parallax: 2, loopSeconds: 3, focus: null });
   assert.deepEqual(doc.lighting, { ambient: 0.7, relief: 1 });
 });
 
@@ -59,6 +59,7 @@ test("each default*() call returns fresh values, so changing one scene's default
   assert.notEqual(defaultSymbols(), defaultSymbols());
   assert.notEqual(defaultSurface(), defaultSurface());
   assert.notEqual(defaultMotion(), defaultMotion());
+  assert.notEqual(defaultMotion().drift, defaultMotion().drift);
   assert.notEqual(defaultLighting(), defaultLighting());
   assert.notEqual(newScene().style, newScene().style);
 });

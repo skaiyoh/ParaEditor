@@ -85,17 +85,21 @@ def main():
             print("Downloading pinned wheel through host " + str(urllib.parse.urlsplit(os.environ["PIP_INDEX_URL"]).hostname), flush=True)
             command([PYTHON, "-m", "pip", "download", "--no-deps", "--only-binary=:all:",
                      "--dest", str(wheel_dir), "opencv-python-headless==4.13.0.92"], base_env)
-        assert digest(wheel) == WHEEL_SHA, "Downloaded wheel SHA-256 mismatch"
+        if digest(wheel) != WHEEL_SHA:
+            raise RuntimeError("Downloaded wheel SHA-256 mismatch")
         print("Wheel SHA-256 verified against the full local wheel", flush=True)
         command([PYTHON, "-m", "pip", "install", "--no-deps", "--target", "/workspace/pydeps", str(wheel)], base_env)
         freeze_after = command([PYTHON, "-m", "pip", "freeze"], base_env)
         after = versions(overlay)
         save(evidence / "versions-after.json", after)
         (evidence / "venv-freeze-after.txt").write_text(freeze_after)
-        assert before == after, "Protected package versions or paths changed"
-        assert freeze_before == freeze_after, "Supplied /opt/venv pip freeze changed"
+        if before != after:
+            raise RuntimeError("Protected package versions or paths changed")
+        if freeze_before != freeze_after:
+            raise RuntimeError("Supplied /opt/venv pip freeze changed")
         protected = {"torch", "torchvision", "torchaudio", "numpy", "PIL"}
-        assert not protected.intersection(p.name for p in Path("/workspace/pydeps").iterdir()), "Protected package shadow"
+        if protected.intersection((p.name for p in Path('/workspace/pydeps').iterdir())):
+            raise RuntimeError("Protected package shadow")
         cv2_info = json.loads(command([PYTHON, "-c", "import cv2,json; print(json.dumps({'version':cv2.__version__,'path':cv2.__file__}))"], overlay))
         distribution = next(importlib.metadata.distributions(path=["/workspace/pydeps"]))
         save(evidence / "package-record.json", {
@@ -107,11 +111,13 @@ def main():
             "venv_freeze_sha256": digest(evidence / "venv-freeze-before.txt")})
         with tarfile.open(ROOT / "code-bundle.tar.gz") as archive:
             archive.extractall(ROOT, filter="data")
-        assert digest(ROOT / "code-manifest.json") == MANIFEST_SHA, "Manifest pin mismatch"
+        if digest(ROOT / 'code-manifest.json') != MANIFEST_SHA:
+            raise RuntimeError("Manifest pin mismatch")
         manifest = json.loads((ROOT / "code-manifest.json").read_text())
         code = ROOT / ("Depth-Anything-V2-" + manifest["code_commit"])
         for name, expected in manifest["files"].items():
-            assert digest(code / name) == expected, "Upstream source hash mismatch: " + name
+            if digest(code / name) != expected:
+                raise RuntimeError("Upstream source hash mismatch: " + name)
         print(f"Verified {len(manifest['files'])} imported upstream files", flush=True)
         weight = ROOT / WEIGHT
         if not weight.exists():
@@ -121,9 +127,11 @@ def main():
             partial = weight.with_suffix(".partial")
             with urllib.request.urlopen(url, timeout=60) as source, partial.open("wb") as target:
                 shutil.copyfileobj(source, target)
-            assert digest(partial) == WEIGHT_SHA, "Checkpoint SHA-256 mismatch"
+            if digest(partial) != WEIGHT_SHA:
+                raise RuntimeError("Checkpoint SHA-256 mismatch")
             partial.replace(weight)
-        assert digest(weight) == WEIGHT_SHA, "Checkpoint SHA-256 mismatch"
+        if digest(weight) != WEIGHT_SHA:
+            raise RuntimeError("Checkpoint SHA-256 mismatch")
         print("Checkpoint SHA-256 verified; supplied package preservation PASS", flush=True)
     if args.collect:
         old_console = (ROOT / "runner-console-final.log").read_text()

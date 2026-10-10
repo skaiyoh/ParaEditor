@@ -7,7 +7,8 @@ os.environ.update(PYTHONPATH='/workspace/pydeps',PYTHONPYCACHEPREFIX=str(root/'p
 (root/'tmp').mkdir(exist_ok=True)
 if sys.argv[1]=='install':
     package=sys.argv[2]
-    assert package.split('=')[0].lower() not in {'torch','torchvision','torchaudio','numpy','pillow'}
+    if package.split('=')[0].lower() in {'torch', 'torchvision', 'torchaudio', 'numpy', 'pillow'}:
+        raise RuntimeError('Protected package install is forbidden')
     command=['/opt/venv/bin/python','-m','pip','install','--no-deps','--target','/workspace/pydeps',package]
 else: command=sys.argv[2:]
 r=subprocess.run(command,env=os.environ,capture_output=True,text=True)

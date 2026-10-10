@@ -445,25 +445,25 @@ test("the document's primitives are core/raster.ts's types, and its ids and arra
 
 test('the version is the migration table length and a literal type', () => {
   assert.equal(SCENE_VERSION, MIGRATIONS.length);
-  const literal = true satisfies Equal<SceneDocument['version'], 3>;
-  // @ts-expect-error version 4 is newer than the current migration table
-  const newer: SceneDocument = { ...minimalDocument(), version: 4 };
+  const literal = true satisfies Equal<SceneDocument['version'], 4>;
+  // @ts-expect-error version 5 is newer than the current migration table
+  const newer: SceneDocument = { ...minimalDocument(), version: 5 };
   assert.ok(literal);
-  assert.equal(minimalDocument().version, 3);
+  assert.equal(minimalDocument().version, 4);
   assert.deepEqual(failingPaths(newer), ['version']);
 });
 
-test('a four-entry migration table makes a schema and a type of version 4', () => {
+test('a five-entry migration table makes a schema and a type of version 5', () => {
   const add: Migration = (json) => json;
-  const chain = [add, add, add, add] as const satisfies readonly Migration[];
+  const chain = [add, add, add, add, add] as const satisfies readonly Migration[];
   const schema = sceneDocumentSchema(chain.length);
-  const literal = true satisfies Equal<SceneDocumentAt<typeof chain.length>['version'], 4>;
-  const inferred = true satisfies Equal<z.infer<typeof schema>['version'], 4>;
-  const atFour: SceneDocumentAt<4> = { ...minimalDocument(), version: 4 };
-  // @ts-expect-error current version 3 is not version 4
-  const atCurrent: SceneDocumentAt<4> = minimalDocument();
+  const literal = true satisfies Equal<SceneDocumentAt<typeof chain.length>['version'], 5>;
+  const inferred = true satisfies Equal<z.infer<typeof schema>['version'], 5>;
+  const atFive: SceneDocumentAt<5> = { ...minimalDocument(), version: 5 };
+  // @ts-expect-error current version 4 is not version 5
+  const atCurrent: SceneDocumentAt<5> = minimalDocument();
   assert.ok(literal && inferred);
-  assert.ok(schema.safeParse(atFour).success);
+  assert.ok(schema.safeParse(atFive).success);
   assert.ok(!schema.safeParse(atCurrent).success);
 });
 

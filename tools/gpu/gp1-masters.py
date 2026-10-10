@@ -9,9 +9,11 @@ records=[]
 manifest=json.loads((root/'remote-photo-manifest.json').read_text())
 for row in manifest:
  path=root/'photos'/f"{row['id']}.jpg"
- assert hashlib.file_digest(path.open('rb'),'sha256').hexdigest()==row['sha256'],'JPEG hash differs'
+ if hashlib.file_digest(path.open('rb'), 'sha256').hexdigest() != row['sha256']:
+     raise RuntimeError('JPEG hash differs')
  image=ImageOps.exif_transpose(Image.open(path)).convert('RGB').resize((row['width'],row['height']),Image.Resampling.LANCZOS)
- assert hashlib.sha256(image.tobytes()).hexdigest()==row['master_rgb_sha256'],'Master pixels differ across Pillow versions'
+ if hashlib.sha256(image.tobytes()).hexdigest() != row['master_rgb_sha256']:
+     raise RuntimeError('Master pixels differ across Pillow versions')
  target=root/'masters'/f"{row['id']}.png";image.save(target,icc_profile=base64.b64decode(row['icc_base64']))
  actual=hashlib.file_digest(target.open('rb'),'sha256').hexdigest()
  print(row['id'],'PNG encoding differs' if actual!=row['master_sha256'] else 'PNG bytes identical',actual)

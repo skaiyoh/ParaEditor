@@ -62,10 +62,10 @@ const loopScenario: Scenario = {
       const stillOff = await bytes(await demo.downloadPng());
       const parallaxInput = document.querySelector('#motion-parallax');
       const inputs = Array.from(document.querySelectorAll('.inspector .node[aria-label="Motion"] input[type="range"]'));
-      const orbitIndex = inputs.findIndex((input) => input.id === 'motion-orbit');
+      const orbitIndex = inputs.findIndex((input) => input.id === 'motion-drift-amount');
       const parallaxControl = parallaxInput instanceof HTMLInputElement && parallaxInput.min === '0.5' && parallaxInput.max === '3' &&
-        parallaxInput.step === '0.1' && parallaxInput.value === '2' && parallaxInput.labels?.[0]?.textContent?.includes('Parallax') === true &&
-        orbitIndex >= 0 && inputs[orbitIndex + 1] === parallaxInput && inputs[orbitIndex + 2]?.id === 'motion-loopSeconds';
+        parallaxInput.step === '0.1' && parallaxInput.value === '2' && parallaxInput.labels?.[0]?.textContent?.includes('Depth') === true &&
+        orbitIndex === 1 && inputs[0] === parallaxInput && inputs[2]?.id === 'motion-loopSeconds';
       const toggle = document.querySelector('[data-testid="motion-enabled"]');
       if (!(toggle instanceof HTMLInputElement)) throw new Error('No Motion toggle.');
       toggle.click();
@@ -74,14 +74,14 @@ const loopScenario: Scenario = {
         if (!(input instanceof HTMLInputElement)) throw new Error(`No ${field} input.`);
         input.value = value; input.dispatchEvent(new Event('input', { bubbles: true }));
       } };
-      setSliders([['orbit', '0.4'], ['parallax', '2'], ['loopSeconds', '2.6']]);
-      const changedSliders = demo.document()?.motion.orbit === .4 && demo.document()?.motion.parallax === 2 && demo.document()?.motion.loopSeconds === 2.6;
-      setSliders([['orbit', '0.6'], ['parallax', '1'], ['loopSeconds', '3']]);
-      const controls = changedSliders && demo.document()?.motion.enabled === true && demo.document()?.motion.orbit === .6 && demo.document()?.motion.loopSeconds === 3;
+      setSliders([['drift-amount', '0.4'], ['parallax', '2'], ['loopSeconds', '2.6']]);
+      const changedSliders = demo.document()?.motion.drift.amount === .4 && demo.document()?.motion.parallax === 2 && demo.document()?.motion.loopSeconds === 2.6;
+      setSliders([['drift-amount', '0.6'], ['parallax', '1'], ['loopSeconds', '3']]);
+      const controls = changedSliders && demo.document()?.motion.enabled === true && demo.document()?.motion.drift.amount === .6 && demo.document()?.motion.loopSeconds === 3;
       const count = Math.round((demo.document()?.motion.loopSeconds ?? 3) * 30);
-      demo.setMotion({ orbit: 0 });
+      demo.setMotion({ drift: { direction: 'circle', amount: 0 } });
       const zeroOrbit = equal(stillOff, await bytes(await demo.exportFrame(0)));
-      demo.setMotion({ orbit: .6 });
+      demo.setMotion({ drift: { direction: 'circle', amount: .6 } });
       const zero = await demo.exportFrame(0), quarter = await demo.exportFrame(Math.floor(count / 4));
       const moved = !equal(await bytes(zero), await bytes(quarter));
       let wrap = equal(await bytes(zero), await bytes(await demo.exportFrame(count)));
@@ -103,7 +103,7 @@ const loopScenario: Scenario = {
       still = still && equal(stillOnEffects, await bytes(await demo.downloadPng()));
       const checkParallax = async (orientation: 'landscape' | 'portrait') => {
         await wait(() => demo.analysis().decoderReady);
-        demo.setMotion({ enabled: false, orbit: 1, parallax: 1, loopSeconds: 4, focus: 0 });
+        demo.setMotion({ enabled: false, drift: { direction: 'circle', amount: 1 }, parallax: 1, loopSeconds: 4, focus: 0 });
         demo.setStyle({ simplify: 0, grain: 0, colorNoise: 0, clipping: 0, crunch: 0, outline: 0 }); demo.setSymbols({ enabled: false });
         const size = orientation === 'landscape' ? { width: 128, height: 96 } : { width: 96, height: 128 };
         const mask = new Uint8Array(size.width * size.height), depth = new Float32Array(mask.length).fill(.2);
@@ -155,14 +155,14 @@ const loopScenario: Scenario = {
       const parallax = [await checkParallax('landscape')];
       await demo.importFile(await file(true)); await wait(() => demo.analysis().depth);
       demo.setStyle({ grain: 0, colorNoise: 0, clipping: 0, crunch: 0, outline: 0 }); demo.setSymbols({ enabled: false });
-      demo.setMotion({ enabled: true, orbit: .6, loopSeconds: 3 });
+      demo.setMotion({ enabled: true, drift: { direction: 'circle', amount: .6 }, loopSeconds: 3 });
       for (const frame of [0, Math.floor(count / 4), Math.floor(count / 2), Math.floor(count * 3 / 4)]) edges = await border(await demo.exportFrame(frame)) && demo.render?.geometryEdgesCovered() === true && edges;
       parallax.push(await checkParallax('portrait'));
       return { moved, wrap, still, edges, offSamples, onSamples, stopped, controls, noObjects, zeroOrbit, parallaxControl, parallax, landscape, portrait: demo.scene().master };
     }, { oneZoom: loopZoom(1), twoZoom: loopZoom(2) });
     const median = (values: readonly number[]) => [...values].sort((a, b) => a - b)[2] ?? Infinity;
     await page.screenshot('loop');
-    const stepMotion = { enabled: true, orbit: 1, parallax: 1, loopSeconds: 4, focus: 0 };
+    const stepMotion = { enabled: true, drift: { direction: 'circle' as const, amount: 1 }, parallax: 1, loopSeconds: 4, focus: 0 };
     const count = frameCount(stepMotion, 30);
     const frames = [count / 4, count * 3 / 4];
     const expected = frames.map((frame, i) => {
@@ -231,7 +231,7 @@ const loopScenario: Scenario = {
     context.ok('motion leaves the still export untouched', result.still);
     context.ok('landscape and portrait borders are covered', result.edges);
     context.ok('Motion controls edit the document', result.controls);
-    context.ok('desktop Parallax row follows Orbit in Motion, defaults to 2 and ranges from 0.5 to 3 by 0.1', result.parallaxControl);
+    context.ok('desktop Depth row precedes Drift Amount and Loop seconds, defaults to 2 and ranges from 0.5 to 3 by 0.1', result.parallaxControl);
     for (const check of result.parallax) {
       context.ok(`${check.orientation}: Parallax 2 doubles the near object's frame-space displacement at frame 0`,
         Math.abs(check.one.x) > 10 && Math.abs(check.two.x - 2 * check.one.x) < 2 && Math.abs(check.one.y) < 1 && Math.abs(check.two.y) < 1, check);
@@ -279,7 +279,7 @@ const objectScenario: Scenario = {
       await demo.tap(.5, .5); demo.select(null);
       const object = demo.objects()[0]; if (object === undefined) throw new Error('The disc was not selected.');
       demo.setStyle({ simplify: 0, grain: 0, colorNoise: 0, clipping: 0, crunch: 0, outline: 0 });
-      demo.setSymbols({ enabled: false }); demo.setMotion({ focus: 0, orbit: 1, loopSeconds: 3 });
+      demo.setSymbols({ enabled: false }); demo.setMotion({ focus: 0, drift: { direction: 'circle', amount: 1 }, loopSeconds: 3 });
       const capture = () => {
         const stage = document.querySelector('[data-testid="stage"]');
         if (!(stage instanceof HTMLCanvasElement)) throw new Error('No stage.');
@@ -556,7 +556,7 @@ const exportScenario: Scenario = {
         const failure = capture.entries.length === count && demo.exportProgress() === null && JSON.stringify(demo.document()) === documentBefore && demo.scene().status === 'GIF export failed: Encoder unavailable.';
         const recorder = window.MediaRecorder;
         Reflect.deleteProperty(window, 'MediaRecorder');
-        demo.setMotion({ orbit: .51 }); await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        demo.setMotion({ drift: { direction: 'circle', amount: .51 } }); await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         const button = document.querySelector('[data-testid="export-movie"]');
         const disabled = button instanceof HTMLButtonElement && button.disabled && button.title.includes('unavailable');
         window.MediaRecorder = recorder;

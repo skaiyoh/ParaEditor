@@ -40,7 +40,18 @@ const addLayerVisibility: Migration = (json) => {
   return { ...json, ...(objects === undefined ? {} : { objects }), version: 3 };
 };
 
-export const MIGRATIONS = [addSurface, addParallax, addLayerVisibility] as const satisfies readonly Migration[];
+/** Version 3 to 4. An existing orbit keeps its circular path and amplitude. */
+const addDrift: Migration = (json) => {
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) return json;
+  const motion = 'motion' in json ? json.motion : null;
+  if (typeof motion !== 'object' || motion === null || Array.isArray(motion) || !('orbit' in motion) || 'drift' in motion) {
+    return { ...json, version: 4 };
+  }
+  const { orbit, ...rest } = motion;
+  return { ...json, version: 4, motion: { ...rest, drift: { direction: 'circle', amount: orbit } } };
+};
+
+export const MIGRATIONS = [addSurface, addParallax, addLayerVisibility, addDrift] as const satisfies readonly Migration[];
 
 /** The table's length, typed as the tuple's literal length, so `SceneDocument['version']` is a literal type. */
 export const SCENE_VERSION = MIGRATIONS.length;

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { z } from '../src/core/zod.ts';
@@ -38,6 +39,31 @@ const request = (path: string, init?: RequestInit, environment = env): Promise<R
 function headers(response: Response, expected: Readonly<Record<string, string>>): void {
   for (const [name, value] of Object.entries(expected)) assert.equal(response.headers.get(name), value, name);
 }
+
+for (const gpu of ['', 'https://gpu.nathan.fish/base']) test(`prepared hosting verifier uses the configured GPU policy: ${JSON.stringify(gpu)}`, async () => {
+  // Execute the dependency-free JS verifier at its real boundary, then parse
+  // the returned policy before giving it to the TypeScript hosting handler.
+  const script = `
+    import assert from 'node:assert/strict';
+    import { gpuHeaders } from './tools/build.mjs';
+    import { loadHeaderContract, expectedHeaders } from './tools/headers.mjs';
+    import { preparedHeaderContract } from './tools/cloudflare/verify.mjs';
+    const source = await loadHeaderContract('headers.json'), gpu = ${JSON.stringify(gpu)};
+    const prepared = { gpu, headers: gpuHeaders(source, gpu) };
+    const checked = preparedHeaderContract(prepared, source);
+    assert.throws(() => preparedHeaderContract({ ...prepared, headers: { ...checked, all: { ...checked.all, 'Content-Security-Policy': 'connect-src *' } } }, source), /Prepared build header contract/);
+    console.log(JSON.stringify({ all: checked.all, headers: expectedHeaders(checked, '/'), errors: expectedHeaders(checked, '/', { status: 404 }), source: source.all }));
+  `;
+  const stringMap = z.record(z.string(), z.string());
+  const checked = z.object({ all: stringMap, headers: stringMap, errors: stringMap, source: stringMap }).parse(JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], { cwd: new URL('../', import.meta.url) }).toString()));
+  const hosted = createHandler({ routes: { '/': { kind: 'asset', headers: checked.headers } }, errors: checked.errors });
+  for (const url of ['/', '/missing']) {
+    const response = await hosted.fetch(new Request(`https://example.test${url}`), env);
+    assert.equal(response.headers.get('Content-Security-Policy'), checked.all['Content-Security-Policy']);
+  }
+  assert.equal(checked.all['Content-Security-Policy'], `${contract.all['Content-Security-Policy']}${gpu === '' ? '' : ' https://gpu.nathan.fish'}`);
+  assert.deepEqual(checked.source, contract.all);
+});
 
 test('hosting serves direct index.html and limits paths and methods before calling storage', async () => {
   const index = await request('/index.html');

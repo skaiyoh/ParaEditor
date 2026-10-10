@@ -6,7 +6,7 @@ import type { Vec2 } from '../core/motion.ts';
 import { sortedMasks } from '../core/produce.ts';
 import { LOOP_FPS, wrapFrame } from './loop.ts';
 import { backGrid, objectGrid } from './mesh.ts';
-import { geometry, geometryVertex } from './shaders/geometry.ts';
+import { geometry, geometryVertex, geometryCoverage } from './shaders/geometry.ts';
 import { backsource } from './shaders/backsource.ts';
 import { fillBackgroundDepth } from './shaders/pushpull.ts';
 import { holdIndex } from './grain.ts';
@@ -44,9 +44,13 @@ type CellBuffers = { readonly variant: Target; readonly cells: Target; readonly 
 
 /** Offline frames share the still export's selection-free draw and restoration. */
 export type LoopCapture = { readonly frame: number; readonly canvas: HTMLCanvasElement };
-type ExportRenderer = Omit<Renderer, 'exportStill'> & {
+type ExportRenderer = Omit<Renderer, 'exportStill' | 'debug'> & {
   exportStill(): Promise<Blob>;
   exportStill(capture: LoopCapture): void;
+  readonly debug: (NonNullable<Renderer['debug']> & {
+    motionCamera(): Vec2;
+    setMotionFeather(enabled: boolean): void;
+  }) | null;
 };
 
 export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
@@ -58,7 +62,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   let programs: ReturnType<typeof makePrograms>;
   function makePrograms() {
     return {
-      geometry: gpu.program(geometry, geometryVertex), backsource: gpu.program(backsource),
+      geometry: gpu.program(geometry, geometryVertex), coverage: gpu.program(geometryCoverage, geometryVertex), backsource: gpu.program(backsource),
       down: gpu.program(down), tensor: gpu.program(tensor), blur: gpu.program(blur), akf: gpu.program(akf),
       dog: gpu.program(dog), up: gpu.program(up), quantize: gpu.program(quantize), outline: gpu.program(outline), present: gpu.program(present), select: gpu.program(select),
       grain: gpu.program(grain), clip: gpu.program(clip), extract: gpu.program(crunchExtract), rowDct: gpu.program(crunchRowDct),
@@ -83,11 +87,13 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   let backgroundDepth: Texture | null = null;
   let backgroundKey = '';
   let backgroundPlane: RenderScene['depth'] = null;
-  let gbuffer: { color: Target; label: Target; depth: Target } | null = null;
+  let gbuffer: { color: Target; label: Target; depth: Target; composite: Target } | null = null;
   const backMesh = gpu.mesh(backGrid());
   const objectMeshes = new Map<ObjectId, { key: string; mesh: ReturnType<typeof gpu.mesh>; mask: Plane<'u8'>; texture: Texture }>();
   let lastRender: { frame: number; loop: boolean; camera: Vec2 | null; showSelection: boolean } =
     { frame: 0, loop: false, camera: null, showSelection: true };
+  let featherEnabled = true;
+  let renderedCamera: Vec2 = { x: 0, y: 0 };
   let exportedEdges: boolean | null = null;
   let buffers: Buffers | null = null;
   let crunchBuffers: CrunchBuffers | null = null;
@@ -392,11 +398,11 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     }
   }
 
-  function geometryInputs(offset: Vec2, zoom: number): { color: Texture; label: Texture; depth: Texture } {
+  function geometryInputs(offset: Vec2, zoom: number, cells: CellBuffers | null): { color: Texture; label: Texture; depth: Texture } {
     if (scene === null || buffers === null) throw new Error('Open a photo before rendering.');
     if (gbuffer === null) {
-      gbuffer = { color: gpu.target(canvas.width, canvas.height), label: gpu.target(canvas.width, canvas.height), depth: gpu.target(canvas.width, canvas.height, 'r16f') };
-      gpu.attachMany(gbuffer.color, [gbuffer.label, gbuffer.depth]);
+      gbuffer = { color: gpu.target(canvas.width, canvas.height), label: gpu.target(canvas.width, canvas.height), depth: gpu.target(canvas.width, canvas.height, 'r16f'), composite: gpu.target(canvas.width, canvas.height) };
+      gpu.attachMany(gbuffer.color, [gbuffer.label, gbuffer.depth, gbuffer.composite]);
       gpu.attachDepth(gbuffer.color);
     }
     const target = gbuffer;
@@ -406,6 +412,9 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     const displacement = { displacementX: { kind: 'vec3', value: [lo.x, hi.x, 0] },
       displacementY: { kind: 'vec3', value: [lo.y, hi.y, 0] }, zoom: float(zoom) } satisfies Record<string, Uniform>;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.color.framebuffer);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2, gl.COLOR_ATTACHMENT3]);
+    gl.clearBufferfv(gl.COLOR, 3, new Float32Array([0, 0, 0, 1]));
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
     gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0, 0, 0, 0]));
     gl.clearBufferfv(gl.COLOR, 1, new Float32Array(4)); gl.clearBufferfv(gl.COLOR, 2, new Float32Array(4));
     gl.enable(gl.DEPTH_TEST);
@@ -415,9 +424,33 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     gl.depthRange(0, 1 - 1 / 65535);
     gl.clearDepth(1);
     gl.clear(gl.DEPTH_BUFFER_BIT);
+    const cover = (mesh: ReturnType<typeof gpu.mesh>, mask: Texture, objectId: number, plane: Texture): void => {
+      if (!featherEnabled) return;
+      // Styling before coverage keeps palette bands and glyph cells from
+      // turning the soft rim back into a hard edge. Each layer sees the
+      // existing accumulated scene, using the very same styling programs.
+      gl.disable(gl.DEPTH_TEST);
+      const styled = stylize(target, cells);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target.color.framebuffer);
+      gl.drawBuffers([gl.NONE, gl.NONE, gl.NONE, gl.COLOR_ATTACHMENT3]);
+      gl.enable(gl.DEPTH_TEST);
+      // The preceding hard draw resolved folds. Blend only that nearest
+      // surface, never another triangle of this object underneath it.
+      gl.depthFunc(gl.EQUAL); gl.depthMask(false);
+      gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+      try {
+        gpu.draw(programs.coverage, target.color, { ...displacement, styled: tex(styled), mask: tex(mask), objectId: int(objectId),
+          depthPlane: tex(plane), masterSize: { kind: 'ivec2', value: [canvas.width, canvas.height] } }, mesh);
+      } finally {
+        gl.disable(gl.BLEND); gl.depthMask(true); gl.depthFunc(gl.LESS);
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+      }
+    };
     try {
       gpu.draw(programs.geometry, target.color, { ...displacement, simplified: tex(plateSimplified ?? buffers.simplified),
         depthPlane: tex(backgroundDepth ?? depth ?? label), mask: tex(label), objectId: int(0) }, backMesh);
+      cover(backMesh, label, 0, backgroundDepth ?? depth ?? label);
       for (const layer of layers(scene.doc)) {
         if (layer.kind === 'plate') continue;
         const entry = objectMeshes.get(layer.object.id);
@@ -427,6 +460,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         gl.clear(gl.DEPTH_BUFFER_BIT);
         gpu.draw(programs.geometry, target.color, { ...displacement, simplified: tex(buffers.simplified),
           depthPlane: tex(depth ?? label), mask: tex(entry.texture), objectId: int(scene.doc.objects.indexOf(layer.object) + 1) }, entry.mesh);
+        cover(entry.mesh, entry.texture, scene.doc.objects.indexOf(layer.object) + 1, depth ?? label);
       }
     } finally {
       gl.disable(gl.DEPTH_TEST);
@@ -449,6 +483,28 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     gpu.draw(programs.dog, grid.b, { src: tex(grid.a) });
     gpu.draw(programs.up, destination, { simp: tex(grid.b), low: tex(grid.low), master: tex(source), label: tex(inputs.label),
       div: int(DIVISOR), dBg: float(Math.max(0, 1 - 3 * amount)), clarity: table, simplify: float(amount) });
+  }
+  function stylize(inputs: { color: Texture; label: Texture; depth: Texture }, cells: CellBuffers | null): Target {
+    if (scene === null || buffers === null || palette === null || lut === null) throw new Error('Open a photo before styling.');
+    if (cells !== null) gpu.attach(buffers.quantized, cells.variant);
+    cameraDraw('quantize', programs.quantize, buffers.quantized, { src: tex(inputs.color), label: tex(inputs.label), lut: tex(lut),
+      entries: { kind: 'vec3Array', value: palette.sources }, entryCount: int(palette.entries.length),
+      bandCounts: { kind: 'floatArray', value: palette.bandCounts }, symbolsEnabled: int(cells === null ? 0 : 1),
+      p01: float(palette.tone.p01), p99: float(palette.tone.p99) });
+    if (cells !== null) {
+      gpu.attach(buffers.quantized, null);
+      cameraDraw('cells.reduce', programs.cellsReduce, cells.cells, { variant: tex(cells.variant), cellSize: int(cells.size),
+        amount: float(scene.doc.symbols.amount), modes: { kind: 'floatArray', value: symbolModes },
+        bandCounts: { kind: 'floatArray', value: palette.bandCounts } });
+      cameraDraw('cells.draw', programs.cellsDraw, buffers.final, { cells: tex(cells.cells), decisions: tex(cells.decisions),
+        lut: tex(lut), atlas: tex(atlas), cellSize: int(cells.size), frameSize: { kind: 'ivec2', value: [canvas.width, canvas.height] } });
+    } else {
+      cameraDraw('outline', programs.outline, buffers.final, { src: tex(buffers.quantized), simplified: tex(inputs.color), label: tex(inputs.label),
+        amount: float(scene.doc.style.outline), ink: { kind: 'vec3', value: palette.darkest },
+        slopePerMasterPixel: float(OUTLINE_SLOPE_PER_WORKING_TEXEL / DIVISOR),
+        depth: tex(inputs.depth), hasDepth: int(depth === null ? 0 : 1), depthRange: float(depthRange) });
+    }
+    return buffers.final;
   }
   function renderStill(showSelection = true): void { render(0, false, showSelection); }
   function renderFrame(frame: number, showSelection = true): void { render(frame, true, showSelection); }
@@ -478,32 +534,16 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       simplify(backSource, plateSimplified, buffers.grid, scene.doc.style.simplify, { label: backgroundLabel, clarity: backgroundClarity });
       backDirty = false;
     }
-    const drawCamera = moving ? camera ?? cameraOffset(cameraRadius(scene.doc), loopPhase(index, frameCount(scene.doc.motion, LOOP_FPS))) : { x: 0, y: 0 };
-    const hiding = plate !== null && scene.doc.objects.some((object) => object.hidden);
-    const inputs = moving || hiding ? geometryInputs(drawCamera, moving ? loopZoom(scene.doc.motion.parallax) : 1) :
-      { color: buffers.simplified, label, depth: depth ?? label };
+    const drawCamera = moving ? camera ?? cameraOffset(cameraRadius(scene.doc), loopPhase(index, frameCount(scene.doc.motion, LOOP_FPS)), scene.doc.motion.drift.direction) : { x: 0, y: 0 };
+    renderedCamera = drawCamera;
     const cells = scene.doc.symbols.enabled ? ensureCells(canvas.width, canvas.height, scene.doc.symbols.cellSize) : null;
-    if (cells !== null) gpu.attach(buffers.quantized, cells.variant);
-    cameraDraw('quantize', programs.quantize, buffers.quantized, { src: tex(inputs.color), label: tex(inputs.label), lut: tex(lut),
-      entries: { kind: 'vec3Array', value: palette.sources }, entryCount: int(palette.entries.length),
-      bandCounts: { kind: 'floatArray', value: palette.bandCounts }, symbolsEnabled: int(cells === null ? 0 : 1),
-      p01: float(palette.tone.p01), p99: float(palette.tone.p99) });
-    if (cells !== null) {
-      gpu.attach(buffers.quantized, null);
-      cameraDraw('cells.reduce', programs.cellsReduce, cells.cells, { variant: tex(cells.variant), cellSize: int(cells.size),
-        amount: float(scene.doc.symbols.amount), modes: { kind: 'floatArray', value: symbolModes },
-        bandCounts: { kind: 'floatArray', value: palette.bandCounts } });
-      cameraDraw('cells.draw', programs.cellsDraw, buffers.final, { cells: tex(cells.cells), decisions: tex(cells.decisions),
-        lut: tex(lut), atlas: tex(atlas), cellSize: int(cells.size), frameSize: { kind: 'ivec2', value: [canvas.width, canvas.height] } });
-    } else {
-      cameraDraw('outline', programs.outline, buffers.final, { src: tex(buffers.quantized), simplified: tex(inputs.color), label: tex(inputs.label),
-        amount: float(scene.doc.style.outline), ink: { kind: 'vec3', value: palette.darkest },
-        slopePerMasterPixel: float(OUTLINE_SLOPE_PER_WORKING_TEXEL / DIVISOR),
-        depth: tex(inputs.depth), hasDepth: int(depth === null ? 0 : 1), depthRange: float(depthRange) });
-    }
+    const hiding = plate !== null && scene.doc.objects.some((object) => object.hidden);
+    const inputs = moving || hiding ? geometryInputs(drawCamera, moving ? loopZoom(scene.doc.motion.parallax) : 1, cells) :
+      { color: buffers.simplified, label, depth: depth ?? label };
+    const styled = featherEnabled && (moving || hiding) && gbuffer !== null ? gbuffer.composite : stylize(inputs, cells);
     const { style } = scene.doc;
     const currentBuffers = buffers;
-    let output = buffers.final;
+    let output = styled;
     const other = (input: Target): Target => input === currentBuffers.final ? currentBuffers.quantized : currentBuffers.final;
     const coating = scene.doc.surface;
     if (coating.enabled && (coating.relief !== 0 || coating.refraction !== 0 || coating.shine !== 0)) {
@@ -689,6 +729,9 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       canvas.removeEventListener('webglcontextlost', onContextLost);
       gpu.dispose(); scene = null; buffers = null; cellBuffers = null; crunchBuffers = null; finalTarget = null; selectionSource = null; master = null; plate = null; depth = null; lut = null; palette = null;
     },
-    debug: probe === null ? null : { ...probe.debug, readGeometryPatch },
+    debug: probe === null ? null : { ...probe.debug, readGeometryPatch,
+      motionCamera: () => ({ ...renderedCamera }),
+      setMotionFeather: (enabled: boolean): void => { featherEnabled = enabled; },
+    },
   };
 }

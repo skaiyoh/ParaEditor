@@ -114,7 +114,7 @@ export function editCases(): readonly EditCase[] {
 
     { name: 'symbols', doc: minimal, edit: { kind: 'symbols', patch: { enabled: true, cellSize: 13, amount: 0.9 } }, outcome: 'applied' },
     { name: 'surface', doc: minimal, edit: { kind: 'surface', patch: { enabled: true, pattern: 'scales', relief: 1, refraction: 0.8, shine: 0.6, scale: 0.2 } }, outcome: 'applied' },
-    { name: 'motion, focus null', doc: five, edit: { kind: 'motion', patch: { focus: null, orbit: 0.2 } }, outcome: 'applied' },
+    { name: 'motion, focus null', doc: five, edit: { kind: 'motion', patch: { focus: null, drift: { direction: 'circle', amount: 0.2 } } }, outcome: 'applied' },
     { name: 'motion, focus set', doc: minimal, edit: { kind: 'motion', patch: { focus: 0.3, loopSeconds: 4.5, enabled: true } }, outcome: 'applied' },
     { name: 'lighting', doc: five, edit: { kind: 'lighting', patch: { ambient: 0.5, relief: 0.25 } }, outcome: 'applied' },
 

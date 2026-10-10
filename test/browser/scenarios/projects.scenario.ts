@@ -106,7 +106,7 @@ export const scenarios: readonly Scenario[] = [{
       await page.press('Backspace');
       await page.type('[data-testid="layer-name-input"]', 'Saved ball');
       await page.press('Enter');
-      await page.click('.object-node [data-testid="layer-hide"]');
+      await page.click('[data-testid="object-hide"]');
       await page.waitFor('hidden project plate ready', z.literal(true), () => {
         const demo = window.__noisyTest?.demo;
         return demo?.objects()[0]?.hidden && demo.products().plateSize !== null && !demo.products().plateNeeded ? true : null;
