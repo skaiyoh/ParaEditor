@@ -9,6 +9,7 @@ import type { Edit } from './edits.ts';
 import type { AssetId, NonEmpty } from './ids.ts';
 import { applyEdits } from './reduce.ts';
 import type { SceneDocument } from './types.ts';
+import type { Plane } from './raster.ts';
 
 /** The most entries the undo stack holds; pushing one more drops the oldest. */
 export const HISTORY_LIMIT = 50;
@@ -28,6 +29,8 @@ export type HistoryEntry = {
   readonly at: number;
   readonly forward: NonEmpty<Edit>;
   readonly inverse: NonEmpty<Edit>;
+  /** Session-owned mask products, released from the active store on deletion. */
+  readonly masks?: ReadonlyMap<AssetId, Plane<'u8'>>;
 };
 
 /** Both stacks list their entries oldest first, so the last entry of each is the next to undo or redo. */
@@ -86,6 +89,9 @@ export function coalesceKey(edit: Edit): string | null {
     case 'object.add':
     case 'object.refine':
     case 'object.remove':
+    case 'object.rename':
+    case 'object.hide':
+    case 'object.show':
     case 'light.add':
     case 'light.remove':
       return null;
@@ -124,7 +130,8 @@ export function push(history: History, entry: HistoryEntry, doc: SceneDocument):
     const rest = history.undo.slice(0, -1);
     // Only the kind of the result is read, so the time stamped is immaterial.
     if (applyEdits(doc, last.inverse, doc.updatedAt).kind === 'unchanged') return { undo: closeTop(rest), redo: [] };
-    const merged: HistoryEntry = { key: last.key, at: entry.at, forward: entry.forward, inverse: last.inverse };
+    const merged: HistoryEntry = { key: last.key, at: entry.at, forward: entry.forward, inverse: last.inverse,
+      ...(last.masks === undefined && entry.masks === undefined ? {} : { masks: new Map([...(last.masks ?? []), ...(entry.masks ?? [])]) }) };
     return { undo: [...rest, merged], redo: [] };
   }
   const undo = [...history.undo, entry];

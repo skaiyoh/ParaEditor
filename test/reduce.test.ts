@@ -54,7 +54,7 @@ function deepFreeze<T>(value: T): T {
 /** Every edit kind and every refusal reason; `satisfies` fails the type check when either union gains a member this list lacks. */
 const EDIT_KINDS = Object.keys({
   title: true, style: true, fry: true, symbols: true, surface: true, motion: true, lighting: true, 'palette.target': true,
-  'object.add': true, 'object.set': true, 'object.refine': true, 'object.remove': true, 'light.add': true, 'light.set': true, 'light.remove': true,
+  'object.add': true, 'object.set': true, 'object.rename': true, 'object.hide': true, 'object.show': true, 'object.refine': true, 'object.remove': true, 'light.add': true, 'light.set': true, 'light.remove': true,
 } satisfies Record<EditKind, true>);
 const REASONS = Object.keys({
   invalid: true, 'unknown-key': true, 'non-finite': true, 'unknown-id': true, 'duplicate-id': true, limit: true, 'out-of-range': true,
@@ -585,4 +585,16 @@ test('the output shares with the input every field and list element the edit doe
   const fried = applied(applyEdit(before, { kind: 'fry', fry: 0.3 }, NOW)).doc;
   assert.equal(fried.style.harmony, before.style.harmony);
   assert.equal(fried.style.paletteTargets, before.style.paletteTargets);
+});
+
+test('renaming validates the name and shares untouched object products and settings', () => {
+  const before = fiveClusterDocument(), object = before.objects[0];
+  assert.ok(object);
+  const result = applied(applyEdit(before, { kind: 'object.rename', id: object.id, name: 'Named layer' }, NOW));
+  const renamed = result.doc.objects[0];
+  assert.ok(renamed);
+  assert.equal(renamed.produced, object.produced);
+  assert.equal(renamed.recolor, object.recolor);
+  assert.equal(renamed.motion, object.motion);
+  assert.equal(renamed.hidden, object.hidden);
 });

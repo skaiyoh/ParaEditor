@@ -1,9 +1,9 @@
 import { bundledLock } from '../analysis/bundled-lock.ts';
 import { openModelLoader, webLocks } from '../analysis/models.ts';
-import { createAnalysisService, type AnalysisEvent, type Decoder, type FaceTracker, type HeavyStage } from '../analysis/service.ts';
+import { createAnalysisService, type AnalysisEvent, type AnalysisService, type Decoder, type FaceTracker, type HeavyStage } from '../analysis/service.ts';
 import { holeMask, plateNeeded, reconcile } from '../core/derive.ts';
 import type { Produce } from '../core/edits.ts';
-import type { NonEmpty } from '../core/ids.ts';
+import type { ModelId, NonEmpty } from '../core/ids.ts';
 import { sortedMasks } from '../core/produce.ts';
 import type { Rgb8 } from '../core/raster.ts';
 import type { SceneDocument } from '../core/types.ts';
@@ -31,6 +31,53 @@ type Host = {
   readonly windowEnabled: () => boolean;
 };
 const reason = (error: unknown): string => error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error);
+
+function retryDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) { resolve(); return; }
+    const finish = (): void => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve(); };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
+
+/** Warming owns its worker until ready; abort also ends a pending retry. */
+export async function warmDecoder({ open, releaseHeavy, signal, now, report, onReady }: {
+  readonly open: () => Decoder; readonly releaseHeavy: () => void; readonly signal: AbortSignal;
+  readonly now: () => number; readonly report: (error: unknown) => void;
+  readonly onReady: (decoder: Decoder, ms: number) => void;
+}): Promise<{ readonly kind: 'ready' } | { readonly kind: 'failed'; readonly reload: boolean } | { readonly kind: 'cancelled' }> {
+  let resident: Decoder | null = null;
+  const abort = (): void => { resident?.release(); resident = null; };
+  signal.addEventListener('abort', abort, { once: true });
+  const began = now();
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (signal.aborted) return { kind: 'cancelled' };
+      try {
+        resident = open();
+        const result = await resident.decode([{ at: { x: 0.5, y: 0.5 }, label: 'include' }], signal);
+        if (signal.aborted) return { kind: 'cancelled' };
+        if (!result.ok) throw result.error;
+      } catch (error) {
+        abort();
+        if (signal.aborted || (typeof error === 'object' && error !== null
+          && (('kind' in error && error.kind === 'cancelled') || ('name' in error && error.name === 'AbortError')))) return { kind: 'cancelled' };
+        report(error);
+        const startupFailure = /out of memory|no available backend|decoder (?:did not start|session could not be created)/i.test(reason(error));
+        if (attempt !== 0 || !startupFailure) return { kind: 'failed', reload: attempt !== 0 };
+        releaseHeavy();
+        await retryDelay(1500, signal);
+        continue;
+      }
+      // Hand ownership over synchronously, before removing the abort listener.
+      const ready = resident; resident = null;
+      onReady(ready, now() - began);
+      return { kind: 'ready' };
+    }
+    return { kind: 'failed', reload: true };
+  } finally { signal.removeEventListener('abort', abort); }
+}
 
 /** Same guide as the decoder dev page; the retained master itself is never transferred. */
 async function makeGuide(master: ImageData): Promise<Rgb8> {
@@ -65,12 +112,31 @@ export function createAnalysisDriver(host: Host) {
     spawnFaceTracker: () => new Worker(NOISY_WORKER_URLS.face, { type: 'module', name: 'face' }),
     loader: openModelLoader({ lock: lock.value, origin: window.location.origin, caches, fetch: (url, init) => window.fetch(url, init), subtle: crypto.subtle, locks: webLocks(navigator.locks), clock }),
   }) : null;
+  return createDriver(host, {
+    clock, diag, service, threads, prepareGuide: makeGuide,
+    models: lock.ok ? { kind: 'ready', ids: [...new Set(Object.values(lock.value.ops).map((op) => op.model))],
+      depth: lock.value.ops.depth.model, inpaint: lock.value.ops.inpaint.model, count: Object.keys(lock.value.lock.models).length }
+      : { kind: 'unavailable', message: lock.error },
+  });
+}
+
+/** Policy execution takes its service and guide boundary explicitly for lifecycle tests. */
+export function createDriver(host: Host, { clock, diag, service, threads, prepareGuide, models }: {
+  readonly clock: Pick<ReturnType<typeof createBrowserClock>, 'now'>;
+  readonly diag: Pick<ReturnType<typeof createDiagnostics<AnalysisEvent>>, 'log' | 'events'>;
+  readonly service: AnalysisService | null;
+  readonly threads: number;
+  readonly prepareGuide: typeof makeGuide;
+  readonly models: { readonly kind: 'ready'; readonly ids: readonly ModelId[]; readonly depth: ModelId; readonly inpaint: ModelId; readonly count: number }
+    | { readonly kind: 'unavailable'; readonly message: string };
+}) {
   let policy = initialPolicy();
   let status = 'Fetching models 0%';
   let timer: ReturnType<typeof setTimeout> | null = null;
   let heavy: AbortController | null = null;
   let warming: AbortController | null = null;
   let decoder: Decoder | null = null;
+  let pendingWarmup: (() => void) | null = null;
   let guide: Rgb8 | null = null;
   let embeddings = false;
   let decoderReady = false;
@@ -96,7 +162,7 @@ export function createAnalysisDriver(host: Host) {
     const scene = host.read();
     return scene !== null && (host.windowEnabled() ? windowPlateNeeded(scene.doc) : plateNeeded(scene.doc));
   };
-  const restingStatus = (): string => sequenceFailure ?? tapFailure ?? (decoderReady ? 'Ready to tap' : embeddings ? 'Warming decoder' : 'Ready');
+  const restingStatus = (): string => tapFailure ?? sequenceFailure ?? (decoderReady ? 'Ready to tap' : embeddings ? 'Warming decoder' : 'Ready');
   const finishProduct = (stage: Stage, generation: number): void => {
     const began = started.get(stage);
     if (began !== undefined) { note(stage, clock.now() - began, generation); started.delete(stage); }
@@ -120,6 +186,7 @@ export function createAnalysisDriver(host: Host) {
         case 'release-decoder': warming?.abort(); warming = null; decoder?.release(); decoder = null; decoderReady = false; break;
         case 'drop-products':
           settle('The photo was replaced.'); host.products.clear(); guide = null; embeddings = false;
+          pendingWarmup = null;
           tapFailure = null; sequenceFailure = null; timings = {}; lastTiming = null; started.clear();
           if (policy.modelsReady) status = 'Waiting to analyze';
           host.changed(); break;
@@ -135,14 +202,18 @@ export function createAnalysisDriver(host: Host) {
       }
     }
     schedule();
+    // Failure and timeout also terminate a queued plate before resuming warming.
+    if (policy.sequence === 'idle' && heavy === null && warming === null && !decoderReady && tapFailure === null) pendingWarmup?.();
   }
   function run(plate: boolean): void {
     const scene = host.read();
-    if (scene === null || service === null || !lock.ok) return;
+    if (scene === null || service === null || models.kind !== 'ready') return;
     const generation = policy.generation;
     if (plate && !wantsPlate()) {
       dispatch({ kind: 'done', generation, plateNeeded: false }); settle(null); setStatus(restingStatus()); return;
     }
+    // A plate queued while warming must finish before another decoder starts.
+    warming?.abort(); warming = null;
     const needs = reconcile(scene.doc, { embeddings }, new Set(), { objectsActive: true, tapPending: false });
     const stages: NonEmpty<HeavyStage> = plate
       ? [{ kind: 'inpaint', hole: holeMask(scene.doc, host.products.forScene(scene.doc).masks, scene.doc.frame.master.size) }]
@@ -151,7 +222,6 @@ export function createAnalysisDriver(host: Host) {
     const controller = new AbortController(); heavy = controller;
     const active = (): boolean => valid(generation) && !controller.signal.aborted && heavy === controller;
     const products: Promise<void>[] = [];
-    let startWarmup: (() => void) | null = null;
     const failed = (stage: Stage, error: unknown): void => {
       if (!active()) return;
       finishProduct(stage, generation);
@@ -172,35 +242,43 @@ export function createAnalysisDriver(host: Host) {
             if (!active()) return;
             note('depth-hash', clock.now() - began, generation);
             host.products.putDepth(asset, map);
-            host.produce({ kind: 'depth', depth: { model: lock.value.ops.depth.model, map: { asset, size: map.size, format: 'f32' }, stats } });
+            host.produce({ kind: 'depth', depth: { model: models.depth, map: { asset, size: map.size, format: 'f32' }, stats } });
           })().catch((error: unknown) => failed('depth', error));
           products.push(pending);
         },
         onEmbeddings(value) {
           if (!active()) return;
           finishProduct('encode', generation); embeddings = true;
-          // Only onDone invokes this, after the service has terminated the encoder worker.
-          startWarmup = () => { void (async () => {
+          // Dispatch invokes this only when import and queued background workers have ended.
+          pendingWarmup = () => { void (async () => {
             if (!valid(generation) || controller.signal.aborted) return;
-            if (guide === null) throw new Error(tapFailure?.slice('Tapping unavailable: '.length) ?? 'The decoder guide is unavailable.');
-            decoder = service.openDecoder({ scene: scene.doc.id, embeddings: value, guide });
-            const resident = decoder;
+            const preparedGuide = guide;
+            if (preparedGuide === null) { tapFailure = 'Tapping unavailable - try another photo'; setStatus(restingStatus()); return; }
             const warm = new AbortController(); warming = warm;
-            const began = clock.now();
-            const result = await resident.decode([{ at: { x: 0.5, y: 0.5 }, label: 'include' }], warm.signal);
-            if (!valid(generation) || warm.signal.aborted || decoder !== resident) return;
-            warming = null; note('warmup', clock.now() - began, generation);
-            if (!result.ok) throw new Error(reason(result.error));
-            decoderReady = true;
-            if (policy.sequence !== 'plate' && !policy.plateQueued) setStatus(restingStatus());
-            else host.changed();
-          })().catch((error: unknown) => {
-            if (!valid(generation) || controller.signal.aborted) return;
-            warming = null; decoder?.release(); decoder = null; decoderReady = false;
-            tapFailure = `Tapping unavailable: ${reason(error)}`;
-            if (policy.sequence !== 'plate' && !policy.plateQueued) setStatus(restingStatus());
-            else host.changed();
-          }); };
+            setStatus('Warming decoder');
+            const result = await warmDecoder({
+              open: () => service.openDecoder({ scene: scene.doc.id, embeddings: value, guide: preparedGuide }),
+              releaseHeavy: () => { heavy?.abort(); heavy = null; service.cancelHeavy(); },
+              signal: warm.signal, now: () => clock.now(),
+              report: (error) => { if (NOISY_DEV) diag.log({ event: 'stage.failed', op: 'decode', error: { kind: 'worker', op: 'decode', message: reason(error) } }); },
+              onReady: (resident, ms) => {
+                if (!valid(generation) || warm.signal.aborted || warming !== warm) { resident.release(); return; }
+                warming = null; pendingWarmup = null; decoder = resident; decoderReady = true;
+                note('warmup', ms, generation);
+                if (valid(generation) && !warm.signal.aborted) {
+                  if (policy.sequence !== 'plate' && !policy.plateQueued) setStatus(restingStatus());
+                  else host.changed();
+                }
+              },
+            });
+            if (result.kind === 'ready' || !valid(generation) || warm.signal.aborted || warming !== warm) return;
+            warming = null; pendingWarmup = null;
+            if (result.kind === 'failed') {
+              decoderReady = false;
+              tapFailure = result.reload ? 'Tapping needs a reload on this device' : 'Tapping unavailable - try another photo';
+            }
+            setStatus(restingStatus());
+          })(); };
         },
         onPlate(image) {
           if (!active()) return;
@@ -211,7 +289,7 @@ export function createAnalysisDriver(host: Host) {
             const current = host.read();
             if (current === null || JSON.stringify(sortedMasks(current.doc)) !== JSON.stringify(forMasks)) return;
             host.products.putPlate(asset, image);
-            host.produce({ kind: 'plate', plate: { model: lock.value.ops.inpaint.model, image: { asset, size: image.size }, forMasks } });
+            host.produce({ kind: 'plate', plate: { model: models.inpaint, image: { asset, size: image.size }, forMasks } });
           })().catch((error: unknown) => failed('inpaint', error)));
         },
         onFailed: failed,
@@ -224,9 +302,9 @@ export function createAnalysisDriver(host: Host) {
             if (plate && needed && current !== null && JSON.stringify(sortedMasks(current.doc)) === JSON.stringify(forMasks)) {
               failed('inpaint', 'The sequence completed without a fresh plate.'); return;
             }
-            startWarmup?.();
             heavy = null;
             dispatch({ kind: 'done', generation, plateNeeded: needed });
+            if (!valid(generation) || controller.signal.aborted) return;
             if (policy.sequence === 'idle') { settle(null); setStatus(restingStatus()); }
             else host.changed();
           });
@@ -235,12 +313,11 @@ export function createAnalysisDriver(host: Host) {
     } catch (error) { failed(plate ? 'inpaint' : 'depth', error); }
   }
   queueMicrotask(() => {
-    if (service === null || !lock.ok) { setStatus(`Models unavailable: ${lock.ok ? 'service unavailable' : lock.error}`); return; }
+    if (service === null || models.kind !== 'ready') { setStatus(`Models unavailable: ${models.kind === 'ready' ? 'service unavailable' : models.message}`); return; }
     const progress = new Map<string, number>();
-    const models = new Set(Object.values(lock.value.ops).map((op) => op.model));
     void service.fetchModels(['depth', 'encode', 'decode', 'inpaint', 'face'], fetchController.signal, (model, fraction) => {
       progress.set(model, fraction);
-      const percent = Math.floor([...progress.values()].reduce((sum, value) => sum + value, 0) * 100 / models.size);
+      const percent = Math.floor([...progress.values()].reduce((sum, value) => sum + value, 0) * 100 / models.ids.length);
       setStatus(`Fetching models ${percent}%`);
     }).then((result) => {
       if (!result.ok) { setStatus(`Models unavailable: ${reason(result.error)}`); settle(status); return; }
@@ -256,7 +333,7 @@ export function createAnalysisDriver(host: Host) {
     generation: (): number => policy.generation,
     guide: (): Rgb8 | null => guide,
     decoder: (): Decoder | null => decoderReady ? decoder : null,
-    modelCount: (): number => lock.ok ? Object.keys(lock.value.lock.models).length : 0,
+    modelCount: (): number => models.kind === 'ready' ? models.count : 0,
     openFaceTracker(): FaceTracker {
       if (service === null || !policy.modelsReady) throw new Error('Models are unavailable.');
       return service.openFaceTracker();
@@ -270,10 +347,14 @@ export function createAnalysisDriver(host: Host) {
     },
     async sceneReady(generation: number, master: ImageData): Promise<void> {
       try {
-        const made = await makeGuide(master);
+        const made = await prepareGuide(master);
         if (!valid(generation)) return;
         guide = made;
-      } catch (error) { if (!valid(generation)) return; tapFailure = `Tapping unavailable: ${reason(error)}`; }
+      } catch (error) {
+        if (!valid(generation)) return;
+        if (NOISY_DEV) diag.log({ event: 'stage.failed', op: 'decode', error: { kind: 'worker', op: 'decode', message: reason(error) } });
+        tapFailure = 'Tapping unavailable - try another photo';
+      }
       dispatch({ kind: 'scene-ready', generation });
     },
     requestPlateIfNeeded(): Promise<void> {

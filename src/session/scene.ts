@@ -14,7 +14,8 @@ import { encodePng, savePng } from '../export/png.ts';
 import { renderStereo, STEREO_3DS_SIZE } from '../export/stereo.ts';
 import type { Size } from '../core/raster.ts';
 import { readBuildId } from '../platform/build-id.ts';
-import { applyEdit } from '../core/reduce.ts';
+import { applyEdit, applyEdits } from '../core/reduce.ts';
+import { EMPTY_HISTORY, coalesceKey, push, undo, redo, type History, type HistoryEntry } from '../core/history.ts';
 import type { Edit, StylePatch } from '../core/edits.ts';
 import { createRenderer } from '../render/renderer.ts';
 import type { Renderer } from '../render/types.ts';
@@ -25,9 +26,9 @@ import { maskedDepth, objectProduced } from './objects.ts';
 import { createLoopStepper, loopTapPoint } from './loop.ts';
 import { frameCount, effectiveOrbit, loopZoom, type Vec2 } from '../core/motion.ts';
 import { LOOP_FPS } from '../render/loop.ts';
-import { createWindowDriver } from './window.ts';
-import { createTiltDriver, type Orientation } from './tilt.ts';
-import type { ViewHost } from './view-driver.ts';
+import { createWindowSource } from './window.ts';
+import { createTiltSource, type Orientation } from './tilt.ts';
+import { createViewDriver, type ViewHost } from './view-driver.ts';
 import { createProjectSession } from './projects.ts';
 import { anchoredSize, candidateSize, draggedSize, maskArea, rankCandidates, refinementChoice, thresholdMask } from './refine.ts';
 
@@ -46,9 +47,9 @@ export type DemoScene = {
 export type DemoState = {
   readonly status: string; readonly scene: DemoScene | null;
   readonly analysisStatus: string; readonly analysisTiming: { readonly stage: string; readonly ms: number } | null;
-  readonly windowEnabled: boolean;
-  readonly tiltEnabled: boolean;
+  readonly parallaxEnabled: boolean;
   readonly refiningObject: ObjectId | null;
+  readonly refinementSize: number | null;
 };
 export type DemoSession = ReturnType<typeof createDemoSession>;
 
@@ -87,8 +88,9 @@ async function importScene(file: File): Promise<DemoScene> {
 }
 
 export function createDemoSession() {
-  let state: DemoState = { status: 'Drop a photo', scene: null, analysisStatus: 'Fetching models 0%', analysisTiming: null, windowEnabled: false, tiltEnabled: false, refiningObject: null };
+  let state: DemoState = { status: 'Drop a photo', scene: null, analysisStatus: 'Fetching models 0%', analysisTiming: null, parallaxEnabled: false, refiningObject: null, refinementSize: null };
   const products = createProducts();
+  let history: History = EMPTY_HISTORY;
   let generation = 0;
   let readyScene: { readonly generation: number; readonly id: SceneDocument['id'] } | null = null;
   let importController: AbortController | null = null;
@@ -130,6 +132,7 @@ export function createDemoSession() {
     const scene = next.scene === null ? null : { ...next.scene, ...products.forScene(next.scene.doc) };
     let status = next.status;
     if (status === 'Still analyzing…' && analysis.snapshot().decoderReady) status = 'Ready';
+    if (status === 'Ready' && viewEnabled()) status = view.status();
     try { if (scene !== null) draw(scene); }
     catch (error) {
       loop.stop(); stopView();
@@ -137,7 +140,7 @@ export function createDemoSession() {
       if (refuseOnRenderError) throw error;
       status = error instanceof Error ? error.message : String(error);
     }
-    state = { status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), windowEnabled: windowView.enabled(), tiltEnabled: tiltView.enabled(), refiningObject: refinement?.id ?? null };
+    state = { status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), parallaxEnabled: view.enabled(), refiningObject: refinement?.id ?? null, refinementSize: refinement?.size ?? null };
     if (scene !== null && readyScene?.generation === generation) projects.observe(scene.doc, products.masks);
     for (const listener of listeners) listener(state);
   };
@@ -147,8 +150,9 @@ export function createDemoSession() {
     if (NOISY_DEV) sceneDocumentSchema(SCENE_VERSION).parse(doc);
     const before = sortedMasks(scene.doc), after = sortedMasks(doc);
     const masksChanged = before.length !== after.length || before.some((asset, i) => asset !== after[i]);
-    publish({ status: state.status, scene: { ...scene, doc } });
-    if (masksChanged && (doc.motion.enabled || viewEnabled())) {
+    const selected = doc.objects.some((object) => object.id === scene.selected) ? scene.selected : null;
+    publish({ status: state.status, scene: { ...scene, doc, selected } });
+    if ((masksChanged && (doc.motion.enabled || viewEnabled())) || doc.objects.some((object) => object.hidden)) {
       const current = generation;
       void requestPlateIfNeeded().catch((error: unknown) => {
         if (current === generation) publish({ ...state, status: error instanceof Error ? error.message : String(error) });
@@ -189,25 +193,24 @@ export function createDemoSession() {
     read: () => state.scene?.doc ?? null,
     generation: () => generation,
     draw: (camera, frame) => renderer?.renderView(camera, frame),
-    changed: () => publish(state),
+    changed: () => publish({ ...state, status: view.status() }),
     failed: (status) => publish({ ...state, status }),
   } satisfies ViewHost;
-  const windowView = createWindowDriver({ ...viewHost, openTracker: () => analysis.openFaceTracker() });
-  const tiltView = createTiltDriver(viewHost);
-  function viewEnabled(): boolean { return windowView.enabled() || tiltView.enabled(); }
-  function activeView() { return tiltView.enabled() ? tiltView : windowView; }
-  function stopView(): void { windowView.stop(); tiltView.stop(); }
-  async function setView(mode: 'window' | 'tilt', enabled: boolean): Promise<void> {
-    const view = mode === 'window' ? windowView : tiltView;
-    if (!enabled) { view.stop(); publish({ ...state, status: 'Ready' }); return; }
+  const cameraSource = createWindowSource({ openTracker: () => analysis.openFaceTracker() });
+  const tiltSource = createTiltSource();
+  const view = createViewDriver(viewHost, { camera: cameraSource.source, tilt: tiltSource.source });
+  function viewEnabled(): boolean { return view.enabled(); }
+  function stopView(): void { view.stop(); }
+  async function setParallax(enabled: boolean): Promise<void> {
+    if (!enabled) { stopView(); publish({ ...state, status: 'Ready' }); return; }
     if (state.scene === null || readyScene?.generation !== generation || !analysis.snapshot().modelsReady) return;
-    (mode === 'window' ? tiltView : windowView).stop();
     const current = generation;
-    publish({ ...state, status: 'Ready' });
-    await view.start();
-    if (current === generation && view.enabled()) void requestPlateIfNeeded().catch((error: unknown) => {
+    const starting = view.start();
+    // Plate preparation and a running source need not wait on the other permission.
+    if (view.enabled()) void requestPlateIfNeeded().catch((error: unknown) => {
       if (current === generation && view.enabled()) publish({ ...state, status: error instanceof Error ? error.message : String(error) });
     });
+    await starting;
   }
   function draw(scene: DemoScene): void {
     if (renderer === null) {
@@ -219,9 +222,9 @@ export function createDemoSession() {
       ...scene.doc, objects: scene.doc.objects.map((object) => object.id === refinement?.id ? { ...object, produced: preview } : object),
     };
     const masks = preview === null || preview === undefined ? scene.masks : products.forScene(doc).masks;
-    renderer.setScene({ doc, master: scene.master, masks, depth: scene.depth, plate: scene.plate, selected: scene.selected });
+    const selected = doc.objects.some((object) => object.id === scene.selected && !object.hidden) ? scene.selected : null;
+    renderer.setScene({ doc, master: scene.master, masks, depth: scene.depth, plate: scene.plate, selected });
     if (viewEnabled()) {
-      const view = activeView();
       loop.stop(); renderer.renderView(view.camera(), view.frame());
     } else if (scene.doc.motion.enabled && readyScene?.generation === generation && readyScene.id === scene.doc.id && !plateNeeded(scene.doc) &&
       (scene.doc.analysis.plate === null || scene.plate !== null)) {
@@ -231,15 +234,41 @@ export function createDemoSession() {
       loop.stop(); renderer.renderStill();
     }
   }
+  function record(edit: Edit, inverse: HistoryEntry['inverse'], doc: SceneDocument): void {
+    const masks = new Map<AssetId, Plane<'u8'>>();
+    for (const action of [edit, ...inverse]) {
+      const asset = action.kind === 'object.add' ? action.object.produced.mask.asset
+        : action.kind === 'object.refine' ? action.produced.mask.asset : null;
+      const mask = asset === null ? undefined : products.masks.get(asset);
+      if (asset !== null && mask !== undefined) masks.set(asset, mask);
+    }
+    history = push(history, { key: coalesceKey(edit), at: performance.now(), forward: [edit], inverse, masks }, doc);
+    products.retainMasks(new Set(doc.objects.map((object) => object.produced.mask.asset)));
+  }
   function edit(edit: Edit): void {
+    cancelRefinement();
     if (state.scene === null) return;
     const result = applyEdit(state.scene.doc, edit, new Date().toISOString());
     if (result.kind === 'refused') {
       publish({ ...state, status: `The edit was refused: ${result.detail}` }); return;
     }
     if (result.kind === 'unchanged') return;
-    const scene = { ...state.scene, doc: result.doc };
-    publish({ status: edit.kind === 'motion' ? state.status : 'Ready', scene });
+    record(edit, result.inverse, result.doc);
+    setDocument(result.doc);
+    if (edit.kind !== 'motion') publish({ ...state, status: viewEnabled() ? view.status() : 'Ready' });
+  }
+  function stepHistory(direction: 'undo' | 'redo'): void {
+    invalidateTaps();
+    if (state.scene === null) return;
+    const entry = history[direction].at(-1);
+    const step = direction === 'undo' ? undo(history) : redo(history);
+    if (step === null || entry === undefined) return;
+    const result = applyEdits(state.scene.doc, step.edits, new Date().toISOString());
+    if (result.kind === 'refused') { publish({ ...state, status: `The edit was refused: ${result.detail}` }); return; }
+    for (const [asset, mask] of entry.masks ?? []) products.putMask(asset, mask);
+    history = step.history;
+    products.retainMasks(new Set(result.doc.objects.map((object) => object.produced.mask.asset)));
+    setDocument(result.doc);
   }
   async function requestPlateIfNeeded(): Promise<void> {
     const current = generation;
@@ -262,7 +291,7 @@ export function createDemoSession() {
     if (state.scene === null || readyScene?.generation !== generation) return Promise.resolve();
     if (decoder === null) { publish({ ...state, status: 'Still analyzing…' }); return Promise.resolve(); }
     // Undo the preview zoom only. Parallax displacement is not undone;
-    // the remaining error is at most 2% of each frame axis.
+    // the remaining error is bounded by the document's parallax margin.
     const zoomed = (viewEnabled() && state.scene.depth !== null) || (loop.running() && effectiveOrbit(state.scene.doc.motion) > 0);
     const point = zoomed ? loopTapPoint(at, loopZoom(state.scene.doc.motion.parallax)) : at;
     const current = generation, epoch = objectEpoch;
@@ -294,6 +323,7 @@ export function createDemoSession() {
       const result = applyEdit(latest.doc, { kind: 'object.add', object }, new Date().toISOString());
       if (result.kind === 'refused') throw new Error(result.detail);
       products.putMask(asset, mask);
+      if (result.kind === 'applied') record({ kind: 'object.add', object }, result.inverse, result.doc);
       setDocument(result.doc); select(id);
     };
     pendingMask = pendingMask.then(run).catch((error: unknown) => {
@@ -316,12 +346,7 @@ export function createDemoSession() {
       !state.scene?.doc.objects.some((object) => object.produced.mask.asset === asset)) dropMask(asset);
   }
   function dropMask(asset: AssetId): void {
-    // The foundation exposes only clear/put. Retain the other resident buffers.
-    const depths = [...products.depths], masks = [...products.masks].filter(([id]) => id !== asset), plates = [...products.plates];
-    products.clear();
-    for (const [id, plane] of depths) products.putDepth(id, plane);
-    for (const [id, plane] of masks) products.putMask(id, plane);
-    for (const [id, plane] of plates) products.putPlate(id, plane);
+    products.dropMask(asset);
   }
   function cancelRefinement(): boolean {
     const current = refinement;
@@ -400,6 +425,9 @@ export function createDemoSession() {
     const size = draggedSize(current.startSize, travel);
     if (current.size === size) return;
     current.size = size; current.revision++;
+    // Page-only feedback follows the pointer without publishing a document or saving.
+    state = { ...state, refinementSize: size };
+    for (const listener of listeners) listener(state);
     scheduleRefinement(current);
   }
   async function commitRefinement(): Promise<void> {
@@ -417,7 +445,7 @@ export function createDemoSession() {
       const result = applyEdit(state.scene.doc, { kind: 'object.refine', id: current.id, produced }, new Date().toISOString());
       if (result.kind === 'refused') throw new Error(result.detail);
       refinement = null; current.resolve();
-      if (!result.doc.objects.some((object) => object.produced.mask.asset === current.original.mask.asset)) dropMask(current.original.mask.asset);
+      if (result.kind === 'applied') record({ kind: 'object.refine', id: current.id, produced }, result.inverse, result.doc);
       // Publish the committed change for autosave; the plate retains its old forMasks.
       setDocument(result.doc);
     } catch { if (refineValid(current)) cancelRefinement(); }
@@ -426,6 +454,7 @@ export function createDemoSession() {
   function installImported(imported: DemoScene, file: File, project: LoadedProject | null, current: number, refuseOnRenderError: boolean): void {
     const scene = project === null ? imported : { ...imported, doc: { ...imported.doc, id: project.document.id } };
     const previous = state.scene;
+    history = EMPTY_HISTORY;
     readyScene = { generation: current, id: scene.doc.id };
     try { publish({ status: 'Ready', scene }, refuseOnRenderError); }
     catch (error) { readyScene = null; scene.master.close(); throw error; }
@@ -446,7 +475,9 @@ export function createDemoSession() {
     const controller = new AbortController();
     importController = controller;
     invalidateTaps();
+    // Abort warming and release the resident decoder before loading the next source.
     const current = analysis.beginImport(); generation = current; pendingMask = Promise.resolve();
+    history = EMPTY_HISTORY;
     const retained = state.scene;
     // Keep the first look on refusal, with no references to products we just dropped.
     const firstLook = retained === null ? null : { ...retained, doc: { ...retained.doc, analysis: { ...retained.doc.analysis, depth: null, plate: null }, objects: [] }, selected: null };
@@ -477,6 +508,12 @@ export function createDemoSession() {
   return {
     products, projects,
     tap, select, objectAt, beginRefinement, moveRefinement, commitRefinement, cancelRefinement,
+    historyState: () => ({ canUndo: history.undo.length > 0, canRedo: history.redo.length > 0 }),
+    undo: (): void => stepHistory('undo'),
+    redo: (): void => stepHistory('redo'),
+    renameObject: (id: ObjectId, name: string): void => edit({ kind: 'object.rename', id, name }),
+    setObjectHidden: (id: ObjectId, hidden: boolean): void => edit({ kind: hidden ? 'object.hide' : 'object.show', id }),
+    deleteObject(id: ObjectId): void { invalidateTaps(); edit({ kind: 'object.remove', id }); },
     refinementProbe() {
       const current = refinement;
       return current === null ? null : { id: current.id, phase: current.phase, size: current.size,
@@ -501,6 +538,7 @@ export function createDemoSession() {
       const product = scene.doc.analysis.depth;
       const depth = product === null ? null : products.depths.get(product.map.asset) ?? null;
       products.clear();
+      history = EMPTY_HISTORY;
       let doc = baseline;
       if (product !== null && depth !== null) {
         products.putDepth(product.map.asset, depth);
@@ -578,13 +616,15 @@ export function createDemoSession() {
       return current === generation;
     },
     requestPlateIfNeeded,
-    setWindow: (enabled: boolean): Promise<void> => setView('window', enabled),
-    setTilt: (enabled: boolean): Promise<void> => setView('tilt', enabled),
-    injectOrientation: (orientation: Orientation): void => tiltView.injectOrientation(orientation),
-    injectFace: (center: Vec2 | null): void => windowView.injectFace(center),
-    windowReady: (): boolean => windowView.ready(),
-    windowFrames: (): number => windowView.trackedFrames(),
-    windowTracks: (): readonly MediaStreamTrack[] => windowView.tracks(),
+    setParallax,
+    injectOrientation: (orientation: Orientation): void => tiltSource.injectOrientation(orientation),
+    injectFace: (center: Vec2 | null): void => cameraSource.injectFace(center),
+    injectCameraFrame: cameraSource.injectCameraFrame,
+    parallaxDebug: () => ({ ...tiltSource.readings(), ...view.targets(), ...cameraSource.preview(),
+      offset: view.camera(), cameraRunning: view.ready('camera'), tiltRunning: view.ready('tilt') }),
+    windowReady: (): boolean => view.ready('camera'),
+    windowFrames: (): number => cameraSource.trackedFrames(),
+    windowTracks: (): readonly MediaStreamTrack[] => cameraSource.tracks(),
     setMotion(patch: Partial<SceneDocument['motion']>): void {
       const scene = state.scene;
       if (scene === null) throw new Error('Open a photo before enabling Motion.');
@@ -645,7 +685,7 @@ export function createDemoSession() {
     setStyle(patch: StylePatch): void { edit({ kind: 'style', patch }); },
     setSurface(patch: Partial<SceneDocument['surface']>): void { edit({ kind: 'surface', patch }); },
     setFry(fry: number): void { edit({ kind: 'fry', fry }); },
-    frame: (): number => viewEnabled() ? activeView().frame() : loop.frame(),
+    frame: (): number => viewEnabled() ? view.frame() : loop.frame(),
     renderFrameAt(frame: number): void {
       if (renderer === null) throw new Error('Open a photo before rendering.');
       renderer.renderFrame(frame);

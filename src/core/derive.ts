@@ -61,7 +61,7 @@ function drawsAfter(inner: Rect, outer: Rect): boolean {
  * nearer object that neither contains nor is contained by anything.
  */
 export function layers(doc: SceneDocument): NonEmpty<Layer> {
-  const remaining = [...doc.objects].sort(farToNear);
+  const remaining = doc.objects.filter((object) => !object.hidden).sort(farToNear);
   const placed: Layer[] = [];
   while (remaining.length > 0) {
     const ready = remaining.findIndex((candidate) => !remaining.some((other) => drawsAfter(candidate.produced.bounds, other.produced.bounds)));
@@ -289,19 +289,15 @@ export function holeRadius(doc: SceneDocument, size: Size): number {
 // the plate, the anchor, and the assets
 
 /**
- * True when a loop can uncover the back layer and the stored plate was not
- * made for the current masks: the scene has objects, motion is on and
- * something moves (the orbit is above 0, or any object's motion is not
- * `none`), and the objects' mask ids, sorted, differ from
- * `analysis.plate.forMasks` or no plate exists. With motion off a loop is the
- * still's scene with moving grain, whatever motion its objects keep, and a
- * loop at orbit 0 with no object motion moves no layer under the identity
- * camera, so neither needs a plate.
+ * True when hidden layers or motion expose the background, and the stored
+ * plate was not made for the current masks. Hidden layers need a plate even
+ * with Motion off; every mask remains in its inpaint/freshness input.
  */
 export function plateNeeded(doc: SceneDocument): boolean {
-  if (doc.objects.length === 0 || !doc.motion.enabled) return false;
-  const moves = effectiveOrbit(doc.motion) > 0 || doc.objects.some((object) => object.motion.kind !== 'none');
-  if (!moves) return false;
+  if (doc.objects.length === 0) return false;
+  const hidden = doc.objects.some((object) => object.hidden);
+  const moves = doc.motion.enabled && (effectiveOrbit(doc.motion) > 0 || doc.objects.some((object) => object.motion.kind !== 'none'));
+  if (!hidden && !moves) return false;
   return !sameValue(sortedMasks(doc), doc.analysis.plate?.forMasks ?? null);
 }
 

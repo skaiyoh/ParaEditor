@@ -380,6 +380,7 @@ export const sceneObjectSchema = z
   .strictObject({
     id: objectIdSchema,
     name: boundedText('objects[].name'),
+    hidden: z.boolean().default(false),
     subject: z.boolean(),
     recolor: recolorSchema,
     symbols: z.enum(['slider', 'always', 'never']),

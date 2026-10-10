@@ -367,7 +367,7 @@ test('parseDocumentWith types its documents at its table\'s length, and parseDoc
   assert.ok(result.ok);
   const version: 2 = result.value.version;
   assert.equal(version, 2);
-  // Both the synthetic chain and the current document now have version 2.
-  const current: SceneDocument = result.value;
-  assert.equal(current.version, 2);
+  const current = parseDocument(result.value);
+  assert.ok(current.ok);
+  assert.equal(current.value.version, real.SCENE_VERSION);
 });

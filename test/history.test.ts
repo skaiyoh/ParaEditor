@@ -335,3 +335,39 @@ test('undo after a depth product lands keeps the depth, and a product never ente
   // @ts-expect-error a product is not an edit
   const _product: HistoryEntry = { key: null, at: 0, forward: [{ kind: 'depth', depth: depthProduct(3) }], inverse: [{ kind: 'style', patch: {} }] };
 });
+
+
+test('layer rename, hide, show and delete remain distinct reversible steps', () => {
+  const before = fiveClusterDocument();
+  const object = before.objects[0];
+  assert.ok(object);
+  let session = open(before);
+  for (const [at, change] of ([
+    { kind: 'object.rename', id: object.id, name: 'Renamed' },
+    { kind: 'object.hide', id: object.id },
+    { kind: 'object.show', id: object.id },
+    { kind: 'object.remove', id: object.id },
+  ] satisfies readonly Edit[]).entries()) session = edit(session, change satisfies Edit, at);
+  assert.equal(session.history.undo.length, 4);
+  for (let at = 5; at < 9; at++) session = stepBack(session, at);
+  assert.deepEqual(content(session.doc), content(before));
+  for (let at = 9; at < 13; at++) session = stepForward(session, at);
+  assert.ok(!session.doc.objects.some((entry) => entry.id === object.id));
+});
+
+test('history owns a deleted mask through undo and redo without copying its bytes', () => {
+  const before = fiveClusterDocument(), object = before.objects[0];
+  assert.ok(object);
+  const change: Edit = { kind: 'object.remove', id: object.id };
+  const result = applyEdit(before, change, stamp(0));
+  assert.equal(result.kind, 'applied');
+  if (result.kind !== 'applied') return;
+  const plane = { format: 'u8', size: { width: 1, height: 1 }, data: new Uint8Array([255]) } satisfies import('../src/core/raster.ts').Plane<'u8'>;
+  const masks = new Map([[object.produced.mask.asset, plane]]);
+  const history = push(EMPTY_HISTORY, { key: null, at: 0, forward: [change], inverse: result.inverse, masks }, result.doc);
+  const back = undo(history);
+  assert.equal(back?.history.redo[0]?.masks?.get(object.produced.mask.asset), plane);
+  assert.ok(back);
+  const forward = redo(back.history);
+  assert.equal(forward?.history.undo[0]?.masks?.get(object.produced.mask.asset), plane);
+});

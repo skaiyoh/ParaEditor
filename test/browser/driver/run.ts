@@ -110,6 +110,9 @@ function matches(pattern: MessagePattern, entry: ConsoleEntry): boolean {
   );
 }
 
+/** The third-party origins the header contract admits (headers.json): Cloudflare Web Analytics, kept by Nathan on 2026-10-10. */
+const ADMITTED_ORIGINS: ReadonlySet<string> = new Set(['https://static.cloudflareinsights.com', 'https://cloudflareinsights.com']);
+
 function foreignRequests(requests: readonly RequestEntry[], origin: string): readonly RequestEntry[] {
   return requests.filter((r) => {
     let url: URL;
@@ -118,7 +121,7 @@ function foreignRequests(requests: readonly RequestEntry[], origin: string): rea
     } catch {
       return true;
     }
-    return !LOCAL_SCHEMES.has(url.protocol) && url.origin !== origin;
+    return !LOCAL_SCHEMES.has(url.protocol) && url.origin !== origin && !ADMITTED_ORIGINS.has(url.origin);
   });
 }
 

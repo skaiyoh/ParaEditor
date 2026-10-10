@@ -24,6 +24,10 @@ export function createProducts() {
     get plates(): ReadonlyMap<AssetId, Rgb8> { return plates; },
     putDepth: (asset: AssetId, plane: Plane<'f32'>): void => { depths.set(asset, plane); },
     putMask: (asset: AssetId, plane: Plane<'u8'>): void => { masks.set(asset, plane); },
+    dropMask: (asset: AssetId): void => { masks.delete(asset); },
+    retainMasks(assets: ReadonlySet<AssetId>): void {
+      for (const asset of masks.keys()) if (!assets.has(asset)) masks.delete(asset);
+    },
     putPlate: (asset: AssetId, image: Rgb8): void => { plates.clear(); plates.set(asset, image); },
     clear(): void { depths.clear(); masks.clear(); plates.clear(); },
     forScene(doc: SceneDocument): { masks: ReadonlyMap<ObjectId, Plane<'u8'>>; depth: Plane<'f32'> | null; plate: Rgb8 | null } {

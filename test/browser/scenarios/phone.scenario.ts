@@ -5,7 +5,7 @@ const pointSchema = z.object({ x: z.number(), y: z.number() });
 const resultSchema = z.object({
   center: z.number(), positive: z.number(), negative: z.number(),
   positiveY: z.number(), negativeY: z.number(), centerY: z.number(), clamped: z.boolean(),
-  stillMatches: z.boolean(), windowExcludesTilt: z.boolean(), tiltExcludesWindow: z.boolean(),
+  stillMatches: z.boolean(), bothSources: z.boolean(),
   tracksStopped: z.boolean(), timedOut: z.boolean(), timeoutMs: z.number(),
   motionAdvances: z.boolean(), motionOffZero: z.boolean(), loopResumes: z.boolean(),
   deniedSafe: z.boolean(), stalePermissionSafe: z.boolean(), permissionInGesture: z.boolean(),
@@ -50,7 +50,7 @@ function phoneLayout(): unknown {
 }
 
 export const scenarios: readonly Scenario[] = [{
-  id: 'phone.tilt', title: 'Touch photo capture and orientation share the Window view driver', target: 'dev', covers: ['PH1', 'PH3'], timeoutMs: 300_000,
+  id: 'phone.tilt', title: 'Touch photo capture, Parallax orientation, fusion and source cancellation', target: 'dev', covers: ['PH1', 'PH3'], timeoutMs: 300_000,
   async run(t) {
     const { page } = t;
     await page.goto('/');
@@ -65,6 +65,10 @@ export const scenarios: readonly Scenario[] = [{
       return untouched;
     });
     try {
+      // Touch capability adds a header action and shifts the sample button.
+      // Wait for that render before the driver samples its click coordinates.
+      await page.waitFor('touch controls rendered', z.literal(true), () =>
+        document.querySelector('[data-testid="take-photo"]') instanceof HTMLButtonElement ? true : null);
       await page.click('[data-testid="try-sample"]');
       await page.waitFor('sample depth and decoder', z.literal(true), () => {
         const analysis = window.__noisyTest?.demo.analysis();
@@ -73,11 +77,10 @@ export const scenarios: readonly Scenario[] = [{
       const result = await page.evaluate(resultSchema, async (desktopUnchanged: boolean) => {
         const test = window.__noisyTest, renderer = test?.session?.renderer(), demo = test?.demo;
         if (renderer === null || renderer === undefined || demo === undefined) throw new Error('No renderer or dev surface.');
-        const tilt = document.querySelector('[data-testid="tilt-enabled"]');
-        const windowButton = document.querySelector('[data-testid="window-enabled"]');
+        const tilt = document.querySelector('[data-testid="parallax-enabled"]');
         const takePhoto = document.querySelector('[data-testid="take-photo"]');
         const stage = document.querySelector('[data-testid="stage"]');
-        if (!(tilt instanceof HTMLButtonElement) || !(windowButton instanceof HTMLButtonElement) ||
+        if (!(tilt instanceof HTMLButtonElement) ||
             !(takePhoto instanceof HTMLButtonElement) || !(stage instanceof HTMLCanvasElement)) throw new Error('No phone controls or stage.');
         const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
         const next = <T>(read: () => T): Promise<T> => new Promise((resolve) => requestAnimationFrame(() => resolve(read())));
@@ -93,7 +96,7 @@ export const scenarios: readonly Scenario[] = [{
         for (let y = 36; y < 60; y++) for (let x = 48; x < 80; x++) { const i = y * size.width + x; mask[i] = 255; depth[i] = 1; }
         const sampleTimings = demo.analysis().timings;
         const desktopModes = Array.from(document.querySelectorAll('.bottom-bar .mode-rail button')).map((button) => button.textContent);
-        desktopUnchanged &&= desktopModes.join(',') === 'Motion,Symbols,Window,Tilt';
+        desktopUnchanged &&= desktopModes.join(',') === 'Motion,Symbols,Parallax';
         demo.injectMask({ ...size, data: mask });
         await wait(() => demo.objects().length > 0, 10_000);
         demo.injectDepth({ format: 'f32', size, data: depth }); demo.select(null);
@@ -114,6 +117,8 @@ export const scenarios: readonly Scenario[] = [{
         const permission = (request: () => Promise<string>): void => {
           Object.defineProperty(DeviceOrientationEvent, 'requestPermission', { configurable: true, value: request });
         };
+        const media = navigator.mediaDevices, getUserMedia = media.getUserMedia;
+        media.getUserMedia = () => Promise.reject(new DOMException('Scenario isolates tilt.', 'NotAllowedError'));
         const rest = { beta: 35, gamma: 8 };
         try {
           demo.injectScreenAngle(0);
@@ -175,21 +180,22 @@ export const scenarios: readonly Scenario[] = [{
           tilt.click(); await sleep(0); demo.injectOrientation({ beta: 60, gamma: -12 });
           await sleep(700); const freshCenter = await next(centroid);
           const recentered = Math.abs(freshCenter.x - center.x) < 1 && Math.abs(freshCenter.y - center.y) < 1;
-          windowButton.click();
-          await wait(() => on(windowButton) && !on(tilt) && demo.windowReady());
-          const windowExcludesTilt = !on(tilt);
-          const tracks = demo.windowTracks();
-          tilt.click(); await sleep(0); demo.injectOrientation(rest);
-          await wait(() => on(tilt) && !on(windowButton));
-          const tiltExcludesWindow = !on(windowButton), tracksStopped = tracks.length > 0 && tracks.every((track) => track.readyState === 'ended');
           tilt.click(); await next(() => undefined);
+          media.getUserMedia = getUserMedia;
+          tilt.click(); await sleep(0); demo.injectOrientation(rest);
+          await wait(() => on(tilt) && demo.windowReady() && demo.parallaxDebug().tiltRunning);
+          const bothSources = document.querySelector('[data-testid="status"]')?.textContent?.startsWith('Parallax: camera and tilt') === true;
+          const tracks = demo.windowTracks();
+          tilt.click(); await next(() => undefined);
+          const tracksStopped = tracks.length > 0 && tracks.every((track) => track.readyState === 'ended');
+          media.getUserMedia = () => Promise.reject(new DOMException('Scenario isolates tilt.', 'NotAllowedError'));
           const timeoutStart = performance.now(); tilt.click();
-          await wait(() => !on(tilt) && document.querySelector('[data-testid="status"]')?.textContent?.startsWith('Tilt unavailable') === true, 5000);
+          await wait(() => !on(tilt) && document.querySelector('[data-testid="status"]')?.textContent?.includes('Tilt unavailable') === true, 5000);
           const timeoutMs = performance.now() - timeoutStart, timedOut = timeoutMs >= 1900 && timeoutMs < 5000;
 
           permission(() => Promise.resolve('denied')); tilt.click();
           await next(() => undefined);
-          await wait(() => !on(tilt) && document.querySelector('[data-testid="status"]')?.textContent?.startsWith('Tilt unavailable') === true);
+          await wait(() => !on(tilt) && document.querySelector('[data-testid="status"]')?.textContent?.includes('Tilt unavailable') === true);
           const deniedSafe = !on(tilt);
           let allow = (_: string): void => {};
           permission(() => new Promise<string>((resolve) => { allow = resolve; }));
@@ -215,13 +221,13 @@ export const scenarios: readonly Scenario[] = [{
           // An empty patch is UNCHANGED in the reducer and publishes nothing; a real grain change makes the rails re-render.
           demo.setStyle({ grain: (demo.document()?.style.grain ?? 0) > 0.5 ? 0.25 : 0.75 }); await next(() => undefined);
           desktopUnchanged &&= document.querySelector('[data-testid="take-photo"]') === null &&
-            document.querySelector('[data-testid="tilt-enabled"]') === null &&
-            Array.from(document.querySelectorAll('.bottom-bar .mode-rail button')).map((button) => button.textContent).join(',') === 'Motion,Symbols,Window';
+            Array.from(document.querySelectorAll('.bottom-bar .mode-rail button')).map((button) => button.textContent).join(',') === 'Motion,Symbols,Parallax';
           return { center: center.x, centerY: center.y, positive: positive.x, negative: negative.x, positiveY: positiveY.y, negativeY: negativeY.y,
-            clamped, stillMatches, windowExcludesTilt, tiltExcludesWindow, tracksStopped, timedOut, timeoutMs,
+            clamped, stillMatches, bothSources, tracksStopped, timedOut, timeoutMs,
             motionAdvances, motionOffZero, loopResumes, deniedSafe, stalePermissionSafe, permissionInGesture: calledSynchronously,
             recentered, cameraInput, cameraImported, desktopUnchanged, plateJoined, sampleTimings, rotations, activeRotation };
         } finally {
+          media.getUserMedia = getUserMedia;
           demo.injectScreenAngle(null);
           if (permissionDescriptor === undefined) Reflect.deleteProperty(DeviceOrientationEvent, 'requestPermission');
           else Object.defineProperty(DeviceOrientationEvent, 'requestPermission', permissionDescriptor);
@@ -250,12 +256,12 @@ export const scenarios: readonly Scenario[] = [{
           Math.abs(gamma.x - expectedGammaX) < 1 && Math.abs(gamma.y - expectedGammaY) < 1 &&
           Math.abs(beta.x - expectedBetaX) < 1 && Math.abs(beta.y - expectedBetaY) < 1, rotation);
       }
-      t.ok('rotating an active Tilt session preserves its physical rest pose', Math.abs(result.activeRotation.x - result.center) < 1 &&
+      t.ok('rotating an active Parallax session preserves its physical rest pose', Math.abs(result.activeRotation.x - result.center) < 1 &&
         Math.abs(result.activeRotation.y - result.centerY) < 1, result.activeRotation);
-      t.ok('Tilt off restores frame zero at four opaque sampled points', result.stillMatches, result);
-      t.ok('Window and Tilt exclude each other and the stopped camera tracks end', result.windowExcludesTilt && result.tiltExcludesWindow && result.tracksStopped, result);
+      t.ok('Parallax off restores frame zero at four opaque sampled points', result.stillMatches, result);
+      t.ok('camera and tilt run together and Parallax off ends the camera tracks', result.bothSources && result.tracksStopped, result);
       t.ok('no orientation within two seconds reports Tilt unavailable and turns off', result.timedOut, result);
-      t.ok('Tilt uses the shared motion clock, plate request and stop path', result.motionAdvances && result.motionOffZero && result.loopResumes && result.plateJoined, result);
+      t.ok('Parallax uses the shared motion clock, plate request and stop path', result.motionAdvances && result.motionOffZero && result.loopResumes && result.plateJoined, result);
       t.ok('permission runs in the click stack, denial stays off and late grants cannot restart', result.permissionInGesture && result.deniedSafe && result.stalePermissionSafe, result);
       t.ok('each enable captures a fresh rest pose', result.recentered, result);
       t.ok('Take a photo opens an environment capture input and its JPEG imports through the change event', result.cameraInput && result.cameraImported, result);
@@ -317,10 +323,10 @@ export const scenarios: readonly Scenario[] = [{
           box.left >= 0 && box.top >= 0 && box.right <= viewport.width && box.bottom <= viewport.height;
         t.ok(`${label}: no horizontal overflow or page scroll`, result.scrollWidth === viewport.width && result.scrollHeight === viewport.height && result.scrollX === 0 && result.scrollY === 0, result);
         t.ok(`${label}: stage spans the viewport width and at least half its height`, stage.left === 0 && stage.width === viewport.width && stage.height >= viewport.height / 2, stage);
-        t.ok(`${label}: five toolbar buttons stay inside the viewport and are at least 44 px tall`, inside(toolbar) && buttons.length === 5 && buttons.every((button) => inside(button.box) && button.box.height >= 44), result);
-        t.equal(`${label}: modes precede Download`, buttons.map((button) => button.label), ['Motion', 'Symbols', 'Window', 'Tilt', 'Download']);
-        t.ok(`${label}: modes are toggles and Download is accent-filled`, buttons.slice(0, 4).every((button) => button.pressed === 'true' || button.pressed === 'false') &&
-          buttons[4]?.background === 'rgb(255, 61, 127)' && result.accent.toUpperCase() === '#FF3D7F', buttons);
+        t.ok(`${label}: four toolbar buttons stay inside the viewport and are at least 44 px tall`, inside(toolbar) && buttons.length === 4 && buttons.every((button) => inside(button.box) && button.box.height >= 44), result);
+        t.equal(`${label}: modes precede Download`, buttons.map((button) => button.label), ['Motion', 'Symbols', 'Parallax', 'Download']);
+        t.ok(`${label}: modes are toggles and Download is accent-filled`, buttons.slice(0, 3).every((button) => button.pressed === 'true' || button.pressed === 'false') &&
+          buttons[3]?.background === 'rgb(255, 61, 127)' && result.accent.toUpperCase() === '#FF3D7F', buttons);
         t.ok(`${label}: the status sentence is visible`, inside(status), status);
         t.ok(`${label}: desktop panels are absent and the stage suppresses browser gestures`, result.desktopAbsent && result.touchAction === 'none', result);
       };
@@ -357,14 +363,45 @@ export const scenarios: readonly Scenario[] = [{
       await checkLayout('402 selected');
       await page.screenshot('phone-402-selected');
 
-      await page.click('[data-testid="tilt-enabled"]');
+      await page.click('[data-testid="parallax-enabled"]');
       await page.evaluate(z.literal(true), () => { window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', { beta: 35, gamma: 8 })); return true; });
-      await page.waitFor('Tilt turns on and collapses the sheet', z.literal(true), () => document.querySelector('[data-testid="tilt-enabled"]')?.getAttribute('aria-pressed') === 'true' &&
+      await page.waitFor('Tilt turns on and collapses the sheet', z.literal(true), () => document.querySelector('[data-testid="parallax-enabled"]')?.getAttribute('aria-pressed') === 'true' &&
         document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'false' ? true : null);
       await checkLayout('402 Tilt collapsed');
       await page.screenshot('phone-402-collapsed');
-      await page.click('[data-testid="tilt-enabled"]');
-      await page.waitFor('Tilt turns off without reopening the sheet', z.literal(true), () => document.querySelector('[data-testid="tilt-enabled"]')?.getAttribute('aria-pressed') === 'false' &&
+      await page.waitFor('camera and tilt are running together on the phone', z.literal(true), () => {
+        const debug = window.__noisyTest?.demo.parallaxDebug();
+        return debug?.cameraRunning && debug.tiltRunning ? true : null;
+      }, { timeoutMs: 60_000 });
+      await page.evaluate(z.literal(true), () => {
+        const demo = window.__noisyTest?.demo; if (demo === undefined) throw new Error('No phone dev surface.');
+        const pixels = new ImageData(320, 240);
+        for (let i = 0; i < pixels.data.length; i += 4) { pixels.data[i] = 80; pixels.data[i + 1] = 120; pixels.data[i + 2] = 160; pixels.data[i + 3] = 255; }
+        demo.injectScreenAngle(0); demo.injectOrientation({ beta: 35, gamma: 12 });
+        demo.injectCameraFrame(pixels, { center: { x: .4, y: .5 }, size: .25 });
+        return true;
+      });
+      await page.click('.sheet-handle');
+      await page.click('[data-testid="parallax-debug-toggle"]');
+      await page.click('.sheet-handle');
+      await page.waitFor('phone debug numbers and frame are visible', z.literal(true), () => {
+        const panel = document.querySelector('[data-testid="parallax-debug"]');
+        const frame = document.querySelector('[data-testid="parallax-debug-frame"]');
+        if (!(panel instanceof HTMLElement) || !(frame instanceof HTMLCanvasElement)) return null;
+        const box = panel.getBoundingClientRect(), status = document.querySelector('.sheet-handle')?.getBoundingClientRect();
+        const pixel = frame.getContext('2d')?.getImageData(0, 0, 1, 1).data;
+        return box.width === 200 && box.left >= 0 && box.right === innerWidth - 12 && status !== undefined &&
+          Math.abs(status.top - box.bottom - 12) < 1 && document.querySelector('[data-testid="parallax-beta"]')?.textContent === '35.00' &&
+          document.querySelector('[data-testid="parallax-gamma"]')?.textContent === '12.00' && pixel?.[0] === 80 && pixel[3] === 255 ? true : null;
+      });
+      await page.screenshot('parallax-phone-402');
+      await page.click('.sheet-handle');
+      await page.click('[data-testid="parallax-debug-toggle"]');
+      await page.click('.sheet-handle');
+      await page.evaluate(z.literal(true), () => { window.__noisyTest?.demo.injectScreenAngle(null); return true; });
+
+      await page.click('[data-testid="parallax-enabled"]');
+      await page.waitFor('Tilt turns off without reopening the sheet', z.literal(true), () => document.querySelector('[data-testid="parallax-enabled"]')?.getAttribute('aria-pressed') === 'false' &&
         document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'false' ? true : null);
       await page.click('.sheet-handle');
       await page.emulate({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
