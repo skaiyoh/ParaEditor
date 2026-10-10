@@ -1,0 +1,99 @@
+{
+  "lockVersion": 1,
+  "models": {
+    "depth": {
+      "modelId": "depth@93f29a2d6a5cd42387265ddcc406abddf6d6f1422f1d65f3ed63e20b1da45a32",
+      "repo": "onnx-community/depth-anything-v2-small",
+      "commit": "4472b7362082ad9968fee890ca0f1e5aca36b93d",
+      "license": "Apache-2.0",
+      "licenseSource": "https://huggingface.co/onnx-community/depth-anything-v2-small",
+      "files": [
+        {
+          "session": "depth",
+          "role": "graph",
+          "source": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model_quantized.onnx",
+          "sha256": "fcf51f1b230362b28690bb9d1809bf0431f29cad20534e3f589bd7285547f20d",
+          "bytes": 27258801,
+          "served": "/models/depth-fcf51f1b.onnx"
+        }
+      ]
+    },
+    "sam": {
+      "modelId": "sam@834a20140bba6d7d2a0a5afa9af14b41ff0bfb1cafc01edd594e515468d3b908",
+      "repo": "onnx-community/sam2.1-hiera-tiny-ONNX",
+      "commit": "814a066640debee5a91e70aa401fb8e17e030503",
+      "license": "Apache-2.0",
+      "licenseSource": "https://huggingface.co/facebook/sam2.1-hiera-tiny",
+      "files": [
+        {
+          "session": "encoder",
+          "role": "graph",
+          "source": "https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/814a066640debee5a91e70aa401fb8e17e030503/onnx/vision_encoder_quantized.onnx",
+          "sha256": "8800fdd04b9045cb6060ba8962b83c78ce9bb0976da8f030afa073467a888524",
+          "bytes": 441167,
+          "served": "/models/sam-8800fdd0.onnx"
+        },
+        {
+          "session": "encoder",
+          "role": "external-data",
+          "source": "https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/814a066640debee5a91e70aa401fb8e17e030503/onnx/vision_encoder_quantized.onnx_data",
+          "sha256": "ea1f677596dc82cef0dc317d78135d892f4b26e20a4439f899aa58d84965b324",
+          "bytes": 52573088,
+          "served": "/models/sam-ea1f6775.onnx_data",
+          "externalDataPath": "vision_encoder_quantized.onnx_data"
+        },
+        {
+          "session": "decoder",
+          "role": "graph",
+          "source": "https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/814a066640debee5a91e70aa401fb8e17e030503/onnx/prompt_encoder_mask_decoder_quantized.onnx",
+          "sha256": "a5f31dba5a7f03203dc3a130fdd7766f0fea952eb4aac1f55458549170eb51ff",
+          "bytes": 290416,
+          "served": "/models/sam-a5f31dba.onnx"
+        },
+        {
+          "session": "decoder",
+          "role": "external-data",
+          "source": "https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/814a066640debee5a91e70aa401fb8e17e030503/onnx/prompt_encoder_mask_decoder_quantized.onnx_data",
+          "sha256": "fdb3179a32388267a944a416c0f992c77a138b69a4bfd94f0bbf7089430d7489",
+          "bytes": 8662016,
+          "served": "/models/sam-fdb3179a.onnx_data",
+          "externalDataPath": "prompt_encoder_mask_decoder_quantized.onnx_data"
+        }
+      ]
+    },
+    "migan": {
+      "modelId": "migan@f91d99a0a6414b86e38c15c1f889538c6e7eb965fc075281c900d720bc6d7f48",
+      "repo": "andraniksargsyan/migan",
+      "commit": "406830d0fa60666da0071c342ad2fbc8f30c5c64",
+      "license": "MIT",
+      "licenseSource": "https://github.com/Picsart-AI-Research/MI-GAN/blob/main/LICENSE-WEIGHTS",
+      "files": [
+        {
+          "session": "migan",
+          "role": "graph",
+          "source": "https://huggingface.co/andraniksargsyan/migan/resolve/406830d0fa60666da0071c342ad2fbc8f30c5c64/migan_pipeline_v2.onnx",
+          "sha256": "6f1f3530a1a2324b19752018ce756088b07973cda8d7d890034ace5c8a48c40b",
+          "bytes": 28079181,
+          "served": "/models/migan-6f1f3530.onnx"
+        }
+      ]
+    },
+    "face": {
+      "modelId": "face@f6d68add9cf8b223b024f38f83349aff59bcfb6d764fb4effd21d04e87984dc7",
+      "repo": "onnxmodelzoo/version-RFB-320",
+      "commit": "6fd293d22b523ec88959f104b8eef5395e3adfbc",
+      "license": "MIT",
+      "licenseSource": "https://huggingface.co/onnxmodelzoo/version-RFB-320/blob/6fd293d22b523ec88959f104b8eef5395e3adfbc/README.md#license",
+      "files": [
+        {
+          "session": "face",
+          "role": "graph",
+          "source": "https://huggingface.co/onnxmodelzoo/version-RFB-320/resolve/6fd293d22b523ec88959f104b8eef5395e3adfbc/version-RFB-320.onnx",
+          "sha256": "34cd7e60aeff28744c657de7a3dc64e872d506741de66987f3426f2b79f88017",
+          "bytes": 1270727,
+          "served": "/models/face-34cd7e60.onnx"
+        }
+      ]
+    }
+  }
+}

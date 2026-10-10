@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Index Print</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden;background:#FAF7EE;color:#1B1B1B;font:14px/1.3 system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif}
+.k{font-family:"Barlow Condensed",system-ui,sans-serif;font-size:13px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:#1B1B1B}
+.rail{position:absolute;left:0;top:0;width:168px;height:856px;background:#FFFFFF;border-right:1px solid #E2DCCB;padding:14px;display:flex;flex-direction:column;gap:8px}
+.btn{height:36px;display:flex;align-items:center;padding:0 12px;background:#F2C53D;font:600 13px "Barlow Condensed",sans-serif;letter-spacing:.04em;text-transform:uppercase;border-radius:3px}
+.btn.ink{background:#1B1B1B;color:#fff}
+.btn.ghost{background:#fff;border:1px solid #E2DCCB;color:#6B6657}
+.index{display:flex;flex-direction:column;gap:6px;margin:8px 0;padding:8px;background:#F5F1E3;border:1px solid #E2DCCB}
+.fr{height:60px;position:relative;background:repeating-conic-gradient(from 0deg,#8FD03F 0 25%,#E4C84A 0 50%) 0 0/30px 18px;filter:saturate(var(--s,1)) contrast(var(--c,1));box-shadow:0 0 0 1px #E2DCCB}
+.fr span{position:absolute;left:4px;bottom:3px;font:700 10px "Barlow Condensed",sans-serif;letter-spacing:.06em;text-transform:uppercase;color:#fff;text-shadow:0 1px 0 #000}
+.fr b{position:absolute;right:4px;top:3px;font:700 10px "Barlow Condensed",sans-serif;color:#fff;text-shadow:0 1px 0 #000}
+.fr.live{box-shadow:0 0 0 3px #FF7A1A}
+.fr.live b{color:#FF7A1A;text-shadow:none;background:#1B1B1B;padding:0 4px}
+.center{position:absolute;left:168px;top:0;width:888px;height:856px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px}
+.stage{width:840px;height:630px;position:relative;box-shadow:0 0 0 6px #fff,0 0 0 7px #E2DCCB;background:
+ radial-gradient(circle at 46% 36%,#9BE36A 0 9%,#2F8A3A 9.5% 14%,transparent 14.5%),
+ repeating-conic-gradient(from 0deg at 50% 50%,#8FD03F 0 25%,#E4C84A 0 50%) 0 0/150px 90px}
+.stage:after{content:"";position:absolute;inset:0;background:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='1' height='1' fill='%23000' opacity='.2'/></svg>");opacity:.5;mix-blend-mode:multiply}
+.stamp{position:absolute;right:14px;bottom:10px;font:700 18px "Barlow Condensed",sans-serif;letter-spacing:.12em;color:#FF7A1A;text-shadow:0 0 2px #7a2a00;z-index:2}
+.swatches{width:840px;height:56px;display:flex;align-items:center;gap:8px}
+.sw{height:36px;min-width:72px;padding:0 12px;display:flex;align-items:center;justify-content:center;border-radius:18px;font:600 12px "Barlow Condensed",sans-serif;letter-spacing:.04em;text-transform:uppercase;color:#fff}
+.sw.orig,.sw.desel{background:#fff;color:#1B1B1B;border:1px solid #1B1B1B}
+.panel{position:absolute;left:1056px;top:0;width:384px;height:856px;background:#FFFFFF;border-left:1px solid #E2DCCB;display:flex;flex-direction:column}
+.tabs{display:flex;height:48px;gap:4px;padding:8px 12px 0}
+.tab{flex:1;display:flex;align-items:center;justify-content:center;font:700 13px "Barlow Condensed",sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#6B6657;background:#F5F1E3;border-radius:3px 3px 0 0}
+.tab.on{background:#F2C53D;color:#1B1B1B}
+.group{padding:14px 20px 4px}
+.group .k{display:block;margin-bottom:8px;color:#6B6657}
+.row{display:grid;grid-template-columns:116px 1fr 44px;align-items:center;gap:10px;height:33px}
+.row.big{height:48px}
+.lab{font-size:13px}
+.track{height:12px;background:#F5F1E3;border-radius:6px;position:relative}
+.row.big .track{height:18px;border-radius:9px}
+.track i{position:absolute;left:0;top:0;bottom:0;background:#F2C53D;border-radius:inherit;width:var(--v)}
+.row.big .track i{background:#FF7A1A}
+.track u{position:absolute;top:50%;left:var(--v);width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:#1B1B1B}
+.val{font:12px ui-monospace,Menlo,monospace;text-align:right}
+.tg{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 20px}
+.tg div{height:38px;border-radius:19px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font:600 13px "Barlow Condensed",sans-serif;letter-spacing:.04em;text-transform:uppercase;background:#F5F1E3}
+.tg .on{background:#1B1B1B;color:#F2C53D}
+.strip{position:absolute;left:0;top:856px;width:1440px;height:44px;background:#1B1B1B;color:#FAF7EE;display:flex;align-items:center;gap:28px;padding:0 24px;font-size:14px;font-weight:600}
+.strip small{font-weight:500;color:#C9C2AE}
+.strip .right{margin-left:auto;font:600 12px "Barlow Condensed",sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#FF7A1A}
+.modes{display:flex;flex-direction:column;gap:6px;margin:8px 0;padding:10px;background:#F5F1E3;border:1px solid #E2DCCB}.mode{height:40px;display:flex;align-items:center;gap:10px;font:600 13px "Barlow Condensed",sans-serif;letter-spacing:.04em;text-transform:uppercase}.mode i{width:18px;height:18px;border:2px solid #1B1B1B;background:#fff}.mode.on i{background:#FF7A1A;border-color:#FF7A1A}
+</style></head><body>
+<div class="rail">
+  <div class="btn">Open</div><div class="btn">Try a sample</div>
+  <div class="modes">
+    <span class="k">Modes</span>
+    <div class="mode on"><i></i>Window</div>
+    <div class="mode"><i></i>3DS stream</div>
+    <div class="mode"><i></i>Motion</div>
+    <div class="mode"><i></i>Symbols</div>
+  </div>
+  <div class="btn ink" style="margin-top:auto">Download</div><div class="btn ink">Send to 3DS</div><div class="btn ghost">Publish</div><div class="btn ghost">Reset</div>
+</div>
+<div class="center">
+  <div class="stage"><div class="stamp">'26 10 11</div></div>
+  <div class="swatches"><span class="k">Object color</span><span class="sw orig">Original</span><span class="sw" style="background:#E26A5A">Coral</span><span class="sw" style="background:#E88A3A">Orange</span><span class="sw" style="background:#C9A227">Gold</span><span class="sw" style="background:#3E9A5A">Green</span><span class="sw" style="background:#2E9A9A">Turquoise</span><span class="sw" style="background:#3E6FD6">Blue</span><span class="sw" style="background:#7B5BD6">Violet</span><span class="sw" style="background:#D65A9A">Pink</span><span class="sw desel">Deselect</span></div>
+</div>
+<div class="panel">
+  <div class="tabs"><div class="tab on">Look</div><div class="tab">Effects</div><div class="tab">Motion</div><div class="tab">Symbols</div></div>
+  <div class="group"><span class="k">Dial</span><div class="row big"><span class="lab">Fry</span><div class="track" style="--v:60%"><i></i><u></u></div><span class="val">0.60</span></div></div>
+  <div class="group"><span class="k">Palette</span>
+    <div class="row"><span class="lab">Colors</span><div class="track" style="--v:50%"><i></i><u></u></div><span class="val">7</span></div>
+    <div class="row"><span class="lab">Bands</span><div class="track" style="--v:50%"><i></i><u></u></div><span class="val">4</span></div>
+    <div class="row"><span class="lab">Saturation</span><div class="track" style="--v:62%"><i></i><u></u></div><span class="val">0.62</span></div>
+    <div class="row"><span class="lab">Simplify</span><div class="track" style="--v:52%"><i></i><u></u></div><span class="val">0.52</span></div>
+    <div class="row"><span class="lab">Outline</span><div class="track" style="--v:40%"><i></i><u></u></div><span class="val">0.40</span></div>
+    <div class="row"><span class="lab">Subject clarity</span><div class="track" style="--v:60%"><i></i><u></u></div><span class="val">0.60</span></div>
+  </div>
+  <div class="group"><span class="k">Camera</span>
+    <div class="row"><span class="lab">Grain</span><div class="track" style="--v:52%"><i></i><u></u></div><span class="val">0.52</span></div>
+    <div class="row"><span class="lab">Color noise</span><div class="track" style="--v:32%"><i></i><u></u></div><span class="val">0.32</span></div>
+    <div class="row"><span class="lab">Grain size</span><div class="track" style="--v:33%"><i></i><u></u></div><span class="val">2</span></div>
+    <div class="row"><span class="lab">Crunch</span><div class="track" style="--v:42%"><i></i><u></u></div><span class="val">0.42</span></div>
+    <div class="row"><span class="lab">Clipping</span><div class="track" style="--v:30%"><i></i><u></u></div><span class="val">0.30</span></div>
+  </div>
+</div>
+<div class="strip"><span>Ready to tap</span><small>depth 2.0 s · encoder 2.4 s · 4 models local</small><small>1 object · Green</small><span class="right">window on · build 7c9f50d</span></div>
+</body></html>

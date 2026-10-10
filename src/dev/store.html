@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>noisy store</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <script type="module" src="%NOISY_SCRIPT%"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Store</h1>
+      <p>Write saves a test record through the store's connection, which reopens and retries once when the connection was lost. The page counts each <code>store.reconnect</code> and posts every write to the results sink.</p>
+      <button type="button" id="write" data-testid="write" disabled>Write</button>
+      <p id="status" data-testid="status">No write yet.</p>
+      <p id="reconnects" data-testid="reconnects">store.reconnect: 0</p>
+      <section id="levers" data-testid="levers" hidden>
+        <h2>Connection levers</h2>
+        <button type="button" id="add-duplicate" data-testid="add-duplicate">Add duplicate</button>
+        <button type="button" id="read-many" data-testid="read-many">Read many</button>
+        <button type="button" id="inject-1" data-testid="inject-1">Inject 1 error</button>
+        <button type="button" id="inject-2" data-testid="inject-2">Inject 2 errors</button>
+        <button type="button" id="clear-injection" data-testid="clear-injection">Clear injection</button>
+        <button type="button" id="close-handle" data-testid="close-handle">Close handle</button>
+        <button type="button" id="upgrade" data-testid="upgrade">Upgrade to version 2</button>
+        <h2>Scene lock levers</h2>
+        <button type="button" id="hold" data-testid="hold">Hold</button>
+        <button type="button" id="release" data-testid="release">Release</button>
+        <button type="button" id="release-reject" data-testid="release-reject">Release by rejecting</button>
+        <button type="button" id="ask-page" data-testid="ask-page">Ask from this page</button>
+        <button type="button" id="ask-frame" data-testid="ask-frame">Ask from the frame</button>
+        <button type="button" id="throw" data-testid="throw">Lock with a throwing function</button>
+      </section>
+      <pre id="report" data-testid="report" data-phase="starting"></pre>
+    </main>
+  </body>
+</html>

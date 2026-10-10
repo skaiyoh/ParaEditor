@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2024", "webworker"]
+  },
+  "include": ["src/**/*-worker.ts", "src/build-env.d.ts", "src/vendor-ort.d.ts"]
+}

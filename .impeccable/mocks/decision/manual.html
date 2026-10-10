@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Manual Diagram</title>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@500;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden;background:#F3F3F1;color:#111;font:14px/1.3 system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif}
+.k{font-family:"Archivo Narrow",system-ui,sans-serif;font-size:12px;letter-spacing:.1em;text-transform:uppercase;font-weight:600;color:#6E6E6A}
+.num{display:inline-flex;width:20px;height:20px;border:1.5px solid #111;border-radius:50%;align-items:center;justify-content:center;font:600 11px/1 "Archivo Narrow",system-ui,sans-serif;background:#fff}
+.num.on{background:#D9351C;border-color:#D9351C;color:#fff}
+.rail{position:absolute;left:0;top:0;width:168px;height:856px;background:#FFFFFF;border-right:1px solid #CFCFCB;padding:16px 14px;display:flex;flex-direction:column;gap:8px}
+.btn{height:36px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;border:1px solid #111;background:#fff;font-size:13px;font-weight:500}
+.btn.primary{background:#111;color:#fff}
+.btn.ghost{border-color:#CFCFCB;color:#6E6E6A}
+.presets{display:flex;flex-direction:column;gap:8px;margin:10px 0}
+.pr{height:62px;display:grid;grid-template-columns:20px 1fr;gap:8px;align-items:center}
+.pr .t{height:62px;border:1px solid #111;background:repeating-conic-gradient(from 0deg,#8FD03F 0 25%,#E4C84A 0 50%) 0 0/30px 18px;filter:saturate(var(--s,1)) contrast(var(--c,1));position:relative}
+.pr .t span{position:absolute;left:0;right:0;bottom:0;background:#fff;border-top:1px solid #111;font:600 10px/16px "Archivo Narrow",sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:0 4px}
+.pr.live .t{outline:2px solid #D9351C;outline-offset:-2px}
+.center{position:absolute;left:168px;top:0;width:888px;height:856px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px}
+.stage{width:840px;height:630px;border:1px solid #111;position:relative;background:
+ radial-gradient(circle at 46% 36%,#9BE36A 0 9%,#2F8A3A 9.5% 14%,transparent 14.5%),
+ repeating-conic-gradient(from 0deg at 50% 50%,#8FD03F 0 25%,#E4C84A 0 50%) 0 0/150px 90px}
+.stage:after{content:"";position:absolute;inset:0;background:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='1' height='1' fill='%23000' opacity='.2'/></svg>");opacity:.5;mix-blend-mode:multiply}
+.callout{position:absolute;display:flex;align-items:center;gap:6px}
+.callout i{display:block;width:60px;height:1px;background:#111}
+.swatches{width:840px;height:56px;display:flex;align-items:center;gap:8px}
+.swatches .k{margin-right:8px}
+.sw{height:36px;min-width:72px;padding:0 10px;display:flex;align-items:center;justify-content:center;border:1px solid #111;font-size:12px;color:#fff}
+.sw.orig,.sw.desel{background:#fff;color:#111}
+.panel{position:absolute;left:1056px;top:0;width:384px;height:856px;background:#FFFFFF;border-left:1px solid #CFCFCB;display:flex;flex-direction:column}
+.tabs{display:flex;height:48px;border-bottom:1px solid #CFCFCB}
+.tab{flex:1;display:flex;align-items:center;justify-content:center;gap:8px;color:#6E6E6A}
+.tab.on{color:#111;box-shadow:inset 0 -2px 0 #111}
+.group{padding:14px 20px 4px}
+.group .k{display:block;margin-bottom:8px}
+.row{display:grid;grid-template-columns:20px 104px 1fr 44px;align-items:center;gap:10px;height:33px}
+.row.big{height:48px}
+.lab{font-size:13px}
+.track{height:8px;background:#E4E4E0;position:relative;border:1px solid #CFCFCB}
+.row.big .track{height:14px}
+.track i{position:absolute;left:0;top:0;bottom:0;background:#111;width:var(--v)}
+.track u{position:absolute;top:50%;left:var(--v);width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:#fff;border:1.5px solid #111}
+.val{font:12px ui-monospace,Menlo,monospace;text-align:right}
+.tg{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 20px}
+.tg div{height:38px;border:1px solid #111;display:flex;align-items:center;justify-content:space-between;padding:0 10px;font-size:13px}
+.tg .on span:last-child{color:#D9351C}
+.legend{position:absolute;left:0;top:856px;width:1440px;height:44px;background:#D9351C;color:#fff;display:flex;align-items:center;gap:28px;padding:0 24px;font-size:14px;font-weight:600}
+.legend small{font-weight:500;opacity:.9}
+.legend .right{margin-left:auto;font:500 12px "Archivo Narrow",sans-serif;letter-spacing:.08em;text-transform:uppercase}
+.modes{display:flex;flex-direction:column;gap:8px;margin:6px 0}.mode{height:44px;display:grid;grid-template-columns:20px 1fr auto;align-items:center;gap:8px;padding:0 8px;border:1px solid #CFCFCB;background:#fff;font-size:13px}.mode.on{border-color:#111}.mode b{font:600 11px "Archivo Narrow",sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#6E6E6A}.mode.on b{color:#D9351C}
+</style></head><body>
+<div class="rail">
+  <div class="btn">Open<span class="num">O</span></div><div class="btn">Try a sample<span class="num">S</span></div>
+  <span class="k" style="margin-top:8px">Modes</span>
+  <div class="modes">
+    <div class="mode on"><span class="num on">1</span><span>Window</span><b>on</b></div>
+    <div class="mode"><span class="num">2</span><span>3DS stream</span><b>off</b></div>
+    <div class="mode"><span class="num">3</span><span>Motion</span><b>off</b></div>
+    <div class="mode"><span class="num">4</span><span>Symbols</span><b>off</b></div>
+  </div>
+  <div class="btn primary" style="margin-top:auto">Download<span class="num">D</span></div><div class="btn">Send to 3DS<span class="num">3</span></div><div class="btn ghost">Publish<span class="num">P</span></div><div class="btn">Reset<span class="num">R</span></div>
+</div>
+<div class="center">
+  <div class="stage"><div class="callout" style="left:52%;top:18%"><i></i><span class="num on">A</span></div></div>
+  <div class="swatches"><span class="k">Object color</span><span class="sw orig">Original</span><span class="sw" style="background:#E26A5A">Coral</span><span class="sw" style="background:#E88A3A">Orange</span><span class="sw" style="background:#C9A227">Gold</span><span class="sw" style="background:#3E9A5A">Green</span><span class="sw" style="background:#2E9A9A">Turquoise</span><span class="sw" style="background:#3E6FD6">Blue</span><span class="sw" style="background:#7B5BD6">Violet</span><span class="sw" style="background:#D65A9A">Pink</span><span class="sw desel">Deselect</span></div>
+</div>
+<div class="panel">
+  <div class="tabs"><div class="tab on"><span class="num on">L</span>Look</div><div class="tab"><span class="num">E</span>Effects</div><div class="tab"><span class="num">M</span>Motion</div><div class="tab"><span class="num">Y</span>Symbols</div></div>
+  <div class="group"><span class="k">Dial</span><div class="row big"><span class="num">1</span><span class="lab">Fry</span><div class="track" style="--v:60%"><i></i><u></u></div><span class="val">0.60</span></div></div>
+  <div class="group"><span class="k">Palette</span>
+    <div class="row"><span class="num">2</span><span class="lab">Colors</span><div class="track" style="--v:50%"><i></i><u></u></div><span class="val">7</span></div>
+    <div class="row"><span class="num">3</span><span class="lab">Bands</span><div class="track" style="--v:50%"><i></i><u></u></div><span class="val">4</span></div>
+    <div class="row"><span class="num">4</span><span class="lab">Saturation</span><div class="track" style="--v:62%"><i></i><u></u></div><span class="val">0.62</span></div>
+    <div class="row"><span class="num">5</span><span class="lab">Simplify</span><div class="track" style="--v:52%"><i></i><u></u></div><span class="val">0.52</span></div>
+    <div class="row"><span class="num">6</span><span class="lab">Outline</span><div class="track" style="--v:40%"><i></i><u></u></div><span class="val">0.40</span></div>
+    <div class="row"><span class="num">7</span><span class="lab">Subject clarity</span><div class="track" style="--v:60%"><i></i><u></u></div><span class="val">0.60</span></div>
+  </div>
+  <div class="group"><span class="k">Camera</span>
+    <div class="row"><span class="num">8</span><span class="lab">Grain</span><div class="track" style="--v:52%"><i></i><u></u></div><span class="val">0.52</span></div>
+    <div class="row"><span class="num">9</span><span class="lab">Color noise</span><div class="track" style="--v:32%"><i></i><u></u></div><span class="val">0.32</span></div>
+    <div class="row"><span class="num">10</span><span class="lab">Grain size</span><div class="track" style="--v:33%"><i></i><u></u></div><span class="val">2</span></div>
+    <div class="row"><span class="num">11</span><span class="lab">Crunch</span><div class="track" style="--v:42%"><i></i><u></u></div><span class="val">0.42</span></div>
+    <div class="row"><span class="num">12</span><span class="lab">Clipping</span><div class="track" style="--v:30%"><i></i><u></u></div><span class="val">0.30</span></div>
+  </div>
+</div>
+<div class="legend"><span>Ready to tap</span><small>depth 2.0 s · encoder 2.4 s · 4 models local</small><small>A: person, Green</small><span class="right">keys 1 to 4 flip a mode · build 7c9f50d</span></div>
+</body></html>

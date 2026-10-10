@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Contact Sheet</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden;background:#141414;color:#EDE6D6;font:14px/1.3 system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif}
+.k{font-size:11px;letter-spacing:.14em;text-transform:uppercase;font-weight:600;color:#9A927F}
+.rail{position:absolute;left:0;top:0;width:168px;height:856px;background:#1F1F1F;border-right:1px solid #2C2C2C;padding:14px;display:flex;flex-direction:column;gap:8px}
+.btn{height:36px;display:flex;align-items:center;padding:0 12px;border:1px solid #4A4538;border-radius:3px;font-size:13px;color:#EDE6D6}
+.btn.amber{background:#F2A33A;border-color:#F2A33A;color:#141414;font-weight:600}
+.btn.ghost{color:#9A927F;border-color:#2C2C2C}
+.sheet{margin:8px -4px;padding:8px 6px;background:#EDE6D6;display:flex;flex-direction:column;gap:5px}
+.fr{height:58px;position:relative;background:repeating-conic-gradient(from 0deg,#8FD03F 0 25%,#E4C84A 0 50%) 0 0/30px 18px;filter:saturate(var(--s,1)) contrast(var(--c,1));outline:1px solid #141414}
+.fr b{position:absolute;left:4px;top:2px;font:600 9px ui-monospace,Menlo,monospace;color:#141414;background:#EDE6D6;padding:0 3px}
+.fr span{position:absolute;right:4px;bottom:3px;font:600 10px system-ui,sans-serif;color:#fff;text-shadow:0 1px 0 #000}
+.fr.live:after{content:"";position:absolute;inset:-6px -5px;border:3px solid #fff;border-radius:50%/42%;transform:rotate(-4deg);opacity:.95}
+.center{position:absolute;left:168px;top:0;width:888px;height:856px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px}
+.stage{width:840px;height:630px;position:relative;outline:1px solid #2C2C2C;background:
+ radial-gradient(circle at 46% 36%,#9BE36A 0 9%,#2F8A3A 9.5% 14%,transparent 14.5%),
+ repeating-conic-gradient(from 0deg at 50% 50%,#8FD03F 0 25%,#E4C84A 0 50%) 0 0/150px 90px}
+.stage:after{content:"";position:absolute;inset:0;background:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='1' height='1' fill='%23000' opacity='.2'/></svg>");opacity:.5;mix-blend-mode:multiply}
+.mark{position:absolute;left:36%;top:14%;width:22%;height:38%;border:3px solid #fff;border-radius:50%/46%;transform:rotate(-3deg);z-index:2}
+.swatches{width:840px;height:56px;display:flex;align-items:center;gap:8px}
+.sw{height:36px;min-width:72px;padding:0 12px;display:flex;align-items:center;justify-content:center;border-radius:3px;font-size:12px;color:#fff}
+.sw.orig,.sw.desel{background:#1F1F1F;color:#EDE6D6;border:1px solid #4A4538}
+.panel{position:absolute;left:1056px;top:0;width:384px;height:856px;background:#1F1F1F;border-left:1px solid #2C2C2C;display:flex;flex-direction:column}
+.tabs{display:flex;height:48px;border-bottom:1px solid #2C2C2C}
+.tab{flex:1;display:flex;align-items:center;justify-content:center;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:#9A927F}
+.tab.on{color:#F2A33A;box-shadow:inset 0 -2px 0 #F2A33A}
+.group{padding:14px 20px 4px}
+.group .k{display:block;margin-bottom:8px}
+.row{display:grid;grid-template-columns:116px 1fr 44px;align-items:center;gap:10px;height:33px}
+.row.big{height:48px}
+.lab{font-size:13px}
+.track{height:8px;background:#2C2C2C;border-radius:4px;position:relative}
+.row.big .track{height:14px;border-radius:7px}
+.track i{position:absolute;left:0;top:0;bottom:0;background:#F2A33A;border-radius:inherit;width:var(--v)}
+.track u{position:absolute;top:50%;left:var(--v);width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:#EDE6D6;border:2px solid #141414}
+.val{font:12px ui-monospace,Menlo,monospace;text-align:right;color:#EDE6D6}
+.tg{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 20px}
+.tg div{height:38px;border:1px solid #4A4538;border-radius:3px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:13px}
+.tg .on{border-color:#F2A33A;color:#F2A33A}
+.strip{position:absolute;left:0;top:856px;width:1440px;height:44px;background:#F2A33A;color:#141414;display:flex;align-items:center;gap:28px;padding:0 24px;font-size:14px;font-weight:700}
+.strip small{font-weight:500}
+.strip .right{margin-left:auto;font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em}
+.modes{margin:8px -4px;padding:10px 8px;background:#EDE6D6;display:flex;flex-direction:column;gap:8px}.mode{height:46px;position:relative;background:#1F1F1F;color:#EDE6D6;display:flex;align-items:center;justify-content:center;font-size:12px;outline:1px solid #141414}.mode.on:after{content:"";position:absolute;inset:-7px -6px;border:3px solid #fff;border-radius:50%/42%;transform:rotate(-4deg)}
+</style></head><body>
+<div class="rail">
+  <div class="btn">Open</div><div class="btn">Try a sample</div>
+  <div class="modes">
+    <div class="mode on">Window</div>
+    <div class="mode">3DS stream</div>
+    <div class="mode">Motion</div>
+    <div class="mode">Symbols</div>
+  </div>
+  <div class="btn amber" style="margin-top:auto">Download</div><div class="btn">Send to 3DS</div><div class="btn ghost">Publish</div><div class="btn">Reset</div>
+</div>
+<div class="center">
+  <div class="stage"><div class="mark"></div></div>
+  <div class="swatches"><span class="k">Object color</span><span class="sw orig">Original</span><span class="sw" style="background:#E26A5A">Coral</span><span class="sw" style="background:#E88A3A">Orange</span><span class="sw" style="background:#C9A227">Gold</span><span class="sw" style="background:#3E9A5A">Green</span><span class="sw" style="background:#2E9A9A">Turquoise</span><span class="sw" style="background:#3E6FD6">Blue</span><span class="sw" style="background:#7B5BD6">Violet</span><span class="sw" style="background:#D65A9A">Pink</span><span class="sw desel">Deselect</span></div>
+</div>
+<div class="panel">
+  <div class="tabs"><div class="tab on">Look</div><div class="tab">Effects</div><div class="tab">Motion</div><div class="tab">Symbols</div></div>
+  <div class="group"><span class="k">Dial</span><div class="row big"><span class="lab">Fry</span><div class="track" style="--v:60%"><i></i><u></u></div><span class="val">0.60</span></div></div>
+  <div class="group"><span class="k">Palette</span>
+    <div class="row"><span class="lab">Colors</span><div class="track" style="--v:50%"><i></i><u></u></div><span class="val">7</span></div>
+    <div class="row"><span class="lab">Bands</span><div class="track" style="--v:50%"><i></i><u></u></div><span class="val">4</span></div>
+    <div class="row"><span class="lab">Saturation</span><div class="track" style="--v:62%"><i></i><u></u></div><span class="val">0.62</span></div>
+    <div class="row"><span class="lab">Simplify</span><div class="track" style="--v:52%"><i></i><u></u></div><span class="val">0.52</span></div>
+    <div class="row"><span class="lab">Outline</span><div class="track" style="--v:40%"><i></i><u></u></div><span class="val">0.40</span></div>
+    <div class="row"><span class="lab">Subject clarity</span><div class="track" style="--v:60%"><i></i><u></u></div><span class="val">0.60</span></div>
+  </div>
+  <div class="group"><span class="k">Camera</span>
+    <div class="row"><span class="lab">Grain</span><div class="track" style="--v:52%"><i></i><u></u></div><span class="val">0.52</span></div>
+    <div class="row"><span class="lab">Color noise</span><div class="track" style="--v:32%"><i></i><u></u></div><span class="val">0.32</span></div>
+    <div class="row"><span class="lab">Grain size</span><div class="track" style="--v:33%"><i></i><u></u></div><span class="val">2</span></div>
+    <div class="row"><span class="lab">Crunch</span><div class="track" style="--v:42%"><i></i><u></u></div><span class="val">0.42</span></div>
+    <div class="row"><span class="lab">Clipping</span><div class="track" style="--v:30%"><i></i><u></u></div><span class="val">0.30</span></div>
+  </div>
+</div>
+<div class="strip"><span>Ready to tap</span><small>depth 2.0 s · encoder 2.4 s · 4 models local</small><small>1 object · Green</small><span class="right">WINDOW ON · BUILD 7C9F50D</span></div>
+</body></html>

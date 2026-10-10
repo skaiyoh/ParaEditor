@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>noisy decoder</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <script type="module" src="%NOISY_SCRIPT%"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Decoder</h1>
+      <p>Runs the analysis service's decoder on the real decode worker: Run fetches the encoder's and the decoder's models through the service, runs the encoder as one sequence on the master chosen below, raw RGBA bytes of <code>?width=</code> x <code>?height=</code>, builds the guide from the master at long edge 1024, opens the decoder, makes each <code>?decode=</code>, releases the decoder, and makes one decode after the release. Truth masks, one byte per guide texel, are checked against each decode's candidates in order.</p>
+      <label>Master (RGBA bytes) <input type="file" id="master" data-testid="master"></label>
+      <label>Truth masks, one per decode (one byte per guide texel) <input type="file" id="truths" data-testid="truths" multiple></label>
+      <button type="button" id="run" data-testid="run" disabled>Run</button>
+      <button type="button" id="continue" data-testid="continue" disabled>Continue</button>
+      <pre id="report" data-testid="report" data-phase="starting"></pre>
+    </main>
+  </body>
+</html>

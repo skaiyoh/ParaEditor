@@ -1,0 +1,260 @@
+<!doctype html><meta charset="utf-8"><body><pre id="o"></pre><script>
+// Throwaway spike (round 4, FRESH-2): what does a label-aware anisotropic Kuwahara cost when it runs on a reduced
+// working grid (master / div per axis) with the radius given in master px, and what does the result look like?
+// Pipeline per source texture: down (box average, label into alpha) -> structure tensor -> tensor blur ->
+// three Kuwahara iterations -> signed difference of Gaussians -> label-aware upsample to master size with the
+// master's fine detail re-injected by a weight d. Everything is timed as one rerun forced by readPixels.
+const out = []; window.__images = {};
+const q = new URLSearchParams(location.search);
+(async () => { try {
+const W = 2048, H = 1536;
+const c = document.createElement('canvas'); c.width = W; c.height = H;
+const gl = c.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: true });
+if (!gl) throw new Error('no webgl2');
+if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('no EXT_color_buffer_float');
+const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+out.push('renderer: ' + (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)));
+out.push('userAgent: ' + navigator.userAgent);
+
+// ---- inputs: the synthetic bench scene at 2048 x 1536 plus procedural texture, and a 1024 x 768 label (sphere = 1)
+const img = new Image(); img.src = 'master.jpg'; await img.decode();
+const c2 = document.createElement('canvas'); c2.width = W; c2.height = H; const g2 = c2.getContext('2d', { willReadFrequently: true });
+g2.drawImage(img, 0, 0, W, H);
+const id = g2.getImageData(0, 0, W, H); const px = id.data; let s = 0x9E3779B9;
+const rnd = () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; };
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {           // photo-like detail: sensor noise, fine hatch, blotches
+  const i = (y * W + x) * 4; const n = (rnd() - 0.5) * 36;
+  const hatch = y > 0.42 * H ? 10 * Math.sin((x * 0.9 + y * 0.35)) : 0;
+  const blot = 14 * Math.sin(x * 0.021) * Math.sin(y * 0.017 + x * 0.004);
+  for (let k = 0; k < 3; k++) px[i + k] = Math.max(0, Math.min(255, px[i + k] + n + hatch + blot));
+}
+const LW = 1024, LH = 768; const lab = new Uint8Array(LW * LH);
+const scx = 0.38 * LW, scy = 0.5836 * LH, sr = 0.2 * LH;
+for (let y = 0; y < LH; y++) for (let x = 0; x < LW; x++) { const dx = x + 0.5 - scx, dy = y + 0.5 - scy; lab[y * LW + x] = dx * dx + dy * dy <= sr * sr ? 1 : 0; }
+
+const VS = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
+const HEAD = `#version 300 es
+precision highp float; precision highp int; out vec4 o;
+`;
+// Every label lookup is a texelFetch at an integer coordinate computed in integer arithmetic (round-5 audit, CA-6): master texel m
+// reads label texel floor((2m + 1) * labelSize / (2 * masterSize)) per axis, so no lookup sits on a label-texel boundary where
+// float rounding would pick the side.
+const LABEL_OF = `float labelOf(sampler2D label, ivec2 m, ivec2 ms){ ivec2 ls = textureSize(label,0); return texelFetch(label, min(((2*m + 1) * ls) / (2*ms), ls - 1), 0).r; }
+`;
+const FS = {
+// master -> working grid: the div x div box average over the master texels that carry the working texel's own label, which also goes
+// into alpha, so an edge texel never mixes the other side's color in (round 5, AUDIT-2). The working texel's own label is the label of
+// one named master texel, p * div + div / 2 (for div 4: (4x + 2, 4y + 2), one of the block's central four); round 5 took a NEAREST
+// lookup at the block's center, which for div 4 is the corner shared by four label texels (round-5 audit, CA-6). aware = 0 is the
+// round-4 plain box average, kept as the negative control for mode=ring.
+down: HEAD + LABEL_OF + `uniform sampler2D master; uniform sampler2D label; uniform int div; uniform int aware;
+void main(){ ivec2 p = ivec2(gl_FragCoord.xy); ivec2 ms = textureSize(master,0); vec3 acc = vec3(0.), all = vec3(0.); float n = 0., na = 0.;
+  float lc = labelOf(label, min(p*div + div/2, ms - 1), ms);
+  for (int y=0;y<div;y++) for (int x=0;x<div;x++){ ivec2 t = p*div + ivec2(x,y); if (t.x < ms.x && t.y < ms.y){ vec3 c = texelFetch(master, t, 0).rgb; all += c; na += 1.;
+    if (aware == 0 || abs(labelOf(label, t, ms) - lc) < 0.002){ acc += c; n += 1.; } } }
+  o = vec4(n > 0. ? acc/n : all/max(na,1.), lc); }`,
+// Sobel structure tensor (E, F, G)
+tensor: HEAD + `uniform sampler2D src;
+vec3 f(ivec2 p, int x, int y){ ivec2 s = textureSize(src,0); return texelFetch(src, clamp(p+ivec2(x,y), ivec2(0), s-1), 0).rgb; }
+void main(){ ivec2 p = ivec2(gl_FragCoord.xy);
+  vec3 sx = (f(p,1,-1)+2.*f(p,1,0)+f(p,1,1) - f(p,-1,-1)-2.*f(p,-1,0)-f(p,-1,1))/4.;
+  vec3 sy = (f(p,-1,1)+2.*f(p,0,1)+f(p,1,1) - f(p,-1,-1)-2.*f(p,0,-1)-f(p,1,-1))/4.;
+  o = vec4(dot(sx,sx), dot(sx,sy), dot(sy,sy), 1.); }`,
+// one axis of a Gaussian blur, sigma 2 working texels
+blur: HEAD + `uniform sampler2D src; uniform ivec2 dir;
+void main(){ ivec2 p = ivec2(gl_FragCoord.xy); ivec2 s = textureSize(src,0); vec4 acc = vec4(0.); float n = 0.;
+  for (int i=-4;i<=4;i++){ float w = exp(-float(i*i)/8.); acc += w*texelFetch(src, clamp(p+dir*i, ivec2(0), s-1), 0); n += w; }
+  o = acc/n; }`,
+// label-aware anisotropic Kuwahara, eight sectors, polynomial weights (Kyprianidis et al. 2010), windowed to zero at the kernel edge
+akf: HEAD + `uniform sampler2D src; uniform sampler2D tfm; uniform float R; uniform float Rs; uniform float subj;
+void main(){ ivec2 p = ivec2(gl_FragCoord.xy); ivec2 sz = textureSize(src,0);
+  vec4 c0 = texelFetch(src, p, 0); float l0 = c0.a;
+  float rad = abs(l0 - subj) < 0.002 ? Rs : R;
+  if (rad < 1.0) { o = c0; return; }
+  vec3 t = texelFetch(tfm, p, 0).xyz;
+  float disc = sqrt(max(0., (t.x-t.z)*(t.x-t.z) + 4.*t.y*t.y));
+  float l1 = 0.5*(t.x+t.z+disc), l2 = 0.5*(t.x+t.z-disc);
+  vec2 v0 = vec2(l1 - t.x, -t.y); vec2 d = dot(v0,v0) > 1e-12 ? normalize(v0) : vec2(0.,1.);
+  float A = (l1+l2) > 1e-9 ? (l1-l2)/(l1+l2) : 0.; A = min(A, 0.5);
+  float a = rad*(1.+A), b = rad/(1.+A);
+  float cs = d.x, sn = -d.y;
+  mat2 SR = mat2(0.5/a, 0., 0., 0.5/b) * mat2(cs, -sn, sn, cs);
+  int mx = int(sqrt(a*a*cs*cs + b*b*sn*sn)), my = int(sqrt(a*a*sn*sn + b*b*cs*cs));
+  float zeta = 2./rad; float zc = 0.58; float eta = (zeta + cos(zc)) / (sin(zc)*sin(zc));
+  vec4 m[8]; vec3 s[8]; for (int k=0;k<8;k++){ m[k]=vec4(0.); s[k]=vec3(0.); }
+  for (int y=-my;y<=my;y++) for (int x=-mx;x<=mx;x++){
+    vec2 v = SR*vec2(float(x),float(y)); float d2 = dot(v,v);
+    if (d2 <= 0.25){
+      vec4 cc = texelFetch(src, clamp(p+ivec2(x,y), ivec2(0), sz-1), 0); vec3 c = cc.rgb;
+      float agree = abs(cc.a - l0) < 0.002 ? 1. : 0.;
+      float sum = 0.; float w[8]; float z, vxx, vyy;
+      vxx = zeta - eta*v.x*v.x; vyy = zeta - eta*v.y*v.y;
+      z = max(0., v.y+vxx); w[0]=z*z; sum+=w[0]; z = max(0., -v.x+vyy); w[2]=z*z; sum+=w[2];
+      z = max(0., -v.y+vxx); w[4]=z*z; sum+=w[4]; z = max(0., v.x+vyy); w[6]=z*z; sum+=w[6];
+      v = 0.70710678*vec2(v.x-v.y, v.x+v.y);
+      vxx = zeta - eta*v.x*v.x; vyy = zeta - eta*v.y*v.y;
+      z = max(0., v.y+vxx); w[1]=z*z; sum+=w[1]; z = max(0., -v.x+vyy); w[3]=z*z; sum+=w[3];
+      z = max(0., -v.y+vxx); w[5]=z*z; sum+=w[5]; z = max(0., v.x+vyy); w[7]=z*z; sum+=w[7];
+      float g = exp(-3.125*d2) * (1. - smoothstep(0.16, 0.25, d2)) * agree / max(sum, 1e-9);
+      for (int k=0;k<8;k++){ float wk = w[k]*g; m[k] += vec4(c*wk, wk); s[k] += c*c*wk; }
+    }
+  }
+  vec4 acc = vec4(0.);
+  for (int k=0;k<8;k++){ if (m[k].w <= 1e-9) continue; vec3 mu = m[k].rgb/m[k].w; vec3 var = abs(s[k]/m[k].w - mu*mu);
+    float s2 = var.r+var.g+var.b; float wgt = 1./(1. + pow(8000.*s2, 4.)); acc += vec4(mu*wgt, wgt); }
+  o = vec4(acc.w > 0. ? acc.rgb/acc.w : c0.rgb, l0); }`,
+// signed difference of Gaussians (sigma 1.0 and 1.6 working texels) of the luminance, biased into alpha; rgb passes through
+dog: HEAD + `uniform sampler2D src;
+void main(){ ivec2 p = ivec2(gl_FragCoord.xy); ivec2 sz = textureSize(src,0); float a1=0., n1=0., a2=0., n2=0.;
+  for (int y=-4;y<=4;y++) for (int x=-4;x<=4;x++){ float L = dot(texelFetch(src, clamp(p+ivec2(x,y), ivec2(0), sz-1), 0).rgb, vec3(.2126,.7152,.0722));
+    float d2 = float(x*x+y*y); float w1 = exp(-d2/2.), w2 = exp(-d2/5.12); a1 += w1*L; n1 += w1; a2 += w2*L; n2 += w2; }
+  o = vec4(texelFetch(src, p, 0).rgb, clamp(0.5 + 4.*(a1/n1 - a2/n2), 0., 1.)); }`,
+// working grid -> master: four-tap bilinear over the working texels that carry this master texel's label, plus d of the master's detail
+up: HEAD + LABEL_OF + `uniform sampler2D simp; uniform sampler2D low; uniform sampler2D master; uniform sampler2D label; uniform int div; uniform float dBg; uniform float dSubj; uniform float subj;
+void main(){ ivec2 p = ivec2(gl_FragCoord.xy); ivec2 ws = textureSize(simp,0); ivec2 ms = textureSize(master,0);
+  vec3 M = texelFetch(master, p, 0).rgb; float l0 = labelOf(label, p, ms);
+  vec2 g = (vec2(p)+0.5)/float(div) - 0.5; ivec2 b = ivec2(floor(g)); vec2 f = g - vec2(b);
+  vec3 S = vec3(0.), Lo = vec3(0.); float n = 0., D = 0., nd = 0.;
+  for (int j=0;j<2;j++) for (int i=0;i<2;i++){ ivec2 t = clamp(b+ivec2(i,j), ivec2(0), ws-1);
+    float w = (i==0 ? 1.-f.x : f.x) * (j==0 ? 1.-f.y : f.y); vec4 lo = texelFetch(low, t, 0); vec4 sv = texelFetch(simp, t, 0);
+    D += w*sv.a; nd += w;
+    if (abs(lo.a - l0) < 0.002){ S += w*sv.rgb; Lo += w*lo.rgb; n += w; } }
+  float d = abs(l0 - subj) < 0.002 ? dSubj : dBg;
+  vec3 rgb = n > 1e-6 ? S/n + d*(M - Lo/n) : M;
+  o = vec4(clamp(rgb, 0., 1.), D/max(nd, 1e-6)); }`,
+// visual proxy only: five luminance bands, and a dark line where the DoG's zero crossing is within lineW/2 px and the contrast is high
+post: HEAD + `uniform sampler2D src; uniform float lineW; uniform float div; uniform int bands;
+void main(){ ivec2 p = ivec2(gl_FragCoord.xy); ivec2 sz = textureSize(src,0); p.y = sz.y-1-p.y;
+  vec4 c = texelFetch(src, p, 0); vec3 rgb = c.rgb;
+  if (bands > 0){ float L = dot(rgb, vec3(.2126,.7152,.0722)); float Lq = (floor(L*float(bands))+.5)/float(bands); rgb = clamp(rgb*(Lq/max(L,1e-3)), 0., 1.); }
+  if (lineW > 0.){ float D = c.a - 0.5;
+    float gx = texelFetch(src, clamp(p+ivec2(1,0), ivec2(0), sz-1), 0).a - texelFetch(src, clamp(p-ivec2(1,0), ivec2(0), sz-1), 0).a;
+    float gy = texelFetch(src, clamp(p+ivec2(0,1), ivec2(0), sz-1), 0).a - texelFetch(src, clamp(p-ivec2(0,1), ivec2(0), sz-1), 0).a;
+    float gm = 0.5*length(vec2(gx,gy));
+    if (gm*div/4. > 0.04 && abs(D)/max(gm,1e-6) < 0.5*lineW) rgb = mix(rgb, vec3(0.05), 0.85); }
+  o = vec4(rgb, 1.); }`,
+};
+function sh(t, src){ const x = gl.createShader(t); gl.shaderSource(x, src); gl.compileShader(x); if(!gl.getShaderParameter(x, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(x) + '\n' + src); return x; }
+const vsObj = sh(gl.VERTEX_SHADER, VS); const P = {};
+for (const k of Object.keys(FS)){ const pr = gl.createProgram(); gl.attachShader(pr, vsObj); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, FS[k])); gl.bindAttribLocation(pr, 0, 'p'); gl.linkProgram(pr);
+  if(!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(k + ': ' + gl.getProgramInfoLog(pr)); P[k] = pr; }
+const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+function tex(w, h, ifmt, fmt, type, data, filter){ const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, fmt, type, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); return { t, w, h }; }
+function target(w, h, float){ const x = float ? tex(w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, gl.NEAREST) : tex(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.NEAREST);
+  x.fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, x.fb); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, x.t, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('fbo incomplete'); return x; }
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+const master = tex(W, H, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, px, gl.NEAREST);
+const label = tex(LW, LH, gl.R8, gl.RED, gl.UNSIGNED_BYTE, lab, gl.NEAREST);
+const lab2 = new Uint8Array(LW * LH);
+for (let y = 0; y < LH; y++) for (let x = 0; x < LW; x++) { const dx = x + 0.5 - scx, dy = y + 0.5 - scy; lab2[y * LW + x] = dx * dx + dy * dy <= 0.64 * sr * sr ? 1 : 0; }
+const label2 = tex(LW, LH, gl.R8, gl.RED, gl.UNSIGNED_BYTE, lab2, gl.NEAREST);
+const final = target(W, H, false);
+const one = new Uint8Array(4);
+function draw(prog, dst, uniforms, scissor){
+  gl.useProgram(P[prog]); gl.bindFramebuffer(gl.FRAMEBUFFER, dst ? dst.fb : null); const w = dst ? dst.w : W, h = dst ? dst.h : H; gl.viewport(0, 0, w, h);
+  if (scissor && scissor.px){ const [x0,y0,x1,y1] = scissor.px; gl.enable(gl.SCISSOR_TEST); gl.scissor(Math.max(0,x0), Math.max(0,y0), Math.min(w,x1)-Math.max(0,x0), Math.min(h,y1)-Math.max(0,y0)); }
+  else if (scissor){ gl.enable(gl.SCISSOR_TEST); gl.scissor(Math.floor(scissor[0]*w), Math.floor(scissor[1]*h), Math.ceil(scissor[2]*w), Math.ceil(scissor[3]*h)); } else gl.disable(gl.SCISSOR_TEST);
+  let unit = 0;
+  for (const [k, v] of Object.entries(uniforms)){ const loc = gl.getUniformLocation(P[prog], k); if (loc === null) continue;
+    if (v && v.t){ gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, v.t); gl.uniform1i(loc, unit++); }
+    else if (Array.isArray(v)) gl.uniform2i(loc, v[0], v[1]); else if (Number.isInteger(v) && (k === 'div' && prog !== 'post' || k === 'bands' || k === 'aware')) gl.uniform1i(loc, v); else gl.uniform1f(loc, v); }
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); }
+const LABEL1 = 1 / 255;
+let AWARE = q.get('down') === 'box' ? 0 : 1;                              // down=box selects the round-4 plain box downsample
+const sets = new Map();
+function grid(div){ if (!sets.has(div)){ const w = Math.ceil(W/div), h = Math.ceil(H/div); sets.set(div, { w, h, low: target(w,h,false), t0: target(w,h,true), t1: target(w,h,true), a: target(w,h,false), b: target(w,h,false) }); } return sets.get(div); }
+// one full rerun for one source texture; r in master px; clarity is the subject's sparing
+function rerun(div, r, clarity, scissor, force){
+  const G = grid(div); const R = r/div; const dBg = Math.max(0, 1 - r/8); const dSubj = Math.max(dBg, clarity);
+  draw('down', G.low, { master, label, div, aware: AWARE }, scissor);
+  draw('tensor', G.t0, { src: G.low }, scissor); draw('blur', G.t1, { src: G.t0, dir: [1,0] }, scissor); draw('blur', G.t0, { src: G.t1, dir: [0,1] }, scissor);
+  const k = { tfm: G.t0, R, Rs: R*(1-clarity), subj: LABEL1 };
+  draw('akf', G.a, { src: G.low, ...k }, scissor); draw('akf', G.b, { src: G.a, ...k }, scissor); draw('akf', G.a, { src: G.b, ...k }, scissor);
+  draw('dog', G.b, { src: G.a }, scissor);
+  draw('up', final, { simp: G.b, low: G.low, master, label, div, dBg, dSubj, subj: LABEL1 }, scissor);
+  if (force){ gl.bindFramebuffer(gl.FRAMEBUFFER, final.fb); gl.readPixels(W>>1, H>>1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, one); }
+}
+// dirty is a rectangle [x0,y0,x1,y1] in working texels inside which the label changed; lbl is the label texture to use
+function rerunDirty(div, r, clarity, dirty, lbl, skipUp){
+  const G = grid(div); const R = r/div; const dBg = Math.max(0, 1 - r/8); const dSubj = Math.max(dBg, clarity);
+  const rho = R >= 1 ? Math.ceil(1.5*R) : 0, g = 4;                     // reach of one Kuwahara iteration (anisotropy included) and of the DoG
+  const mscale = Number(q.get('margin') || 1);                           // margin=0.5 is the negative control: margins too small must show differences
+  const dil = (n0) => { const n = Math.round(n0*mscale); return dirty ? { px: [dirty[0]-n, dirty[1]-n, dirty[2]+n, dirty[3]+n] } : null; };
+  const a1 = 5*rho + 2*g + 2;
+  draw('down', G.low, { master, label: lbl, div, aware: AWARE }, dil(Math.max(6*rho + 2*g + 2, a1 + 9)));
+  draw('tensor', G.t0, { src: G.low }, dil(a1 + 8)); draw('blur', G.t1, { src: G.t0, dir: [1,0] }, dil(a1 + 4)); draw('blur', G.t0, { src: G.t1, dir: [0,1] }, dil(a1));
+  const k = { tfm: G.t0, R, Rs: R*(1-clarity), subj: LABEL1 };
+  draw('akf', G.a, { src: G.low, ...k }, dil(a1)); draw('akf', G.b, { src: G.a, ...k }, dil(4*rho + 2*g + 2)); draw('akf', G.a, { src: G.b, ...k }, dil(3*rho + 2*g + 2));
+  draw('dog', G.b, { src: G.a }, dil(3*rho + g + 2));
+  if (!skipUp){ const um = Math.round((3*rho+g+1)*mscale); const u = dirty ? { px: [(dirty[0]-um)*div, (dirty[1]-um)*div, (dirty[2]+um)*div, (dirty[3]+um)*div] } : null;
+    draw('up', final, { simp: G.b, low: G.low, master, label: lbl, div, dBg, dSubj, subj: LABEL1 }, u); }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, skipUp ? G.b.fb : final.fb); gl.readPixels(skipUp ? G.w>>1 : W>>1, skipUp ? G.h>>1 : H>>1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, one);   // force completion of what this call drew
+}
+function readFinal(){ gl.bindFramebuffer(gl.FRAMEBUFFER, final.fb); const a = new Uint8Array(W*H*4); gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, a); return a; }
+function taps(R){ let n = 0; const m = Math.floor(R); for (let y=-m;y<=m;y++) for (let x=-m;x<=m;x++) if (x*x+y*y <= R*R) n++; return n; }
+function time(div, r, reps, scissor){ rerun(div, Math.min(r, div), 0.6, scissor, true); const ms = [];
+  for (let i=0;i<reps;i++){ const t0 = performance.now(); rerun(div, r, 0.6, scissor, true); ms.push(+(performance.now()-t0).toFixed(1)); if (gl.isContextLost()) { ms.push('CONTEXT LOST'); break; } }
+  const G = grid(div); const R = r/div;
+  out.push(`div=${div} grid=${G.w}x${G.h} r=${r}px R=${R.toFixed(2)}tx taps/texel~${taps(R)} ${scissor ? 'scissor=' + scissor.join('/') : 'full'}  ms per rerun: ${ms.join(', ')}  err=${gl.getError()}`); }
+function shot(name, x, y, w, h, lineW, bands, divForLine){ // draws the final texture to the canvas through the visual proxy and crops it
+  draw('post', null, { src: final, lineW, div: divForLine, bands }); gl.finish();
+  const cc = document.createElement('canvas'); cc.width = w; cc.height = h; cc.getContext('2d').drawImage(c, x, y, w, h, 0, 0, w, h); window.__images[name] = cc.toDataURL('image/png'); }
+
+const mode = q.get('mode') || 'time';
+if (mode === 'dirty'){
+  // Does a rerun scissored to the changed object's rectangle equal a whole-frame rerun? The sphere's label shrinks to 80%.
+  const div = 4; const C = [Math.floor((scx - sr)/2) - 1, Math.floor((scy - sr)/2) - 1, Math.ceil((scx + sr)/2) + 1, Math.ceil((scy + sr)/2) + 1];   // the old and new bounds' union, in working texels
+  for (const r of (q.get('radii') || '6,12.5,24').split(',').map(Number)) {
+    rerunDirty(div, r, 0.6, null, label, false);                        // state 1: whole frame, old label
+    const before = readFinal();
+    rerunDirty(div, 24 - r / 2, 0.1, null, label2, true);               // leave stale, unrelated contents in every working-grid target
+    const t0 = performance.now(); rerunDirty(div, r, 0.6, C, label2, false); const ms = performance.now() - t0;   // the dirty rerun: new label, scissored
+    const dirty = readFinal();
+    rerunDirty(div, r, 0.6, null, label2, false);                       // the reference: whole frame, new label
+    const full = readFinal();
+    let diff = 0, changed = 0; for (let i = 0; i < full.length; i++) { if (dirty[i] !== full[i]) diff++; if (before[i] !== full[i]) changed++; }
+    out.push(`dirty rectangle r=${r}px: bytes differing from the whole-frame rerun = ${diff} of ${full.length}; bytes the label change altered = ${changed}; dirty rerun ${ms.toFixed(1)} ms  err=${gl.getError()}`);
+  }
+} else if (mode === 'ring'){
+  // Round 5 (AUDIT-2): does background color ride along inside an object's mask? A two-label fixture of two flat colors, a white sphere
+  // (label 1) on a black background, at clarity 0 so no detail is added back above the detail weight d = max(0, 1 - r / 8).
+  rerun(4, 0, 0, null, true); gl.bindFramebuffer(gl.FRAMEBUFFER, final.fb); const a0 = new Uint8Array(4*64*64); gl.readPixels(700, 500, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, a0);
+  let maxDiff = 0; for (let y=0;y<64;y++) for (let x=0;x<64;x++) for (let k=0;k<3;k++){ const dv = Math.abs(a0[(y*64+x)*4+k] - px[((500+y)*W + 700+x)*4+k]); if (dv > maxDiff) maxDiff = dv; }
+  out.push(`identity at simplify 0 (r=0, d=1) on the quarter grid, label-aware downsample: max abs difference from the master over a 64x64 patch = ${maxDiff} of 255`);
+  const flat = new Uint8Array(W*H*4); const lblAt = (x, y) => lab[Math.min(LH-1, Math.floor((y+0.5)/H*LH))*LW + Math.min(LW-1, Math.floor((x+0.5)/W*LW))];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const v = lblAt(x, y) ? 255 : 0; const i = (y*W+x)*4; flat[i] = flat[i+1] = flat[i+2] = v; flat[i+3] = 255; }
+  gl.bindTexture(gl.TEXTURE_2D, master.t); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, flat);
+  for (const aware of [0, 1]) for (const r of (q.get('radii') || '8,12.5,24').split(',').map(Number)) {
+    AWARE = aware; rerun(4, r, 0, null, true); const f = readFinal();
+    let inObj = 0, objMoved = 0, objWorst = 0, inBg = 0, bgMoved = 0, bgWorst = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const v = f[(y*W+x)*4];
+      if (lblAt(x, y)) { inObj++; const d = 255 - v; if (d > 2) objMoved++; if (d > objWorst) objWorst = d; }
+      else { inBg++; if (v > 2) bgMoved++; if (v > bgWorst) bgWorst = v; } }
+    out.push(`ring r=${r}px d=${Math.max(0, 1 - r/8).toFixed(2)} ${aware ? 'label-aware downsample' : 'plain box downsample (round 4)'}: object texels moved toward the background by more than 2 of 255 = ${objMoved} of ${inObj} (worst ${objWorst}); background texels moved toward the object = ${bgMoved} of ${inBg} (worst ${bgWorst})  err=${gl.getError()}`);
+  }
+} else if (mode === 'time'){
+  const reps = Number(q.get('reps') || 6);
+  for (const div of (q.get('divs') || '4,3,2').split(',').map(Number)) for (const r of (q.get('radii') || '6,12.5,24').split(',').map(Number)) time(div, r, reps, null);
+  // an object-sized dirty rectangle: the sphere's bounds dilated by the filter's reach (about 40% x 50% of the frame)
+  for (const div of (q.get('divs') || '4,3,2').split(',').map(Number)) time(div, 24, reps, [0.2, 0.15, 0.4, 0.5]);
+  if (q.get('ref')) { time(1, 6, 2, null); time(1, 12.5, 1, null); }
+} else {
+  const crop = [480, 560, 900, 675];                                   // sphere edge, shadow, checker ground, horizon
+  const r = Number(q.get('r') || 12.5); const lineW = 2.4;
+  rerun(1, 0, 0, null, true); shot('master', ...crop, 0, 0, 1);
+  for (const div of (q.get('divs') || '4,3,2').split(',').map(Number)) {
+    rerun(div, r, 0.6, null, true); shot(`div${div}-r${r}-simplified`, ...crop, 0, 0, div); shot(`div${div}-r${r}-bands-lines`, ...crop, lineW, 5, div); }
+  if (q.get('ref')) { rerun(1, r, 0.6, null, true); shot(`ref-div1-r${r}-simplified`, ...crop, 0, 0, 1); shot(`ref-div1-r${r}-bands-lines`, ...crop, lineW, 5, 1); }
+  rerun(4, 0, 0, null, true); gl.bindFramebuffer(gl.FRAMEBUFFER, final.fb); const a = new Uint8Array(4*64*64); gl.readPixels(700, 500, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, a);
+  let maxDiff = 0; for (let y=0;y<64;y++) for (let x=0;x<64;x++) for (let k=0;k<3;k++){ const dv = Math.abs(a[(y*64+x)*4+k] - px[((500+y)*W + 700+x)*4+k]); if (dv > maxDiff) maxDiff = dv; }
+  out.push(`identity at simplify 0 (r=0, d=1) on the quarter grid: max abs difference from the master over a 64x64 patch = ${maxDiff} of 255`);
+}
+} catch (e) { out.push('ERROR ' + (e && e.message || e)); }
+document.getElementById('o').textContent = out.join('\n') + '\nDONE';
+})();
+</script></body>

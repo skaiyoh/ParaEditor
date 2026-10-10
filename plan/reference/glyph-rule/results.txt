@@ -1,0 +1,5 @@
+default symbols: bands 4, amount 0.3, entry L 0.5 | round 3: 82 glyph cells, 82 with ink equal to paper | round 4: 82 glyph cells, 0 with ink equal to paper
+fry 1 bands: bands 3, amount 0.3, entry L 0.5 | round 3: 82 glyph cells, 82 with ink equal to paper | round 4: 82 glyph cells, 0 with ink equal to paper
+every cell: bands 6, amount 1, entry L 0.5 | round 3: 256 glyph cells, 179 with ink equal to paper | round 4: 256 glyph cells, 0 with ink equal to paper
+minimum bands: bands 2, amount 0.5, entry L 0.5 | round 3: 132 glyph cells, 132 with ink equal to paper | round 4: 132 glyph cells, 0 with ink equal to paper
+amount 0: bands 4, amount 0, entry L 0.5 | round 3: 6 glyph cells, 6 with ink equal to paper | round 4: 0 glyph cells, 0 with ink equal to paper

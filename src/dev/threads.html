@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>noisy thread probe</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <script type="module" src="%NOISY_SCRIPT%"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Thread probe</h1>
+      <p>Runs ONNX Runtime from <code>/vendor/ort/</code> in a module worker at its default thread count, and posts one row to the results sink.</p>
+      <button type="button" id="run" data-testid="run" disabled>Run</button>
+      <pre id="result" data-testid="result" data-state="idle"></pre>
+    </main>
+  </body>
+</html>

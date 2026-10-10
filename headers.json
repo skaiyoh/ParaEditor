@@ -1,0 +1,65 @@
+{
+  "all": {
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Embedder-Policy": "require-corp",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; img-src 'self' blob: data:; media-src blob:; connect-src 'self'",
+    "X-Content-Type-Options": "nosniff"
+  },
+  "byPath": [
+    {
+      "path": "/assets/*",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable"
+      }
+    },
+    {
+      "path": "/vendor/ort/*",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable"
+      }
+    },
+    {
+      "path": "/models/*",
+      "headers": {
+        "Cache-Control": "no-store"
+      }
+    },
+    {
+      "path": "/",
+      "headers": {
+        "Cache-Control": "no-cache"
+      }
+    },
+    {
+      "path": "/index.html",
+      "headers": {
+        "Cache-Control": "no-cache"
+      }
+    },
+    {
+      "path": "*",
+      "headers": {
+        "Cache-Control": "no-cache"
+      }
+    }
+  ],
+  "errors": {
+    "Cache-Control": "no-store"
+  },
+  "contentTypes": {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".map": "application/json",
+    ".json": "application/json",
+    ".webmanifest": "application/manifest+json",
+    ".wasm": "application/wasm",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".onnx": "application/octet-stream",
+    ".css": "text/css; charset=utf-8"
+  },
+  "defaultContentType": "application/octet-stream"
+}

@@ -1,0 +1,7 @@
+The lead judged the diff against the dispatch and the direction contract. The build, the tokens, the geometry and every test id are right, and the headers contract now serves .css as text/css (the lead added it; do not touch headers.json). Two changes before the finish review, both inside src/ui and src/assets:
+
+1. The inspector's accordion. Opening one group at a time hides Bands and Crunch behind a click during the live creation, which the story needs within reach. Make the nodes independent collapsibles with persistent state: Fry, Palette and Camera expanded by default, Motion and Symbols collapsed by default (their switches stay in their headings and in the bottom mode rail). At 1440 x 900 the stack then fits without scrolling with no object selected; with the Object node present, or at 1280 x 800, the inspector scrolls below the fold, which the contract allows. Keep the disclosure buttons and aria-expanded.
+
+2. The scope header. Today the sliders edit the whole scene even when an object is selected, so the header must keep saying "Scene"; showing the object's name there claims a scope the controls do not have. Put the object's name in the Object node's heading instead (for example "Object · <name>"), and leave the scope heading as "Scene" until a later package scopes controls to a layer.
+
+Then rerun the AGENTS.md checks and the detector on the files you changed, update plan/evidence/D7-return.md, and stop. The lead reruns the scenarios and takes the screenshots.

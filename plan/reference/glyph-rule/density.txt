@@ -1,0 +1,10 @@
+amount 0.3: absolute bins        . 0  - 0  + 0  * 26  # 52
+amount 0.3: window-relative bins . 16  - 16  + 14  * 16  # 16
+amount 0.6: absolute bins        . 0  - 0  + 50  * 52  # 52
+amount 0.6: window-relative bins . 30  - 32  + 30  * 30  # 32
+amount 1: absolute bins        . 52  - 50  + 50  * 52  # 52
+amount 1: window-relative bins . 52  - 50  + 50  * 52  # 52
+an 'always' cell at amount 0: tone 0.50 -> ., tone 0.30 -> ., tone 0.10 -> ., tone 0.00 -> .
+an 'always' cell at amount 0.3: tone 0.50 -> ., tone 0.30 -> ., tone 0.10 -> -, tone 0.00 -> #
+an 'always' cell at amount 1: tone 0.50 -> ., tone 0.30 -> +, tone 0.10 -> #, tone 0.00 -> #
+seven gray entries, bands 4, amount 0.3: 82 glyph cells, 0 with ink equal to paper

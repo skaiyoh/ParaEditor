@@ -1,0 +1,11 @@
+{
+  "name": "noisy-demo",
+  "compatibility_date": "2026-10-01",
+  "pages_build_output_dir": "../../build/cloudflare",
+  "r2_buckets": [{ "binding": "MODELS", "bucket_name": "noisy-demo-models" }],
+  "env": {
+    "preview": {
+      "r2_buckets": [{ "binding": "MODELS", "bucket_name": "noisy-demo-models" }]
+    }
+  }
+}

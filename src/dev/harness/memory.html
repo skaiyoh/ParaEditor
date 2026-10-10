@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>noisy memory harness</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <script type="module" src="%NOISY_SCRIPT%"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Memory harness</h1>
+      <p class="muted">Start runs the memory rows and posts each reading to the results sink. Every reload continues where the run left off, until the page says DONE.</p>
+      <section id="status" class="status-view" data-testid="status" aria-live="polite"></section>
+      <div class="controls">
+        <button type="button" id="start" data-testid="start" class="primary" hidden>Start</button>
+        <button type="button" id="short-run" data-testid="short-run" hidden>Short run</button>
+        <button type="button" id="stop" data-testid="stop" hidden>Stop</button>
+      </div>
+      <details class="report">
+        <summary>Report</summary>
+        <pre id="report" data-testid="report" data-phase="starting" data-row="" data-step=""></pre>
+      </details>
+    </main>
+  </body>
+</html>

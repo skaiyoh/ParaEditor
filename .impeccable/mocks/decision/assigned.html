@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Scene Select</title>
+<link href="https://fonts.googleapis.com/css2?family=Michroma&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden;background:#E9E6DF;color:#15140F;font:14px/1.3 system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif}
+.k{font-family:Michroma,system-ui,sans-serif;font-size:10px;letter-spacing:.18em;text-transform:uppercase}
+.strip{height:56px;display:flex;align-items:center;padding:0 24px;gap:24px;border-bottom:1px solid #D6D2C8;background:#F4F2ED}
+.status{display:flex;align-items:center;gap:12px;flex:1}
+.cursor{width:0;height:0;border-left:12px solid #F5B400;border-top:7px solid transparent;border-bottom:7px solid transparent}
+.status b{font-size:16px;font-weight:600}
+.status .k{color:#6B675D}
+.opts{display:flex;gap:6px}
+.opt{height:36px;padding:0 16px;display:flex;align-items:center;border:1px solid #15140F;border-radius:3px;background:#F4F2ED;font-size:13px;font-weight:500}
+.opt.primary{background:#15140F;color:#F4F2ED}
+.opt.ghost{border-color:#B8B3A6;color:#6B675D}
+.body{display:grid;grid-template-columns:1fr 400px;height:844px}
+.scene{padding:24px;display:flex;flex-direction:column;gap:16px}
+.stage{flex:1;position:relative;background:
+ radial-gradient(circle at 46% 32%,#9BE36A 0 9%,#2F8A3A 9.5% 14%,transparent 14.5%),
+ repeating-conic-gradient(from 0deg at 50% 50%,#8FD03F 0 25%,#E4C84A 0 50%) 0 0/160px 90px;
+ border:1px solid #15140F}
+.stage:after{content:"";position:absolute;inset:0;background:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='1' height='1' fill='%23000' opacity='.18'/></svg>");opacity:.45;mix-blend-mode:multiply}
+.chapters{height:118px;display:grid;grid-template-columns:repeat(7,1fr);gap:10px}
+.ch{border:1px solid #B8B3A6;background:#F4F2ED;display:flex;flex-direction:column;overflow:hidden}
+.ch .thumb{flex:1;background:repeating-conic-gradient(from 0deg,#8FD03F 0 25%,#E4C84A 0 50%) 0 0/40px 24px;filter:saturate(var(--s,1)) contrast(var(--c,1))}
+.ch .cap{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;font-size:12px}
+.ch .cap .k{color:#6B675D;font-size:9px}
+.ch.live{border-color:#15140F;outline:2px solid #F5B400;outline-offset:-2px}
+.panel{background:#F4F2ED;border-left:1px solid #D6D2C8;display:flex;flex-direction:column}
+.tabs{display:flex;height:48px;border-bottom:1px solid #D6D2C8}
+.tab{flex:1;display:flex;align-items:center;justify-content:center;gap:8px;color:#6B675D}
+.tab.on{color:#15140F;border-bottom:2px solid #15140F}
+.tab .cursor{border-left-width:8px;border-top-width:5px;border-bottom-width:5px}
+.group{padding:18px 24px 6px}
+.group .k{color:#6B675D;margin-bottom:10px;display:block}
+.row{display:grid;grid-template-columns:120px 1fr 44px;align-items:center;gap:12px;height:34px}
+.row.big{height:52px;grid-template-columns:120px 1fr 44px}
+.row .lab{font-size:13px}
+.track{height:8px;background:#D6D2C8;border-radius:4px;position:relative}
+.row.big .track{height:14px;border-radius:7px}
+.track i{position:absolute;left:0;top:0;bottom:0;background:#15140F;border-radius:inherit;width:var(--v)}
+.track u{position:absolute;top:50%;left:var(--v);width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:#F4F2ED;border:2px solid #15140F}
+.row.big .track u{width:24px;height:24px;margin:-12px 0 0 -12px}
+.val{font:12px ui-monospace,Menlo,monospace;text-align:right;color:#15140F}
+.focus{position:relative}
+.focus:before{content:"";position:absolute;left:-18px;top:50%;margin-top:-6px;border-left:10px solid #F5B400;border-top:6px solid transparent;border-bottom:6px solid transparent}
+.toggles{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 24px}
+.tg{height:40px;border:1px solid #15140F;border-radius:3px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:13px}
+.tg .dot{width:12px;height:12px;border-radius:50%;background:#D6D2C8}
+.tg.on .dot{background:#1F9D55}
+.foot{margin-top:auto;height:40px;display:flex;align-items:center;justify-content:space-between;padding:0 24px;border-top:1px solid #D6D2C8;color:#6B675D;font-size:11px}
+</style></head><body>
+<div class="strip">
+  <div class="status"><span class="cursor"></span><b>Ready to tap</b><span class="k">depth 2.0 s · encoder 2.4 s · 4 models local</span></div>
+  <div class="opts"><span class="opt">Open</span><span class="opt">Try a sample</span><span class="opt">Download</span><span class="opt">Send to 3DS</span><span class="opt ghost">Publish</span><span class="opt primary">Reset</span></div>
+</div>
+<div class="body">
+  <div class="scene">
+    <div class="stage"></div>
+    <div class="chapters">
+      <div class="ch live"><div class="thumb"></div><div class="cap"><span>Fried</span><span class="k">01</span></div></div>
+      <div class="ch"><div class="thumb" style="--s:.4"></div><div class="cap"><span>Clean</span><span class="k">02</span></div></div>
+      <div class="ch"><div class="thumb" style="--c:1.6"></div><div class="cap"><span>Glyph</span><span class="k">03</span></div></div>
+      <div class="ch"><div class="thumb" style="--s:1.6"></div><div class="cap"><span>Breathe</span><span class="k">04</span></div></div>
+      <div class="ch"><div class="thumb" style="--c:.7"></div><div class="cap"><span>Glass</span><span class="k">05</span></div></div>
+      <div class="ch"><div class="thumb" style="--s:1.3;--c:1.3"></div><div class="cap"><span>Bars</span><span class="k">06</span></div></div>
+      <div class="ch"><div class="thumb" style="--s:.8"></div><div class="cap"><span>Scales</span><span class="k">07</span></div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="tabs"><div class="tab on"><span class="cursor"></span><span class="k">Look</span></div><div class="tab"><span class="k">Effects</span></div><div class="tab"><span class="k">Motion</span></div><div class="tab"><span class="k">Symbols</span></div></div>
+    <div class="group"><span class="k">Dial</span>
+      <div class="row big focus"><span class="lab">Fry</span><div class="track" style="--v:60%"><i></i><u></u></div><span class="val">0.60</span></div>
+    </div>
+    <div class="group"><span class="k">Palette</span>
+      <div class="row"><span class="lab">Colors</span><div class="track" style="--v:50%"><i></i><u></u></div><span class="val">7</span></div>
+      <div class="row"><span class="lab">Bands</span><div class="track" style="--v:50%"><i></i><u></u></div><span class="val">4</span></div>
+      <div class="row"><span class="lab">Saturation</span><div class="track" style="--v:62%"><i></i><u></u></div><span class="val">0.62</span></div>
+      <div class="row"><span class="lab">Simplify</span><div class="track" style="--v:52%"><i></i><u></u></div><span class="val">0.52</span></div>
+      <div class="row"><span class="lab">Outline</span><div class="track" style="--v:40%"><i></i><u></u></div><span class="val">0.40</span></div>
+      <div class="row"><span class="lab">Subject clarity</span><div class="track" style="--v:60%"><i></i><u></u></div><span class="val">0.60</span></div>
+    </div>
+    <div class="group"><span class="k">Camera</span>
+      <div class="row"><span class="lab">Grain</span><div class="track" style="--v:52%"><i></i><u></u></div><span class="val">0.52</span></div>
+      <div class="row"><span class="lab">Color noise</span><div class="track" style="--v:32%"><i></i><u></u></div><span class="val">0.32</span></div>
+      <div class="row"><span class="lab">Grain size</span><div class="track" style="--v:33%"><i></i><u></u></div><span class="val">2</span></div>
+      <div class="row"><span class="lab">Crunch</span><div class="track" style="--v:42%"><i></i><u></u></div><span class="val">0.42</span></div>
+      <div class="row"><span class="lab">Clipping</span><div class="track" style="--v:30%"><i></i><u></u></div><span class="val">0.30</span></div>
+    </div>
+    <div class="toggles"><div class="tg on"><span>Window</span><span class="dot"></span></div><div class="tg"><span>3DS stream</span><span class="dot"></span></div></div>
+    <div class="foot"><span>Tap a person to recolor</span><span>build 7c9f50d</span></div>
+  </div>
+</div>
+</body></html>

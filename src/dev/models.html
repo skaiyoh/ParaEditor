@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>noisy model loader</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <script type="module" src="%NOISY_SCRIPT%"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Model loader</h1>
+      <p>Fetches the model files an operation needs from <code>/models/</code> into Cache Storage, checks each against the lock, and shows what the model caches hold. <code>?op=</code> picks the operation and <code>?stallMs=</code> sets the stall timeout.</p>
+      <label>Operation <select id="op" data-testid="op">
+        <option value="depth">depth</option>
+        <option value="encode">encode</option>
+        <option value="decode">decode</option>
+        <option value="inpaint">inpaint</option>
+      </select></label>
+      <button type="button" id="run" data-testid="run" disabled>Run</button>
+      <pre id="report" data-testid="report" data-phase="starting"></pre>
+    </main>
+  </body>
+</html>

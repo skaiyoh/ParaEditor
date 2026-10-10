@@ -1,0 +1,55 @@
+# Claude Code session-local state.
+.claude/work/
+.claude/settings.local.json
+.claude/worktrees/
+
+.DS_Store
+
+# Dependencies.
+/node_modules/
+
+# Build output (tools/build.mjs): build/dev and build/production.
+/build/
+
+# The model files tools/fetch-models.mjs fetches; the dev server serves them at /models/.
+/models/
+
+# Dev server results sink and request log, and browser-run results.
+/test-results/
+
+# The owner's photos, local phone CA and TLS keys, and other local-only inputs.
+/.local/
+
+# The model files, an APFS clone of the source checkout's (sandbox clone only).
+/models/
+
+# impeccable-ignore-start
+# Ephemeral output, runtime state, and per-dev overrides.
+# The **/ prefix covers .impeccable at the repo root or in a nested workspace.
+# Shared artifacts stay tracked: config.json, live/config.json,
+# design.json, surfaces/*.md, critique/*.md.
+**/.impeccable/config.local.json
+**/.impeccable/hook.cache.json
+**/.impeccable/hook.pending.json
+**/.impeccable/*.png
+**/.impeccable/review/
+**/.impeccable/questions/
+**/.impeccable/live/server.json
+**/.impeccable/live/sessions/
+**/.impeccable/live/previews/
+**/.impeccable/live/annotations/
+**/.impeccable/live/cache/
+**/.impeccable/live/manual-edit-apply-transaction.json
+**/.impeccable/live/manual-edit-events.jsonl
+**/.impeccable/live/manual-edit-evidence/
+**/.impeccable/live/pending-manual-edits.json
+**/.impeccable/live/deferred-svelte-component-accepts.json
+**/.impeccable/live/*.png
+# impeccable-ignore-end
+
+# Codex event logs (plan/log.tsv is the record).
+/plan/logs/
+
+# Symlinks a lane worktree makes to the main clone.
+/models
+/node_modules

@@ -1,0 +1,9 @@
+{
+  "description": "Respect nathan.fish editor cache headers",
+  "expression": "(http.host eq \"nathan.fish\")",
+  "action": "set_cache_settings",
+  "action_parameters": {
+    "browser_ttl": { "mode": "respect_origin" }
+  },
+  "enabled": true
+}

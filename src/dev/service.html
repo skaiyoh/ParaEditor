@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>noisy analysis service</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <script type="module" src="%NOISY_SCRIPT%"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Analysis service</h1>
+      <p>Runs the analysis service on the real sequence worker: Run fetches the models the stages need through the service, then runs <code>?stages=</code> as one sequence on the master chosen below, raw RGBA bytes of <code>?width=</code> x <code>?height=</code>. The report lists every callback, the service's events, and its termination record; each Run adds one sequence to it.</p>
+      <label>Master (RGBA bytes) <input type="file" id="master" data-testid="master"></label>
+      <button type="button" id="run" data-testid="run" disabled>Run</button>
+      <pre id="report" data-testid="report" data-phase="starting"></pre>
+    </main>
+  </body>
+</html>

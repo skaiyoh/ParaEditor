@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>noisy sequence worker</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <script type="module" src="%NOISY_SCRIPT%"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Sequence worker</h1>
+      <p>Fetches the models the stages need, then drives the sequence worker over its protocol on the master chosen below: raw RGBA bytes of <code>?width=</code> x <code>?height=</code>, and for inpaint the hole as one byte per pixel. <code>?stages=</code> lists the stages, <code>?threads=</code> sets the thread count; the report lists every reply. Truth planes, when chosen, are checked against each depth map and plate: near and far, one byte per texel of the depth map, and the ring, one byte per pixel of the master.</p>
+      <label>Master (RGBA bytes) <input type="file" id="master" data-testid="master"></label>
+      <label>Hole (one byte per pixel) <input type="file" id="hole" data-testid="hole"></label>
+      <label>Depth near region (one byte per depth texel) <input type="file" id="near" data-testid="near"></label>
+      <label>Depth far region (one byte per depth texel) <input type="file" id="far" data-testid="far"></label>
+      <label>Inpaint ring (one byte per pixel) <input type="file" id="ring" data-testid="ring"></label>
+      <button type="button" id="run" data-testid="run" disabled>Run</button>
+      <pre id="report" data-testid="report" data-phase="starting"></pre>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,3 @@
+Scope extension granted: change src/core/history.ts for the one case the exhaustive switch needs, the `surface` edit kind, following exactly how the `symbols` and `motion` patch edits are coalesced and inverted there; nothing else in that file. Do not weaken the Edit union or the exhaustiveness check anywhere.
+
+Then make `npm run typecheck` pass in full, rerun the AGENTS.md checks (both builds and the node tests), update plan/evidence/E1-return.md with the new state (acceptance item 1 should read PASS with the typecheck's last line), and stop. The lead runs render.surface, render.surface-controls-production and the existing scenarios in Chrome right after.

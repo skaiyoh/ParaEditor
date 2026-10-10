@@ -1,0 +1,130 @@
+import type { DemoSession } from './scene.ts';
+import type { AnalysisSnapshot } from './driver.ts';
+import type { SceneDocument } from '../core/types.ts';
+import { plateNeeded } from '../core/derive.ts';
+import type { StylePatch } from '../core/edits.ts';
+import type { RendererDebug } from '../render/types.ts';
+import { isObjectId } from '../core/ids.ts';
+import type { Oklch, Plane } from '../core/raster.ts';
+import { applyEdit } from '../core/reduce.ts';
+import type { Vec2 } from '../core/motion.ts';
+import { windowPlateNeeded } from './window.ts';
+import type { Orientation } from './tilt.ts';
+
+export type DemoTestSurface = {
+  importFile(file: File): Promise<void>;
+  scene(): { status: string; master: { width: number; height: number } | null; clusters: number; path: 'resize' | 'fallback' | null };
+  downloadPng(): Promise<Blob>;
+  /** The stereo pair as the two 3DS downloads, through the session; the page has no button for it. */
+  saveStereo(): Promise<void>;
+  tap(x: number, y: number): Promise<void>;
+  select(id: string | null): void;
+  setRecolor(color: Oklch | null): void;
+  reset(): void;
+  objects(): readonly { readonly id: string; readonly subject: boolean; readonly recolor: SceneDocument['objects'][number]['recolor']; readonly bounds: SceneDocument['objects'][number]['produced']['bounds']; readonly depth: SceneDocument['objects'][number]['produced']['depth']; readonly selected: boolean }[];
+  analysis(): AnalysisSnapshot;
+  requestPlate(): Promise<void>;
+  injectMask(plane: { width: number; height: number; data: Uint8Array }): void;
+  platePixel(x: number, y: number): readonly number[];
+  frame(): number;
+  renderFrameAt(frame: number): Promise<void>;
+  exportFrame(frame: number): Promise<Blob>;
+  setMotion(patch: Partial<SceneDocument['motion']>): void;
+  document(): SceneDocument | null;
+  products(): { generation: number; depth: number; masks: number; plates: number; plateSize: { width: number; height: number } | null; guideSize: { width: number; height: number } | null; plateNeeded: boolean };
+  setStyle(patch: StylePatch): void;
+  setSymbols(patch: Partial<SceneDocument['symbols']>): void;
+  setFry(f: number): void;
+  injectDepth(plane: Plane<'f32'> | null): void;
+  injectFace(center: Vec2 | null): void;
+  injectOrientation(orientation: Orientation): void;
+  windowReady(): boolean;
+  windowFrames(): number;
+  windowTracks(): readonly MediaStreamTrack[];
+  readonly render: RendererDebug | null;
+};
+
+export function demoTestHooks(session: DemoSession): DemoTestSurface {
+  let injectedRenderer: ReturnType<DemoSession['renderer']> = null;
+  let injectedDepth: Plane<'f32'> | null = null;
+  return {
+    importFile: (file) => session.importFile(file),
+    scene() {
+      const { status, scene } = session.snapshot();
+      return {
+        status, master: scene === null ? null : { width: scene.master.width, height: scene.master.height },
+        clusters: scene?.doc.analysis.colors.length ?? 0, path: scene?.path ?? null,
+      };
+    },
+    downloadPng: () => session.downloadPng(),
+    saveStereo: () => session.saveStereo(),
+    tap: (x, y) => session.tap({ x, y }),
+    select(id) {
+      if (id !== null && !isObjectId(id)) throw new Error('Invalid object id.');
+      session.select(id);
+    },
+    setRecolor: (color) => session.setRecolor(color),
+    reset: () => session.reset(),
+    objects() {
+      const scene = session.snapshot().scene;
+      return scene?.doc.objects.map((object) => ({ id: object.id, subject: object.subject, recolor: object.recolor,
+        bounds: object.produced.bounds, depth: object.produced.depth, selected: scene.selected === object.id })) ?? [];
+    },
+    analysis: () => session.analysis.snapshot(),
+    requestPlate: () => session.requestPlateIfNeeded(),
+    injectMask: (plane) => session.injectMask(plane),
+    platePixel(x, y) {
+      const plate = session.snapshot().scene?.plate;
+      if (plate === null || plate === undefined || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= plate.size.width || y >= plate.size.height) {
+        throw new Error('The plate pixel is unavailable.');
+      }
+      const i = (y * plate.size.width + x) * 3;
+      return Array.from(plate.data.subarray(i, i + 3));
+    },
+    frame: () => session.frame(),
+    async renderFrameAt(frame) { session.renderFrameAt(frame); },
+    async exportFrame(frame) {
+      const debug = session.renderer()?.debug;
+      if (debug === null || debug === undefined || !('exportFrame' in debug) || typeof debug.exportFrame !== 'function') {
+        throw new Error('Loop export requires the dev render probe.');
+      }
+      const blob: unknown = await debug.exportFrame(frame);
+      if (!(blob instanceof Blob)) throw new Error('The loop export did not return a PNG.');
+      return blob;
+    },
+    setMotion: (patch) => session.setMotion(patch),
+    document: () => session.snapshot().scene?.doc ?? null,
+    products() {
+      const scene = session.snapshot().scene;
+      const state = session.snapshot();
+      return { generation: session.analysis.generation(), depth: session.products.depths.size, masks: session.products.masks.size, plates: session.products.plates.size, plateSize: scene?.plate?.size ?? null, guideSize: session.analysis.guide()?.size ?? null, plateNeeded: scene !== null && (state.windowEnabled || state.tiltEnabled ? windowPlateNeeded(scene.doc) : plateNeeded(scene.doc)) };
+    },
+    setStyle: (patch) => session.setStyle(patch),
+    setSymbols: (patch) => {
+      const scene = session.snapshot().scene;
+      if (scene === null) return;
+      const result = applyEdit(scene.doc, { kind: 'symbols', patch }, new Date().toISOString());
+      if (result.kind === 'applied') session.setDocument(result.doc);
+    },
+    setFry: (f) => session.setFry(f),
+    injectFace: (center) => session.injectFace(center),
+    injectOrientation: (orientation) => session.injectOrientation(orientation),
+    windowReady: () => session.windowReady(),
+    windowFrames: () => session.windowFrames(),
+    windowTracks: () => session.windowTracks(),
+    injectDepth(plane) {
+      const renderer = session.renderer();
+      if (renderer === null) throw new Error('Open a photo before injecting depth.');
+      // Install only on explicit injection. The driver still owns real scene
+      // construction; this dev-only override follows its subsequent edits.
+      injectedDepth = plane;
+      if (injectedRenderer !== renderer) {
+        const setScene = renderer.setScene.bind(renderer);
+        renderer.setScene = (scene) => setScene({ ...scene, depth: injectedDepth });
+        injectedRenderer = renderer;
+      }
+      session.setStyle({});
+    },
+    get render() { return session.renderer()?.debug ?? null; },
+  };
+}

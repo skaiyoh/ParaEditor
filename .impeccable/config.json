@@ -1,0 +1,413 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/assigned.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.683Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/assigned.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.699Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/model-pick.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.714Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/model-pick.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.731Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-crouwel.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.749Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-crouwel.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.765Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-zoo.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.780Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-zoo.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.794Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.808Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon.html"
+        ],
+        "createdAt": "2026-10-10T02:24:33.823Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/manual.html"
+        ],
+        "createdAt": "2026-10-10T02:34:33.335Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/manual.html"
+        ],
+        "createdAt": "2026-10-10T02:34:33.349Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/index-print.html"
+        ],
+        "createdAt": "2026-10-10T02:34:33.363Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/index-print.html"
+        ],
+        "createdAt": "2026-10-10T02:34:33.377Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/contact-sheet.html"
+        ],
+        "createdAt": "2026-10-10T02:34:33.390Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/contact-sheet.html"
+        ],
+        "createdAt": "2026-10-10T02:34:33.403Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon-2.html"
+        ],
+        "createdAt": "2026-10-10T02:34:33.417Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon-2.html"
+        ],
+        "createdAt": "2026-10-10T02:34:33.430Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/assigned.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.504Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/assigned.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.524Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/model-pick.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.543Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/model-pick.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.561Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-crouwel.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.577Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-crouwel.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.593Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-zoo.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.609Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-zoo.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.625Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.643Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.659Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/manual.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.675Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/manual.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.691Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/index-print.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.707Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/index-print.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.723Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/contact-sheet.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.738Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/contact-sheet.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.753Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon-2.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.768Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon-2.html"
+        ],
+        "createdAt": "2026-10-10T02:46:52.783Z",
+        "reason": "lead: decision-page sketch, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/assigned.html"
+        ],
+        "createdAt": "2026-10-10T03:42:48.646Z",
+        "reason": "lead: decision-page sketch of a declined world, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/model-pick.html"
+        ],
+        "createdAt": "2026-10-10T03:42:48.662Z",
+        "reason": "lead: decision-page sketch of a declined world, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-crouwel.html"
+        ],
+        "createdAt": "2026-10-10T03:42:48.677Z",
+        "reason": "lead: decision-page sketch of a declined world, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/challenger-zoo.html"
+        ],
+        "createdAt": "2026-10-10T03:42:48.691Z",
+        "reason": "lead: decision-page sketch of a declined world, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon.html"
+        ],
+        "createdAt": "2026-10-10T03:42:48.705Z",
+        "reason": "lead: decision-page sketch of a declined world, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/manual.html"
+        ],
+        "createdAt": "2026-10-10T03:42:48.719Z",
+        "reason": "lead: decision-page sketch of a declined world, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/index-print.html"
+        ],
+        "createdAt": "2026-10-10T03:42:48.733Z",
+        "reason": "lead: decision-page sketch of a declined world, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/contact-sheet.html"
+        ],
+        "createdAt": "2026-10-10T03:42:48.747Z",
+        "reason": "lead: decision-page sketch of a declined world, rendered as a skeleton by serve-question, never shipped"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/canon-2.html"
+        ],
+        "createdAt": "2026-10-10T03:42:48.760Z",
+        "reason": "lead: decision-page sketch of a declined world, rendered as a skeleton by serve-question, never shipped"
+      }
+    ]
+  }
+}
