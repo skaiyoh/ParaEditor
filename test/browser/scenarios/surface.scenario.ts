@@ -203,11 +203,13 @@ export const scenarios: readonly Scenario[] = [{
   async run(t) {
     await t.page.goto('/');
     await t.page.waitFor('surface demo boot', z.boolean(), () => window.__noisyTest?.demo !== undefined);
+    await t.page.click('[data-testid="tool-actions"]');
     await t.page.click('[data-testid="try-sample"]');
     await t.page.waitFor('sample analysis settles', z.boolean(), () => {
       const state = window.__noisyTest?.demo.analysis();
       return state?.depth === true && state.decoderReady && !state.alive.heavy;
     }, { timeoutMs: 180_000 });
+    await t.page.click('[data-testid=tool-adjust]');
     const result = await t.page.evaluate(evidenceSchema, surfaceEvidence);
     await t.file('surface.json', JSON.stringify(result, null, 2));
     t.ok('Surface is collapsed by default between Symbols and Palette', result.collapsed && result.order);
@@ -241,8 +243,10 @@ export const scenarios: readonly Scenario[] = [{
   id: 'render.surface-controls-production', title: 'Surface controls and pixel bypass in the production editor', target: 'production', covers: ['E1'], timeoutMs: 300_000,
   async run(t) {
     await t.page.goto('/');
+    await t.page.click('[data-testid="tool-actions"]');
     await t.page.click('[data-testid="try-sample"]');
     await t.page.waitFor('production sample ready', z.boolean(), () => document.querySelector('[data-testid="status"]')?.textContent === 'Ready to tap', { timeoutMs: 180_000 });
+    await t.page.click('[data-testid="tool-adjust"]');
     await t.page.click('[aria-controls="node-surface"]');
     const result = await t.page.evaluate(z.object({ dials: z.array(dial.omit({ actual: true })), patterns: z.array(z.string()), enabled: z.boolean(), offEqual: z.boolean(), changed: z.boolean(), noDevSurface: z.boolean() }), async () => {
       const stage = document.querySelector('[data-testid="stage"]'), node = document.querySelector('#node-surface');

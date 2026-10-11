@@ -1,8 +1,28 @@
 # noisy
 
-A personal web app that fries iPhone photos into grainy, oversaturated cartoon scenes.
+> Owns: the repository entry point and quick start.
+> Does not own: product scope ([PRODUCT.md](PRODUCT.md)), current priorities ([plan/revision.md](plan/revision.md)), or implementation ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 
-It reduces a photo to a few vivid, harmonized colors, simplifies objects to their shape while keeping their shading, and covers everything in early-2000s point-and-shoot grain.
-From there you can recolor objects, mix keyboard symbols into the image, animate objects and the camera into a parallax loop, and add lights that cast rays and shadows.
+An iPad-first photo-to-motion editor built for a 48-hour hackathon.
+Import a photograph, select and recolor objects, apply mathematical image treatments, and create a depth-based loop or a viewer-responsive perspective effect.
+The current app includes Fry, Palette/Camera treatments, Symbols, Surface, Motion, Parallax, PNG/GIF/movie export, and shared Projects.
+Hybrid Radeon integration prepares depth and background plates remotely when configured and healthy; selection, rendering, and viewing stay on the device.
 
-Status lives in the Linear project noisy, not in this repository.
+The approved revision expands creative control through arbitrary colors, human-directed selection, layer placement, and drawing, with implementation staged through reviewed dispatches.
+These additions are requirements, not a claim that they have shipped.
+PX10 perspective work merged during this review; actual-iPad verification and hosted GPU activation remain release gates.
+The effect is bounded depth-based viewing, not complete 3D reconstruction.
+
+With the existing npm dependencies and locked model assets available:
+
+```sh
+npm run build
+npm run serve
+```
+
+Open `http://127.0.0.1:8790/` on the Mac.
+For the judge's iPad, use hosted HTTPS or the [local TLS instructions](plan/phone.md).
+
+Start with the [current revision](plan/revision.md), [feature review](plan/feature-review.md), and [pickup notes](plan/resume.md).
+The two session briefs are the [main Claude handoff](plan/handoffs/claude-orchestrator.md) and [complete UI handoff](plan/handoffs/ui-redesign.md).
+Execution evidence stays in `plan/evidence/` and `plan/log.tsv`; this sandbox does not post status to Linear.

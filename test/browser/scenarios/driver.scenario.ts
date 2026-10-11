@@ -259,7 +259,7 @@ const Products = z.object({
 });
 const Preparing = z.object({
   text: z.string().nullable(), font: z.string(), color: z.string(), background: z.string(), radius: z.string(),
-  padding: z.string(), shadow: z.string(), x: z.number(), y: z.number(), withinStage: z.boolean(),
+  padding: z.string(), shadow: z.string(), centered: z.boolean(), x: z.number(), y: z.number(), withinStage: z.boolean(),
 });
 
 function readPreparing(): unknown {
@@ -270,6 +270,7 @@ function readPreparing(): unknown {
   return { text: pill?.textContent ?? null, font: style?.fontSize ?? '', color: style?.color ?? '',
     background: style?.backgroundColor ?? '', radius: style?.borderRadius ?? '', padding: style?.padding ?? '', shadow: style?.boxShadow ?? '',
     x: p !== undefined && s !== undefined ? p.left - s.left : -1, y: p !== undefined && s !== undefined ? p.top - s.top : -1,
+    centered: p !== undefined && s !== undefined && Math.abs((p.left + p.right) / 2 - (s.left + s.right) / 2) < 1,
     withinStage: p !== undefined && s !== undefined && p.right <= s.right && p.bottom <= s.bottom };
 }
 
@@ -406,9 +407,9 @@ const analysisScenarios: readonly Scenario[] = [
       await t.page.evaluate(z.literal(true), driverImport, 4032, 3024, 0);
       await t.page.waitFor('depth preparation pill', z.literal(true), () => document.querySelector('[data-testid=preparing]')?.textContent === 'Preparing: depth' ? true : null);
       const desktopPill = await t.page.evaluate(Preparing, readPreparing);
-      t.equal('quiet pill uses the pinned tokens, padding and position', desktopPill, {
+      t.equal('quiet pill uses the pinned tokens and the top-center notice slot', Preparing.omit({ x: true }).parse(desktopPill), {
         text: 'Preparing: depth', font: '13px', color: 'rgb(230, 230, 230)', background: 'rgb(38, 38, 38)',
-        radius: '4px', padding: '8px 12px', shadow: 'none', x: 12, y: 12, withinStage: true,
+        radius: '12px', padding: '8px 12px', shadow: 'none', centered: true, y: 8, withinStage: true,
       });
       await t.page.screenshot('preparing-1440');
       await t.page.waitFor('depth in the scene document', z.literal(true), () => {

@@ -378,7 +378,7 @@ const LayerPixels = z.object({ screen: z.array(z.number()), undimmed: z.array(z.
 function revealLayerControl(selector: string): true {
   const control = document.querySelector(selector);
   if (!(control instanceof HTMLElement)) throw new Error(`Missing layer control: ${selector}`);
-  const body = control.closest('.phone-tools, .inspector .node-stack, .scene-sidebar .layer-list');
+  const body = control.closest('.phone-tools, .floating-panel-body');
   if (body instanceof HTMLElement) {
     const box = control.getBoundingClientRect(), bounds = body.getBoundingClientRect();
     if (box.top < bounds.top + 8) body.scrollTop += box.top - bounds.top - 8;
@@ -409,6 +409,10 @@ export const scenarios: readonly Scenario[] = [
         const button = (row: string, action: string): string => `${row} [data-testid="layer-${action}"]`;
         const ancestorScrolls: number[][] = [];
         const clickControl = async (selector: string): Promise<void> => {
+          if (!phone && await page.evaluate(z.boolean(), (selector) => {
+            const panel = document.querySelector(selector)?.closest('[data-testid=panel-layers]');
+            return panel instanceof HTMLElement && panel.hidden;
+          }, selector)) await page.click('[data-testid=tool-layers]');
           await page.evaluate(z.literal(true), revealLayerControl, selector);
           await page.click(selector);
           if (phone) ancestorScrolls.push(await page.evaluate(z.array(z.number()), () => {
@@ -444,9 +448,7 @@ export const scenarios: readonly Scenario[] = [
           ['layer-hide', 'layer-delete', 'object-hide', 'object-delete'].map((id) => document.querySelectorAll(`[data-testid="${id}"]`).length)), [2, 2, 1, 1]);
         const beginRename = async (): Promise<void> => {
           if (phone) await clickControl('[data-testid="layer-rename"]');
-          else await page.evaluate(z.literal(true), (selector) => {
-            document.querySelector(selector)?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); return true;
-          }, `${first} .layer-select`);
+          else await clickControl(`${first} [data-testid="layer-rename"]`);
           await page.waitFor('inline layer name', z.literal(true), () => document.querySelector('[data-testid="layer-name-input"]') === null ? null : true);
           await page.evaluate(z.literal(true), () => {
             const input = document.querySelector('[data-testid="layer-name-input"]');

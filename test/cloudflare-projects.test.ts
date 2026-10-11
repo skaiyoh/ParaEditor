@@ -1,3 +1,9 @@
+import { encodeRaster } from '../src/core/asset-codec.ts';
+import { compositionDocumentSchema } from '../src/core/composition-schema.ts';
+import { hashAsset, compositionInventory } from '../src/projects/assets.ts';
+import { serializeCompositionScene, deserializeCompositionScene } from '../src/projects/serialize.ts';
+import { newComposition, artworkLayer, rasterSource, repairProduct } from './fixtures/composition.ts';
+import { DEPTH_MODEL, assetId } from './fixtures/documents.ts';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -268,4 +274,76 @@ test('upstream Neon errors and malformed success responses become one-sentence 5
   await failure(await h.request('/api/projects'), 502, 'The project store is unavailable.');
   await failure(await h.put(`${base}/photo`, photo, 'image/png'), 502, 'The project store is unavailable.');
   assert.equal(h.objects.size, 0);
+});
+
+async function compositionFixture(number: number) {
+  const original = newComposition(), id = uuid(number); assert.ok(isSceneId(id));
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR4nGP4zwAE/xnqQeR/bh7e/wAuSQWfwB0i9wAAAABJRU5ErkJggg==', 'base64'));
+  const rgba = encodeRaster({ format: 'rgba8-srgb-straight', size: { width: 13, height: 7 }, data: Uint8Array.from({ length: 364 }, (_, i) => i % 256) });
+  const coverage = encodeRaster({ format: 'u8', size: { width: 1, height: 1 }, data: new Uint8Array([127]) });
+  const depth = encodeRaster({ format: 'f32', size: { width: 1, height: 1 }, data: new Float32Array([.25]) });
+  const union = encodeRaster({ format: 'u8', size: { width: 2, height: 2 }, data: new Uint8Array([0, 127, 128, 255]) });
+  const hole = encodeRaster({ format: 'u8', size: { width: 2, height: 2 }, data: new Uint8Array([0, 255, 255, 255]) });
+  const [masterId, rgbaId, maskId, depthId, unionId, holeId, photoId] = await Promise.all([png, rgba, coverage, depth, union, hole, photo].map(hashAsset));
+  assert.ok(masterId && rgbaId && maskId && depthId && unionId && holeId && photoId);
+  const layer = artworkLayer(), source = rasterSource();
+  const partial = compositionDocumentSchema.parse({ ...original, id, frame: { ...original.frame,
+    master: { ...original.frame.master, asset: masterId }, source: { asset: photoId, mediaType: 'image/jpeg', byteLength: photo.length } },
+    sources: [{ ...source, image: { ...source.image, asset: rgbaId } }], objects: [{ ...layer,
+      produced: { ...layer.produced, mask: { ...layer.produced.mask, asset: maskId } },
+      depthAttachment: { kind: 'source', map: { asset: depthId, format: 'f32', size: { width: 1, height: 1 } }, model: DEPTH_MODEL, offset: 0 } }] });
+  const template = repairProduct(partial);
+  const doc = compositionDocumentSchema.parse({ ...partial, analysis: { ...partial.analysis, plate: { ...template,
+    key: { ...template.key, removalUnion: unionId, hole: holeId, depth: depthId }, image: partial.frame.master,
+    backgroundDepth: { asset: depthId, format: 'f32', size: { width: 1, height: 1 } } } } });
+  return { doc, assets: new Map([[masterId, png], [rgbaId, rgba], [maskId, coverage], [depthId, depth], [unionId, union], [holeId, hole], [photoId, photo]]), photoId, rgbaId, maskId };
+}
+
+test('v2 worker checkpoint validates all durable bytes, immutable original, descriptors and preserves last-good revision', async (t) => {
+  const h = await harness(t), { doc, assets, photoId, rgbaId } = await compositionFixture(501), route = `/api/projects/${doc.id}`;
+  const wire = serializeCompositionScene(doc, 1);
+  await failure(await h.put(`${route}/scene`, JSON.stringify(wire)), 400);
+  for (const [asset, bytes] of assets) {
+    if (asset === photoId) await acknowledgement(await h.request(`${route}/photo`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', 'X-Project-Asset': asset }, body: new Uint8Array(bytes) }));
+    else await acknowledgement(await h.put(`${route}/assets/${asset}`, new Uint8Array(bytes), 'application/octet-stream'));
+  }
+  await acknowledgement(await h.put(`${route}/scene`, JSON.stringify(wire)));
+  assert.deepEqual(await (await h.request(`${route}/scene`)).json(), wire);
+  assert.deepEqual(h.rows.get(doc.id)?.masks, {});
+  for (const [asset, bytes] of assets) assert.deepEqual(new Uint8Array(await (await h.request(`${route}/assets/${asset}`)).arrayBuffer()), bytes);
+  await acknowledgement(await h.put(`${route}/photo`, new Uint8Array(photo.length), 'image/jpeg'));
+  assert.deepEqual(new Uint8Array(await (await h.request(`${route}/assets/${photoId}`)).arrayBuffer()), photo);
+  const next = { ...wire, revision: 2 };
+  const key = `projects/${doc.id}/assets/${rgbaId}`, saved = h.objects.get(key); assert.ok(saved);
+  h.objects.delete(key);
+  await failure(await h.put(`${route}/scene`, JSON.stringify(next)), 400);
+  h.objects.set(key, { ...saved, bytes: new Uint8Array(saved.bytes.byteLength).buffer });
+  await failure(await h.put(`${route}/scene`, JSON.stringify(next)), 400);
+  h.objects.set(key, saved);
+  assert.deepEqual(await (await h.request(`${route}/scene`)).json(), wire);
+  const source = doc.sources[0]; assert.ok(source);
+  await failure(await h.put(`${route}/scene`, JSON.stringify({ ...next, document: { ...doc, sources: [{ ...source, image: { ...source.image, size: { width: 7, height: 13 } } }] } })), 400);
+  await acknowledgement(await h.put(`${route}/scene`, JSON.stringify(next)));
+  await failure(await h.put(`${route}/scene`, JSON.stringify(wire)), 409);
+  await failure(await h.put(`${route}/assets/${rgbaId}`, new Uint8Array([1]), 'application/octet-stream'), 400);
+  await failure(await h.put(`${route}/assets/${rgbaId}`, new Uint8Array(20 * 1024 * 1024 + 1), 'application/octet-stream'), 413);
+  await acknowledgement(await h.request(route, { method: 'DELETE' }));
+  assert.equal(h.objects.size, 0); assert.equal(h.rows.size, 0);
+  for (const asset of assets.keys()) await failure(await h.request(`${route}/assets/${asset}`), 404);
+  await failure(await h.put(`${route}/assets/${rgbaId}`, new Uint8Array(saved.bytes), 'application/octet-stream'), 410);
+});
+
+test('v2 assets and immutable originals obey late-upload/delete cleanup without changing other prefixes', async (t) => {
+  const h = await harness(t), { doc, assets, photoId, rgbaId } = await compositionFixture(502), route = `/api/projects/${doc.id}`;
+  let release: () => void = () => undefined, entered: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; }), started = new Promise<void>((resolve) => { entered = resolve; });
+  h.holdPut(async () => { entered(); await gate; });
+  const bytes = assets.get(rgbaId); assert.ok(bytes);
+  const pending = h.put(`${route}/assets/${rgbaId}`, new Uint8Array(bytes), 'application/octet-stream');
+  await started;
+  await failure(await h.request(route, { method: 'DELETE' }), 404);
+  release();
+  await failure(await pending, 410);
+  assert.equal(h.objects.size, 0);
+  await failure(await h.request(`${route}/photo`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', 'X-Project-Asset': photoId }, body: photo }), 410);
 });

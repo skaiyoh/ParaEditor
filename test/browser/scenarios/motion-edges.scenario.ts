@@ -16,11 +16,13 @@ export const scenarios: readonly Scenario[] = [{
     const { page } = t;
     await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
     await page.goto(t.baseUrl);
+    await page.click('[data-testid="tool-actions"]');
     await page.click('[data-testid="try-sample"]');
     await page.waitFor('sample and analysis ready', z.literal(true), () => {
       const demo = window.__noisyTest?.demo;
       return demo?.analysis().depth && demo.analysis().decoderReady && demo.render !== null ? true : null;
     }, { timeoutMs: 150_000 });
+    await page.click('[data-testid="tool-adjust"]');
     await page.click('.inspector .node[aria-label="Motion"] .node-disclosure');
     const controls = await page.evaluate(z.boolean(), async () => {
       const demo = window.__noisyTest?.demo;

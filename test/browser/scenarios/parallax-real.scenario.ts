@@ -6,7 +6,7 @@ export const scenarios: readonly Scenario[] = [{
   async run(t) {
     const { page } = t;
     await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
-    await page.goto('/'); await page.click('[data-testid="try-sample"]');
+    await page.goto('/'); await page.click('[data-testid="tool-actions"]'); await page.click('[data-testid="try-sample"]'); await page.click('[data-testid="tool-actions"]');
     await page.waitFor('real depth and selection decoder', z.literal(true), () => {
       const a = window.__noisyTest?.demo.analysis(); return a?.depth && a.decoderReady && !a.alive.heavy ? true : null;
     }, { timeoutMs: 180_000 });

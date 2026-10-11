@@ -24,7 +24,9 @@ export const scenarios: readonly Scenario[] = [{
     await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
     await page.goto('/');
     await page.evaluate(z.literal(true), () => { performance.setResourceTimingBufferSize(2000); return true; });
+    await page.click('[data-testid="tool-actions"]');
     await page.click('[data-testid="try-sample"]');
+    await page.click('[data-testid="tool-actions"]');
     await page.waitFor('sample depth and decoder', z.literal(true), () => {
       const analysis = window.__noisyTest?.demo.analysis();
       return analysis?.depth && analysis.decoderReady && !analysis.alive.heavy ? true : null;

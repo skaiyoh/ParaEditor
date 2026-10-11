@@ -7,10 +7,21 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import '../src/core/asset-refs.ts';
+import '../src/core/composition.ts';
+import '../src/core/composition-ranges.ts';
+import '../src/core/composition-schema.ts';
+import '../src/core/legacy-schema.ts';
+import '../src/core/selection.ts';
+import '../src/core/authoring-view.ts';
+import '../src/core/mask-edit.ts';
+import '../src/core/asset-codec.ts';
+import '../src/core/gallery.ts';
 import '../src/core/face-view.ts';
 import '../src/core/live-coverage.ts';
 import '../src/core/orientation.ts';
 import '../src/core/perspective.ts';
+import '../src/core/placement.ts';
 import { srgbToOklab } from '../src/core/color.ts';
 import { defaultStyle } from '../src/core/defaults.ts';
 import { layers, NEED_OPS } from '../src/core/derive.ts';
@@ -39,27 +50,38 @@ import { REPO } from './support/cli.ts';
  * typecheck`, and one that touches a browser global at load fails the test below.
  */
 const CORE_MODULES = [
+  'asset-codec.ts',
+  'asset-refs.ts',
+  'authoring-view.ts',
   'color.ts',
+  'composition-ranges.ts',
+  'composition-schema.ts',
+  'composition.ts',
   'defaults.ts',
   'derive.ts',
   'edits.ts',
   'equal.ts',
   'face-view.ts',
   'fry.ts',
+  'gallery.ts',
   'history.ts',
   'ids.ts',
+  'legacy-schema.ts',
   'live-coverage.ts',
+  'mask-edit.ts',
   'migrate.ts',
   'motion.ts',
   'orientation.ts',
   'percentile.ts',
   'perspective.ts',
+  'placement.ts',
   'produce.ts',
   'ranges.ts',
   'raster.ts',
   'reduce.ts',
   'result.ts',
   'schema.ts',
+  'selection.ts',
   'types.ts',
   'zod.ts',
 ];

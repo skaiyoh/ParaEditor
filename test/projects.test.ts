@@ -5,6 +5,11 @@ import { isSceneId } from '../src/core/ids.ts';
 import { serializeScene, deserializeScene } from '../src/projects/serialize.ts';
 import { createProjectSession, PROJECT_UNDO_MS } from '../src/session/projects.ts';
 import { minimalDocument, uuid } from './fixtures/documents.ts';
+import { captureCommitted, createAuthoring, type GestureValue } from '../src/session/authoring.ts';
+import { EMPTY_HISTORY, recordEdit } from '../src/core/history.ts';
+import { applyProduce } from '../src/core/produce.ts';
+import { depthProduct } from './fixtures/products.ts';
+import { fiveClusterDocument } from './fixtures/documents.ts';
 
 const settle = async (): Promise<void> => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
 function gate() {
@@ -28,6 +33,7 @@ function rig(t: TestContext, documents: readonly SceneDocument[]) {
   const exports: string[] = [];
   let renderer = documents[0]?.title ?? '';
   let failExport = false;
+  let exporter: ((document: SceneDocument) => Promise<Blob>) | null = null;
   let fault: (method: string, path: string) => Promise<Response | null> = async () => null;
   const page = new EventTarget();
   for (const [name, value] of Object.entries({
@@ -73,13 +79,15 @@ function rig(t: TestContext, documents: readonly SceneDocument[]) {
     if (resource === 'photo') return new Response(new Blob(['photo'], { type: 'image/png' }));
     throw new Error(`Unexpected GET ${path}`);
   });
-  const session = createProjectSession(async () => {
+  const session = createProjectSession(async (document) => {
+    if (exporter !== null) return exporter(document);
     exports.push(renderer);
     if (failExport) { failExport = false; throw new Error('Transient export failure'); }
     return new Blob([renderer]);
   });
   t.after(() => session.cancelPendingRemovals());
   return { session, stored, calls, exports, page,
+    exporter(next: (document: SceneDocument) => Promise<Blob>) { exporter = next; },
     renderer(name: string) { renderer = name; },
     failNextExport() { failExport = true; },
     fault(rule: typeof fault) { fault = rule; },
@@ -235,4 +243,61 @@ test('a current project can retry a transient preview failure without another do
   await assert.rejects(r.session.load(doc.id, new AbortController().signal), /latest project changes could not be saved/);
   assert.equal((await r.session.load(doc.id, new AbortController().signal)).document.style.fry, .7);
   assert.deepEqual(r.exports, [doc.title, doc.title]);
+});
+
+test('pending saves capture committed color/parameters during long gestures, restore previews and retain arriving analysis', async (t) => {
+  const initial = fiveClusterDocument(), r = rig(t, [initial]);
+  const masks = new Map(initial.objects.map((object) => {
+    const { asset, size } = object.produced.mask;
+    return [asset, { format: 'u8', size, data: new Uint8Array(size.width * size.height) } satisfies import('../src/core/raster.ts').Plane<'u8'>] satisfies [typeof asset, import('../src/core/raster.ts').Plane<'u8'>];
+  }));
+  let doc = initial, history = EMPTY_HISTORY, rendered = doc;
+  const authoring = createAuthoring({ read: () => doc,
+    changed: () => { rendered = authoring.previewDocument(doc); },
+    record(edit) {
+      const result = recordEdit({ doc, history, edit, now: '2026-10-11T01:00:00.000Z', at: 1 });
+      if (result.kind === 'refused') return { kind: 'refused', reason: result.detail };
+      if (result.kind === 'applied') { doc = result.doc; history = result.history; r.session.observe(doc, masks); }
+      return { kind: result.kind };
+    },
+  });
+  r.exporter((document) => captureCommitted({ document,
+    render(saved) { rendered = saved; },
+    capture: () => Promise.resolve(new Blob([JSON.stringify(rendered)])),
+    restore() { rendered = authoring.previewDocument(doc); },
+  }));
+  await r.session.refresh(); r.session.begin(new File(['photo'], 'photo.png'), doc, masks, 0);
+  const layer = doc.objects[0]; assert.ok(layer);
+  for (const value of [
+    { kind: 'color', color: { l: .32, c: .11, h: 101 } },
+    { kind: 'style', patch: { saturation: .11 } },
+  ] satisfies GestureValue[]) {
+    const pending = recordEdit({ doc, history, edit: { kind: 'symbols', patch: { amount: value.kind === 'color' ? .11 : .22 } }, now: '2026-10-11T00:30:00.000Z', at: 0 });
+    assert.equal(pending.kind, 'applied'); doc = pending.doc; history = pending.history;
+    r.session.observe(doc, masks);
+    const before = doc, beforeHistory = history;
+    const token = authoring.beginGesture({ operation: value.kind, target: value.kind === 'color' ? { kind: 'layer', id: layer.id } : { kind: 'scene' } }); assert.ok(token);
+    assert.equal(authoring.updateGesture({ token, value }).kind, 'applied');
+    assert.notDeepEqual(rendered, doc);
+    // The debounce expires while the preview remains live.
+    t.mock.timers.tick(1500); await settle();
+    assert.deepEqual(r.stored.get(doc.id)?.doc, before);
+    const firstThumbnail = r.calls.filter((call) => call.path.endsWith('/thumbnail')).at(-1)?.body;
+    assert.ok(firstThumbnail instanceof Blob); assert.deepEqual(JSON.parse(await firstThumbnail.text()), before);
+    assert.deepEqual(rendered, authoring.previewDocument(doc)); assert.notDeepEqual(rendered, before);
+    // Analysis is a real committed product and schedules its own snapshot, not a color commit.
+    const arrived = applyProduce(doc, { kind: 'depth', depth: depthProduct(value.kind === 'color' ? 3 : 4) }, '2026-10-11T00:45:00.000Z');
+    assert.equal(arrived.kind, 'applied'); doc = arrived.doc; authoring.reconcile(doc, null);
+    r.session.observe(doc, masks);
+    t.mock.timers.tick(1500); await settle();
+    assert.notDeepEqual(rendered, doc);
+    const committed = doc;
+    authoring.cancelGesture(token);
+    assert.equal(doc, committed); assert.equal(history, beforeHistory); assert.equal(rendered, committed);
+    assert.deepEqual(r.stored.get(doc.id)?.doc, committed);
+    const thumbnail = r.calls.filter((call) => call.path.endsWith('/thumbnail')).at(-1)?.body;
+    assert.ok(thumbnail instanceof Blob); assert.deepEqual(JSON.parse(await thumbnail.text()), committed);
+    const writes = r.calls.length;
+    t.mock.timers.tick(5000); await settle(); assert.equal(r.calls.length, writes, 'cancellation schedules no save');
+  }
 });

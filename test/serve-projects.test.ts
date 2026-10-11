@@ -1,3 +1,9 @@
+import { encodeRaster } from '../src/core/asset-codec.ts';
+import { compositionDocumentSchema } from '../src/core/composition-schema.ts';
+import { hashAsset, compositionInventory } from '../src/projects/assets.ts';
+import { serializeCompositionScene, deserializeCompositionScene } from '../src/projects/serialize.ts';
+import { newComposition, artworkLayer, rasterSource, repairProduct } from './fixtures/composition.ts';
+import { DEPTH_MODEL, assetId } from './fixtures/documents.ts';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -410,4 +416,123 @@ test('accepted project corruption and truncation faults alter JSON, binary bytes
   await setFault(`path:${route}:corrupt:times=1`);
   await assert.rejects(store.deleteProject(doc.id), SyntaxError);
   await store.deleteProject(doc.id); // Its second DELETE is 404 and completes successfully.
+}));
+
+async function compositionFixture(number: number) {
+  const original = newComposition(), id = uuid(number); assert.ok(isSceneId(id));
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR4nGP4zwAE/xnqQeR/bh7e/wAuSQWfwB0i9wAAAABJRU5ErkJggg==', 'base64'));
+  const rgba = encodeRaster({ format: 'rgba8-srgb-straight', size: { width: 13, height: 7 }, data: Uint8Array.from({ length: 364 }, (_, i) => i % 256) });
+  const coverage = encodeRaster({ format: 'u8', size: { width: 1, height: 1 }, data: new Uint8Array([127]) });
+  const depth = encodeRaster({ format: 'f32', size: { width: 1, height: 1 }, data: new Float32Array([.25]) });
+  const union = encodeRaster({ format: 'u8', size: { width: 2, height: 2 }, data: new Uint8Array([0, 127, 128, 255]) });
+  const hole = encodeRaster({ format: 'u8', size: { width: 2, height: 2 }, data: new Uint8Array([0, 255, 255, 255]) });
+  const [masterId, rgbaId, maskId, depthId, unionId, holeId, photoId] = await Promise.all([png, rgba, coverage, depth, union, hole, photo].map(hashAsset));
+  assert.ok(masterId && rgbaId && maskId && depthId && unionId && holeId && photoId);
+  const layer = artworkLayer(), source = rasterSource();
+  const partial = compositionDocumentSchema.parse({ ...original, id, frame: { ...original.frame,
+    master: { ...original.frame.master, asset: masterId }, source: { asset: photoId, mediaType: 'image/jpeg', byteLength: photo.length } },
+    sources: [{ ...source, image: { ...source.image, asset: rgbaId } }], objects: [{ ...layer,
+      produced: { ...layer.produced, mask: { ...layer.produced.mask, asset: maskId } },
+      depthAttachment: { kind: 'source', map: { asset: depthId, format: 'f32', size: { width: 1, height: 1 } }, model: DEPTH_MODEL, offset: 0 } }] });
+  const template = repairProduct(partial);
+  const doc = compositionDocumentSchema.parse({ ...partial, analysis: { ...partial.analysis, plate: { ...template,
+    key: { ...template.key, removalUnion: unionId, hole: holeId, depth: depthId }, image: partial.frame.master,
+    backgroundDepth: { asset: depthId, format: 'f32', size: { width: 1, height: 1 } } } } });
+  return { doc, assets: new Map([[masterId, png], [rgbaId, rgba], [maskId, coverage], [depthId, depth], [unionId, union], [holeId, hole], [photoId, photo]]), photoId, rgbaId, maskId };
+}
+
+test('v2 real HTTP checkpoint retains RGBA alpha, fractional masks, depth, PNG, exact repair and immutable original bytes', async () => withClient(async () => {
+  const { doc, assets, photoId, rgbaId } = await compositionFixture(401), route = `/api/projects/${doc.id}`;
+  const wire = serializeCompositionScene(doc, 0);
+  assert.equal((await put(`${route}/scene`, JSON.stringify(wire), 'application/json')).status, 400, 'missing assets cannot create a checkpoint');
+  assert.equal((await request(`${route}/scene`)).status, 404);
+  const input = { document: doc, revision: 0, assets, thumbnail: new Blob([jpeg], { type: 'image/jpeg' }) };
+  assert.deepEqual(await store.saveComposition(input), { kind: 'saved', revision: 0 });
+  assert.deepEqual(await (await request(`${route}/scene`)).json(), wire);
+  for (const [asset, expected] of assets) {
+    const response = await request(`${route}/assets/${asset}`);
+    assert.equal(response.status, 200); assert.equal(response.headers.get('Content-Type'), 'application/octet-stream');
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), expected);
+  }
+  const loaded = await store.loadCompositionProject(doc.id, new AbortController().signal);
+  assert.equal(loaded.kind, 'composition');
+  assert.ok(loaded.kind === 'composition'); assert.deepEqual(loaded.document, doc); assert.deepEqual(loaded.assets, assets);
+  // Changing the legacy slot cannot destroy an immutable original or last-good revision.
+  assert.equal((await put(`${route}/photo`, new Uint8Array(photo.length), 'image/jpeg')).status, 200);
+  const invalid = { ...wire, revision: 1, document: { ...doc, sources: doc.sources.map((source) => ({ ...source, image: { ...source.image, asset: assetId(999) } })) } };
+  assert.equal((await put(`${route}/scene`, JSON.stringify(invalid), 'application/json')).status, 400);
+  assert.deepEqual(await (await request(`${route}/scene`)).json(), wire);
+  assert.deepEqual(new Uint8Array(await (await request(`${route}/assets/${photoId}`)).arrayBuffer()), photo);
+  assert.equal((await put(`${route}/scene`, JSON.stringify(wire), 'application/json')).status, 409);
+  await store.saveComposition({ ...input, revision: 2 });
+  await setFault(`path:${route}/assets/${rgbaId}:corrupt:times=1`);
+  await assert.rejects(store.loadCompositionProject(doc.id, new AbortController().signal), /asset bytes are invalid/);
+  assert.equal((await store.loadCompositionProject(doc.id, new AbortController().signal)).revision, 2);
+  await store.deleteProject(doc.id);
+  for (const asset of assets.keys()) assert.equal((await request(`${route}/assets/${asset}`)).status, 404);
+  const rgba = assets.get(rgbaId); assert.ok(rgba);
+  assert.equal((await put(`${route}/assets/${rgbaId}`, new Uint8Array(rgba), 'application/octet-stream')).status, 410);
+  await assert.rejects(stat(path.join(scratch, 'results', 'projects', doc.id)), { code: 'ENOENT' });
+}));
+
+test('slow v2 store and Undo/Redo retain at most active + newest pending, release superseded bytes, and upload committed refs only', async () => withClient(async () => {
+  const { doc, assets } = await compositionFixture(402), route = `/api/projects/${doc.id}`;
+  const clientFetch = globalThis.fetch, uploads: string[] = [], revisions: number[] = [];
+  let release: () => void = () => undefined, entered: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; }), started = new Promise<void>((resolve) => { entered = resolve; });
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === 'PUT') {
+      uploads.push(String(input));
+      if (String(input).endsWith('/scene')) {
+        const scene = deserializeCompositionScene(JSON.parse(String(init.body))); revisions.push(scene.revision);
+        if (scene.revision === 0) { entered(); await gate; }
+      }
+    }
+    return clientFetch(input, init);
+  };
+  const thumbnail = new Blob([jpeg], { type: 'image/jpeg' });
+  const first = store.saveComposition({ document: doc, assets, revision: 0, thumbnail });
+  await started;
+  const retained = store.compositionSaveRetention(doc.id); assert.equal(retained.length, 1);
+  assert.equal(retained[0]?.bytes, 542);
+  const firstSource = doc.sources[0]; assert.ok(firstSource);
+  const calls = [];
+  for (let revision = 1; revision <= 30; revision++) {
+    // Alternate Undo to the shared source and Redo to a unique replacement.
+    const bytes = encodeRaster({ format: 'rgba8-srgb-straight', size: firstSource.image.size, data: new Uint8Array(364).fill(revision) });
+    const asset = await hashAsset(bytes), entries = new Map(assets);
+    entries.set(asset, bytes); entries.set(assetId(999), new Uint8Array([1, 2, 3])); // history/gesture only
+    const next = revision % 2 === 0 ? doc : compositionDocumentSchema.parse({ ...doc, sources: [{ ...firstSource, image: { ...firstSource.image, asset } }] });
+    calls.push(store.saveComposition({ document: next, assets: entries, revision, thumbnail }));
+    bytes.fill(255); // Capture is owned, not a mutable view into the live products.
+    const roots = store.compositionSaveRetention(doc.id);
+    assert.deepEqual(roots.map(({ revision }) => revision), [0, revision]);
+    assert.equal(roots.reduce((sum, root) => sum + root.bytes, 0), 1084);
+    assert.ok(roots.every((root) => !root.assets.includes(assetId(999))));
+  }
+  await assert.rejects(store.saveComposition({ document: doc, assets, revision: 30, thumbnail }), (error: unknown) => error instanceof store.ProjectRequestError && error.status === 409);
+  release();
+  assert.deepEqual(await first, { kind: 'saved', revision: 0 });
+  const results = await Promise.all(calls);
+  assert.equal(results.filter((result) => result.kind === 'superseded').length, 29);
+  assert.deepEqual(results.at(-1), { kind: 'saved', revision: 30 });
+  assert.deepEqual(revisions, [0, 30]);
+  assert.equal(uploads.filter((path) => path.includes('/assets/') || path.endsWith('/photo')).length, assets.size);
+  assert.deepEqual(store.compositionSaveRetention(doc.id), []);
+  assert.equal((await store.loadCompositionProject(doc.id, new AbortController().signal)).revision, 30);
+  await store.deleteProject(doc.id);
+}));
+
+test('v2 malformed acknowledgements never report Saved and terminal errors discard pending saves', async () => withClient(async () => {
+  const { doc, assets } = await compositionFixture(403), route = `/api/projects/${doc.id}`;
+  const input = { document: doc, assets, revision: 0, thumbnail: new Blob([jpeg], { type: 'image/jpeg' }) };
+  await setFault(`path:${route}/thumbnail:corrupt:times=1`);
+  await assert.rejects(store.saveComposition(input));
+  assert.equal((await request(`${route}/scene`)).status, 404);
+  assert.deepEqual(store.compositionSaveRetention(doc.id), []);
+  await store.saveComposition({ ...input, revision: 1 });
+  await store.deleteProject(doc.id);
+  const results = await Promise.allSettled([store.saveComposition({ ...input, revision: 2 }), store.saveComposition({ ...input, revision: 3 })]);
+  assert.ok(results.every((result) => result.status === 'rejected' && result.reason instanceof store.ProjectRequestError && result.reason.status === 410));
+  assert.deepEqual(store.compositionSaveRetention(doc.id), []);
 }));

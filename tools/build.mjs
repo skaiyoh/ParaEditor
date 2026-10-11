@@ -25,6 +25,8 @@ const WORKERS = {
   face: 'analysis/face-worker.ts',
 };
 const APP = 'main.tsx';
+const GALLERY = 'gallery.ts';
+const GALLERY_FIXTURE = 'dev/gallery-fixture.ts';
 const STATIC = ['manifest.webmanifest', 'icon.svg'];
 const MIGRATE = 'core/migrate.ts';
 /** The directory under --src whose pages and workers only a dev build writes. */
@@ -315,7 +317,11 @@ async function main() {
     const used = { hit: false };
     const ort = await vendoredOrt();
     const dev = flags.mode === 'dev' ? await devSources(flags.src) : { pages: [], workers: [] };
-    const entryNames = [APP, ...Object.values(WORKERS), ...dev.pages.map((p) => p.entry), ...dev.workers.map((w) => w.entry)].map((f) => path.basename(f));
+    // --src probe trees may omit the optional second page; the real source carries both files.
+    const hasGallery = existsSync(path.join(flags.src, GALLERY));
+    const hasFixture = hasGallery && flags.mode === 'dev' && existsSync(path.join(flags.src, GALLERY_FIXTURE));
+    const extraEntries = [...(hasGallery ? [GALLERY] : []), ...(hasFixture ? [GALLERY_FIXTURE] : [])];
+    const entryNames = [APP, ...extraEntries, ...Object.values(WORKERS), ...dev.pages.map((p) => p.entry), ...dev.workers.map((w) => w.entry)].map((f) => path.basename(f));
     const repeated = entryNames.find((n, i) => entryNames.indexOf(n) !== i);
     if (repeated !== undefined) throw new Error(`two entries share the file name ${repeated}, so their URLs cannot be told apart.`);
     const options = esbuildOptions(flags, id, staging, used, ort, lock);
@@ -329,7 +335,7 @@ async function main() {
     const devWorkerUrls = Object.fromEntries(dev.workers.map((w) => [w.name, workerOut[path.basename(w.entry)]]));
     const app = await esbuild.build({
       ...options,
-      entryPoints: [path.join(flags.src, APP), ...dev.pages.map((p) => p.entry)],
+      entryPoints: [APP, ...extraEntries].map((entry) => path.join(flags.src, entry)).concat(dev.pages.map((p) => p.entry)),
       define: { ...options.define, NOISY_WORKER_URLS: JSON.stringify(workerUrls), NOISY_DEV_WORKER_URLS: JSON.stringify(devWorkerUrls) },
     });
     const appOut = entryUrls(app.metafile, staging);
@@ -345,6 +351,12 @@ async function main() {
     const template = await readFile(path.join(flags.src, 'index.html'), 'utf8');
     if (!template.includes('%NOISY_APP%')) throw new Error(`${path.join(flags.src, 'index.html')} has no %NOISY_APP% placeholder.`);
     await writeFile(path.join(staging, 'index.html'), template.replaceAll('%NOISY_APP%', appUrl));
+    if (hasGallery) {
+      const html = await readFile(path.join(flags.src, 'gallery.html'), 'utf8');
+      if (!html.includes('%NOISY_GALLERY%') || !html.includes('%NOISY_GALLERY_FIXTURE%')) throw new Error('gallery.html is missing its entry placeholders.');
+      const fixture = hasFixture ? `<script type="module" src="${appOut[path.basename(GALLERY_FIXTURE)]}"></script>` : '';
+      await writeFile(path.join(staging, 'gallery.html'), html.replaceAll('%NOISY_GALLERY%', appOut[GALLERY]).replaceAll('%NOISY_GALLERY_FIXTURE%', fixture));
+    }
     for (const file of STATIC) await cp(path.join(flags.src, file), path.join(staging, file));
     const assets = path.join(flags.src, 'assets');
     if (existsSync(assets)) await cp(assets, path.join(staging, 'assets-static'), { recursive: true });
@@ -369,6 +381,7 @@ async function main() {
       mode: flags.mode,
       buildId: id,
       app: appUrl,
+      ...(hasGallery ? { gallery: appOut[GALLERY] } : {}),
       workers: workerUrls,
       devPages,
       devWorkers: devWorkerUrls,

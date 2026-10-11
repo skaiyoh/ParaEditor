@@ -74,7 +74,7 @@ function observeDownload(): true {
 }
 
 function buttonSelector(label: string): string {
-  const button = [...document.querySelectorAll('button')].find((node) => node.textContent?.trim() === label || node.getAttribute('aria-label') === label);
+  const button = [...document.querySelectorAll('button')].find((node) => node.checkVisibility() && (node.textContent?.trim() === label || node.getAttribute('aria-label') === label));
   if (button === undefined) throw new Error(`The ${label} button is missing.`);
   button.dataset['storyAction'] = label;
   return `[data-story-action="${label}"]`;
@@ -87,9 +87,16 @@ export const scenarios: readonly Scenario[] = [
     async run(t) {
       await t.page.goto('/');
       await t.page.waitFor('the sample button', z.literal(true), () => [...document.querySelectorAll('button')].some((button) => button.textContent === 'Try a sample') ? true : null);
-      const click = async (label: string): Promise<void> => { await t.page.click(await t.page.evaluate(z.string(), buttonSelector, label)); };
+      const click = async (label: string): Promise<void> => {
+        if (label === 'Try a sample' || label === 'Reset') {
+          if (await t.page.evaluate(z.boolean(), () => document.querySelector('[data-testid=tool-actions]')?.getAttribute('aria-expanded') === 'false')) await t.page.click('[data-testid=tool-actions]');
+        }
+        await t.page.click(await t.page.evaluate(z.string(), buttonSelector, label));
+      };
       await click('Try a sample');
       await t.page.waitFor('Ready to tap without a dev timing suffix', z.literal(true), ready, { timeoutMs: 240_000 });
+      await t.page.click('[data-testid=tool-adjust]');
+      await t.page.click('[aria-controls=node-camera]');
       t.equal('production status is exactly Ready to tap', await t.page.evaluate(z.string(), status), 'Ready to tap');
       const rect = await t.page.evaluate(Rect, frame);
       t.ok('the stage region is visible', rect.width > 0 && rect.height > 0, rect);
@@ -118,7 +125,7 @@ export const scenarios: readonly Scenario[] = [
         return true;
       }, SUBJECT);
       const swatch = await t.page.waitFor('the visible Green swatch after the subject tap', z.string(), () => {
-        const button = [...document.querySelectorAll('button')].find((node) => node.textContent?.trim() === 'Green' || node.getAttribute('aria-label') === 'Green' || node.title === 'Green');
+        const button = [...document.querySelectorAll('button')].find((node) => (node.textContent?.trim() === 'Green' || node.getAttribute('aria-label') === 'Green' || node.title === 'Green') && node.getBoundingClientRect().width > 0);
         if (button === undefined || button.getBoundingClientRect().width === 0) return null;
         button.dataset['storySwatch'] = 'green';
         return '[data-story-swatch="green"]';

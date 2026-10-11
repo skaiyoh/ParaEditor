@@ -4,7 +4,7 @@ import type { Scenario } from '../scenario.ts';
 /** Reveal controls inside the shared inspector without moving its ancestors. */
 function revealInspectorControl(selector: string): true {
   const control = document.querySelector(selector);
-  const body = control?.closest('.phone-tools, .inspector .node-stack');
+  const body = control?.closest('.phone-tools, .floating-panel-body');
   if (control !== null && body instanceof HTMLElement) {
     const box = control.getBoundingClientRect(), bounds = body.getBoundingClientRect();
     if (box.top < bounds.top + 8) body.scrollTop += box.top - bounds.top - 8;
@@ -28,6 +28,7 @@ export const scenarios: readonly Scenario[] = [{
       await page.click('[data-testid="parallax-enabled"]');
       await page.waitFor('running camera', z.literal(true), () => window.__noisyTest?.demo.windowReady() ? true : null, { timeoutMs: 60_000 });
       if (size.mobile) await page.click('.sheet-handle');
+      else await page.click('[data-testid="tool-adjust"]');
       await page.evaluate(z.literal(true), revealInspectorControl, '[aria-controls="node-parallax"]');
       await page.click('[aria-controls="node-parallax"]');
       await page.evaluate(z.literal(true), revealInspectorControl, '[data-testid="parallax-recenter"]');

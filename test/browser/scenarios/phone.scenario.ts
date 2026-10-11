@@ -20,14 +20,14 @@ const layoutSchema = z.object({
   viewport: z.object({ width: z.number(), height: z.number() }),
   scrollWidth: z.number(), scrollHeight: z.number(), scrollX: z.number(), scrollY: z.number(),
   stage: phoneBoxSchema, status: phoneBoxSchema, toolbar: phoneBoxSchema,
-  buttons: z.array(z.object({ label: z.string(), box: phoneBoxSchema, background: z.string(), pressed: z.string().nullable() })),
-  accent: z.string(), desktopAbsent: z.boolean(), touchAction: z.string(),
+  buttons: z.array(z.object({ label: z.string(), box: phoneBoxSchema, background: z.string(), texture: z.string(), pressed: z.string().nullable() })),
+  key: z.string(), legacyMarkUnset: z.boolean(), desktopAbsent: z.boolean(), touchAction: z.string(),
 });
 
 /** Scroll only the inspector body; overflow-hidden ancestors must not move. */
 function revealInspectorControl(selector: string): true {
   const control = document.querySelector(selector);
-  const body = control?.closest('.phone-tools, .inspector .node-stack');
+  const body = control?.closest('.phone-tools, .floating-panel-body');
   if (control !== null && body instanceof HTMLElement) {
     const box = control.getBoundingClientRect(), bounds = body.getBoundingClientRect();
     if (box.top < bounds.top + 8) body.scrollTop += box.top - bounds.top - 8;
@@ -52,11 +52,12 @@ function phoneLayout(): unknown {
     scrollWidth: document.documentElement.scrollWidth, scrollHeight: document.documentElement.scrollHeight, scrollX, scrollY,
     stage: box(stage), status: box(status), toolbar: box(toolbar),
     buttons: Array.from(toolbar.querySelectorAll('button'), (button) => ({
-      label: button.textContent?.trim() ?? '', box: box(button), background: getComputedStyle(button).backgroundColor,
+      label: button.textContent?.trim() ?? '', box: box(button), background: getComputedStyle(button).backgroundColor, texture: getComputedStyle(button).backgroundImage,
       pressed: button.getAttribute('aria-pressed'),
     })),
-    accent: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(),
-    desktopAbsent: document.querySelector('.scene-sidebar, .inspector, .viewer-toolbar') === null,
+    key: getComputedStyle(document.documentElement).getPropertyValue('--key').trim(),
+    legacyMarkUnset: getComputedStyle(document.documentElement).getPropertyValue(['--', 'accent'].join('')).trim() === '',
+    desktopAbsent: document.querySelector('[data-testid=panel-actions], [data-testid=panel-adjust], [data-testid=panel-layers]') === null,
     touchAction: getComputedStyle(stage).touchAction,
   };
 }
@@ -81,7 +82,9 @@ export const scenarios: readonly Scenario[] = [{
       // Wait for that render before the driver samples its click coordinates.
       await page.waitFor('touch controls rendered', z.literal(true), () =>
         document.querySelector('[data-testid="take-photo"]') instanceof HTMLButtonElement ? true : null);
+      await page.click('[data-testid="tool-actions"]');
       await page.click('[data-testid="try-sample"]');
+      await page.click('[data-testid="tool-actions"]');
       await page.waitFor('sample depth and decoder', z.literal(true), () => {
         const analysis = window.__noisyTest?.demo.analysis();
         return analysis?.depth && analysis.decoderReady && !analysis.alive.heavy ? true : null;
@@ -112,7 +115,7 @@ export const scenarios: readonly Scenario[] = [{
         const size = { width: 128, height: 96 }, mask = new Uint8Array(size.width * size.height), depth = new Float32Array(mask.length).fill(.25);
         for (let y = 36; y < 60; y++) for (let x = 48; x < 80; x++) { const i = y * size.width + x; mask[i] = 255; depth[i] = 1; }
         const sampleTimings = demo.analysis().timings;
-        const desktopModes = Array.from(document.querySelectorAll('.bottom-bar .mode-rail button')).map((button) => button.textContent);
+        const desktopModes = Array.from(document.querySelectorAll('[data-testid=mode-pill] button[aria-pressed]')).map((button) => button.textContent);
         desktopUnchanged &&= desktopModes.join(',') === 'Motion,Symbols,Parallax';
         demo.injectMask({ ...size, data: mask });
         await wait(() => demo.objects().length > 0, 10_000);
@@ -250,7 +253,7 @@ export const scenarios: readonly Scenario[] = [{
           Object.defineProperty(camera, 'click', { configurable: true, value: () => { opened = true; } });
           try { takePhoto.click(); }
           finally { if (ownClick === undefined) Reflect.deleteProperty(camera, 'click'); else Object.defineProperty(camera, 'click', ownClick); }
-          const cameraInput = opened && camera.accept === 'image/*' && camera.type === 'file' && camera.getAttribute('capture') === 'environment';
+          const cameraInput = opened && camera.accept === 'image/jpeg,image/png' && camera.type === 'file' && camera.getAttribute('capture') === 'environment';
           const data = new DataTransfer();
           data.items.add(new File([await (await fetch('/assets-static/sample.jpg')).blob()], 'phone-camera.jpg', { type: 'image/jpeg' }));
           camera.files = data.files; camera.dispatchEvent(new Event('change', { bubbles: true }));
@@ -261,7 +264,7 @@ export const scenarios: readonly Scenario[] = [{
           // An empty patch is UNCHANGED in the reducer and publishes nothing; a real grain change makes the rails re-render.
           demo.setStyle({ grain: (demo.document()?.style.grain ?? 0) > 0.5 ? 0.25 : 0.75 }); await next(() => undefined);
           desktopUnchanged &&= document.querySelector('[data-testid="take-photo"]') === null &&
-            Array.from(document.querySelectorAll('.bottom-bar .mode-rail button')).map((button) => button.textContent).join(',') === 'Motion,Symbols,Parallax';
+            Array.from(document.querySelectorAll('[data-testid=mode-pill] button[aria-pressed]')).map((button) => button.textContent).join(',') === 'Motion,Symbols,Parallax';
           return { center: center.x, centerY: center.y, positive: positive.x, negative: negative.x, positiveY: positiveY.y, negativeY: negativeY.y,
             clamped, branchContinuous, stillMatches, bothSources, tracksStopped, timedOut, timeoutMs,
             motionAdvances, motionElapsed, motionFrames, motionOffZero, loopResumes, deniedSafe, stalePermissionSafe, permissionInGesture: calledSynchronously,
@@ -336,7 +339,7 @@ export const scenarios: readonly Scenario[] = [{
       // Re-enter the tier so touch gating is deterministic even if model
       // startup finished before maxTouchPoints was stubbed.
       await page.emulate({ width: 1200, height: 800, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
-      await page.waitFor('desktop frame above the phone tier', z.literal(true), () => document.querySelector('.scene-sidebar') !== null && document.querySelector('.phone-sheet') === null ? true : null);
+      await page.waitFor('desktop frame above the phone tier', z.literal(true), () => document.querySelector('[data-testid=tool-actions]') !== null && document.querySelector('.phone-sheet') === null ? true : null);
       await page.emulate({ width: 402, height: 874, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await page.waitFor('touch-gated phone empty frame', z.literal(true), () => document.querySelector('.phone-editor [data-testid="take-photo"]') !== null &&
         document.querySelector('.empty-actions button')?.textContent === 'Take a photo' ? true : null);
@@ -368,8 +371,8 @@ export const scenarios: readonly Scenario[] = [{
         t.ok(`${label}: stage spans the viewport width with room for the picture above the inspector`, stage.left === 0 && stage.width === viewport.width && stage.height >= viewport.height / 4, stage);
         t.ok(`${label}: four toolbar buttons stay inside the viewport and are at least 44 px tall`, inside(toolbar) && buttons.length === 4 && buttons.every((button) => inside(button.box) && button.box.height >= 44), result);
         t.equal(`${label}: modes precede Download`, buttons.map((button) => button.label), ['Motion', 'Symbols', 'Parallax', 'Download']);
-        t.ok(`${label}: modes are toggles and Download is accent-filled`, buttons.slice(0, 3).every((button) => button.pressed === 'true' || button.pressed === 'false') &&
-          buttons[3]?.background === 'rgb(255, 61, 127)' && result.accent.toUpperCase() === '#FF3D7F', buttons);
+        t.ok(`${label}: modes are toggles and Download uses the textured key`, buttons.slice(0, 3).every((button) => button.pressed === 'true' || button.pressed === 'false') &&
+          buttons[3]?.background === 'rgb(242, 242, 242)' && buttons[3]?.texture.startsWith('url(') === true && result.key.toUpperCase() === '#F2F2F2' && result.legacyMarkUnset, buttons);
         t.ok(`${label}: the status sentence is visible`, inside(status), status);
         t.ok(`${label}: desktop panels are absent and the stage suppresses browser gestures`, result.desktopAbsent && result.touchAction === 'none', result);
       };
@@ -493,12 +496,13 @@ export const scenarios: readonly Scenario[] = [{
       await page.waitFor('390 viewport and open sheet', z.literal(true), () => innerWidth === 390 && innerHeight === 844 && document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'true' ? true : null);
       await checkLayout('390 ready');
       await page.screenshot('phone-390-ready');
-      // A tablet held upright takes the phone frame too (an 11-inch iPad Pro is 834 px wide in portrait).
+      // An upright iPad takes the full tier; compact-only checks stay at phone widths.
       await page.emulate({ width: 834, height: 1194, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
-      await page.waitFor('834 portrait viewport and open sheet', z.literal(true), () => innerWidth === 834 && innerHeight === 1194 && document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'true' ? true : null);
-      await checkLayout('834 tablet portrait ready');
+      await page.waitFor('834 portrait full viewport', z.literal(true), () => innerWidth === 834 && innerHeight === 1194 && ['tool-actions', 'tool-adjust', 'tool-layers'].every((id) => document.querySelector(`[data-testid=${id}]`)?.checkVisibility() === true) && document.querySelector('.phone-sheet') === null ? true : null);
       await page.screenshot('tablet-834-ready');
-      await checkProjects('834');
+      await page.emulate({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+      await page.waitFor('phone sheet after full-tier check', z.literal(true), () => document.querySelector('.phone-sheet') === null ? null : true);
+      await checkProjects('390');
       for (const name of ['motion', 'symbols']) {
         await page.click(`[data-testid="${name}-enabled"]`);
         t.ok(`portrait ${name} rail updates its inspector toggle`, await page.evaluate(z.boolean(), (name) => {
@@ -514,9 +518,9 @@ export const scenarios: readonly Scenario[] = [{
       }
       await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
       await page.waitFor('desktop frame after portrait mode changes', z.literal(true), () =>
-        document.querySelector('.inspector') !== null && document.querySelectorAll('.bottom-bar .mode-rail button').length === 3 ? true : null);
+        document.querySelector('.inspector') !== null && document.querySelectorAll('[data-testid=mode-pill] button[aria-pressed]').length === 3 ? true : null);
       const desktopModes = await page.evaluate(z.object({ names: z.array(z.string()), matches: z.array(z.boolean()) }), () => {
-        const modes = Array.from(document.querySelectorAll('.bottom-bar .mode-rail button'));
+        const modes = Array.from(document.querySelectorAll('[data-testid=mode-pill] button[aria-pressed]'));
         return { names: modes.map((button) => button.textContent ?? ''), matches: ['motion-enabled', 'symbols-enabled', 'parallax-node-enabled'].map((id, index) => {
           const input = document.querySelector(`[data-testid="${id}"]`);
           return input instanceof HTMLInputElement && String(input.checked) === modes[index]?.getAttribute('aria-pressed');
@@ -539,12 +543,18 @@ export const scenarios: readonly Scenario[] = [{
     await page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(.38, .585); return true; });
     await page.waitFor('selected object', z.literal(true), () => window.__noisyTest?.demo.objects().some((object) => object.selected) ? true : null);
     const click = async (selector: string): Promise<void> => {
+      const opener = await page.evaluate(z.string().nullable(), (selector) => {
+        const panel = document.querySelector(selector)?.closest('[data-testid=panel-adjust], [data-testid=panel-layers]');
+        if (!(panel instanceof HTMLElement) || !panel.hidden) return null;
+        return panel.dataset['testid'] === 'panel-layers' ? '[data-testid=tool-layers]' : '[data-testid=tool-adjust]';
+      }, selector);
+      if (opener !== null) await page.click(opener);
       await page.evaluate(z.literal(true), revealInspectorControl, selector);
       await page.click(selector);
       const moved = await page.evaluate(z.array(z.string()), (selector) => {
         const moved: string[] = [];
         for (let node = document.querySelector(selector)?.parentElement; node !== null && node !== undefined; node = node.parentElement) {
-          if (!node.matches('.phone-tools, .inspector .node-stack') && (node.scrollTop !== 0 || node.scrollLeft !== 0)) moved.push(`${node.tagName}.${node.className}: ${node.scrollTop},${node.scrollLeft}`);
+          if (!node.matches('.phone-tools, .floating-panel-body') && (node.scrollTop !== 0 || node.scrollLeft !== 0)) moved.push(`${node.tagName}.${node.className}: ${node.scrollTop},${node.scrollLeft}`);
         }
         return moved;
       }, selector);
@@ -570,7 +580,7 @@ export const scenarios: readonly Scenario[] = [{
       }, { id, initial });
       t.ok(`${id}: a value away from the current one changes the scene`, change.after !== change.before && Math.abs(change.after - change.expected) < .00001 && change.documentChanged, change);
     };
-    for (const size of [{ width: 402, height: 874 }, { width: 834, height: 1194 }]) {
+    for (const size of [{ width: 402, height: 874 }, { width: 390, height: 844 }]) {
       await page.emulate({ ...size, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await page.waitFor('portrait inspector', z.literal(true), () => document.querySelector('.sheet-inspector') === null ? null : true);
       const initial = await page.evaluate(z.object({ names: z.array(z.string()), first: z.string(), closed: z.boolean() }), () => ({
@@ -579,15 +589,15 @@ export const scenarios: readonly Scenario[] = [{
         closed: Array.from(document.querySelectorAll('.sheet-inspector .node:not([aria-label="Fry"]) .node-disclosure')).every((button) => button.getAttribute('aria-expanded') === 'false'),
       }));
       t.equal(`${size.width}: Fry is visibly named first`, initial.first, 'Fry');
-      t.equal(`${size.width}: all nodes and Layers are present`, initial.names, ['Fry', 'Layers', 'Motion', 'Parallax', 'Symbols', 'Surface', 'Palette', 'Camera']);
+      t.equal(`${size.width}: all nodes and Layers are present`, initial.names, ['Fry', 'Layers', 'Color', 'Actions', 'Motion', 'Parallax', 'Symbols', 'Surface', 'Palette', 'Camera']);
       t.ok(`${size.width}: secondary groups start collapsed`, initial.closed, initial);
       await click('[aria-controls="node-layers"]');
       await click('.phone-tools .layer-row:first-child');
       t.ok(`${size.width}: Plate deselects the object`, await page.evaluate(z.boolean(), () => !window.__noisyTest?.demo.objects().some((object) => object.selected)));
       await click('.phone-tools .layer-row:last-child .layer-select');
-      const color = await page.evaluate(z.string(), () => document.querySelector('.phone-tools .swatch[aria-label="Green"]')?.getAttribute('aria-pressed') === 'true' ? 'Coral' : 'Green');
-      await click(`.phone-tools .swatch[aria-label="${color}"]`);
-      t.ok(`${size.width}: the selected layer's color changes`, await page.evaluate(z.boolean(), (color) => document.querySelector(`.phone-tools .swatch[aria-label="${color}"]`)?.getAttribute('aria-pressed') === 'true', color));
+      const color = await page.evaluate(z.string(), () => document.querySelector('.phone-tools .object-scope .swatch[aria-label="Green"]')?.getAttribute('aria-pressed') === 'true' ? 'Coral' : 'Green');
+      await click(`.phone-tools .object-scope .swatch[aria-label="${color}"]`);
+      t.ok(`${size.width}: the selected layer's color changes`, await page.evaluate(z.boolean(), (color) => document.querySelector(`.phone-tools .object-scope .swatch[aria-label="${color}"]`)?.getAttribute('aria-pressed') === 'true', color));
       await click('[aria-controls="node-layers"]');
       await changeRange('style-fry');
       await page.click('.sheet-handle');
@@ -658,7 +668,7 @@ export const scenarios: readonly Scenario[] = [{
         await new Promise((resolve) => setTimeout(resolve, 160));
         return true;
       });
-      await page.screenshot(size.width === 402 ? 'inspector-phone-402' : 'inspector-ipad-834');
+      await page.screenshot(size.width === 402 ? 'inspector-phone-402' : 'inspector-phone-390');
       await page.click('[data-testid="projects-toggle"]');
       t.ok(`${size.width}: the hidden expanded sheet does not reserve space for Projects`, await page.evaluate(z.boolean(), () => {
         const stage = document.querySelector('.phone-stage')?.getBoundingClientRect();
@@ -668,18 +678,20 @@ export const scenarios: readonly Scenario[] = [{
     }
     await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
     await page.waitFor('desktop inspector', z.literal(true), () => document.querySelector('.inspector') === null ? null : true);
+    await page.click('[data-testid=tool-adjust]');
     const hierarchy = () => page.evaluate(z.object({ fryTop: z.number(), names: z.array(z.string()), separate: z.boolean(), secondaryClosed: z.boolean() }), () => ({
-      fryTop: document.querySelector('.inspector [aria-label="Fry"]')?.getBoundingClientRect().top ?? -1,
+      fryTop: document.querySelector('[data-testid=fry-rail]')?.getBoundingClientRect().top ?? -1,
       names: Array.from(document.querySelectorAll('.inspector .node'), (node) => node.getAttribute('aria-label') ?? ''),
-      separate: document.querySelector('.scene-nodes .object-node') === null && document.querySelector('.object-scope .object-node') !== null,
+      separate: document.querySelector('[data-testid=panel-adjust] .object-node') === null && document.querySelector('[data-testid=context-bar]') !== null,
       secondaryClosed: ['palette', 'camera'].every((name) => document.querySelector(`[aria-controls="node-${name}"]`)?.getAttribute('aria-expanded') === 'false'),
     }));
     const selected = await hierarchy();
     t.ok('desktop: selected-object controls have their own scope and Palette/Camera default closed', selected.separate && selected.secondaryClosed, selected);
-    await click('.inspector .swatch[aria-label="Coral"]');
+    await click('[data-testid=context-bar] .swatch[aria-label="Coral"]');
+    await page.press('Escape');
     await page.press('Escape');
     const deselected = await hierarchy();
-    await click('.scene-sidebar .layer-row:last-child .layer-select');
+    await click('[data-testid=panel-layers] .layer-row:last-child .layer-select');
     const reselected = await hierarchy();
     t.ok('desktop: Fry and the scene node order never move on recolor, deselection or reselection', selected.fryTop === deselected.fryTop && selected.fryTop === reselected.fryTop && selected.names.join(',') === reselected.names.join(','), { selected, deselected, reselected });
     await click('[aria-controls="node-palette"]');
@@ -689,14 +701,15 @@ export const scenarios: readonly Scenario[] = [{
     const lowerFocus = await page.evaluate(z.object({ id: z.string().nullable(), top: z.number(), bottom: z.number(), boundsTop: z.number(), boundsBottom: z.number(), scrollY: z.number(), ancestorsStill: z.boolean() }), async () => {
       // Native focus scrolling settles at the next rendering opportunity.
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      const active = document.activeElement?.getBoundingClientRect(), bounds = document.querySelector('.inspector .node-stack')?.getBoundingClientRect();
+      const active = document.activeElement?.getBoundingClientRect(), bounds = document.querySelector('[data-testid=panel-adjust] .floating-panel-body')?.getBoundingClientRect();
       let ancestorsStill = true;
-      for (let node = document.activeElement?.parentElement; node !== null && node !== undefined; node = node.parentElement) if (!node.matches('.inspector .node-stack')) ancestorsStill &&= node.scrollTop === 0 && node.scrollLeft === 0;
+      for (let node = document.activeElement?.parentElement; node !== null && node !== undefined; node = node.parentElement) if (!node.matches('.floating-panel-body')) ancestorsStill &&= node.scrollTop === 0 && node.scrollLeft === 0;
       return { id: document.activeElement?.getAttribute('data-testid') ?? null, top: active?.top ?? -1, bottom: active?.bottom ?? -1, boundsTop: bounds?.top ?? -1, boundsBottom: bounds?.bottom ?? -1, scrollY, ancestorsStill };
     });
     t.ok('desktop: lower node keyboard focus scrolls inside the inspector without moving the page', lowerFocus.id === 'style-clipping' && lowerFocus.top >= lowerFocus.boundsTop && lowerFocus.bottom <= lowerFocus.boundsBottom && lowerFocus.scrollY === 0 && lowerFocus.ancestorsStill, lowerFocus);
     await page.press('Escape');
-    await click('.scene-sidebar .layer-row:last-child .layer-select');
+    await page.press('Escape');
+    await click('[data-testid=panel-layers] .layer-row:last-child .layer-select');
     t.ok('desktop: disclosure choices survive selection changes', await page.evaluate(z.boolean(), () => ['palette', 'camera'].every((name) => document.querySelector(`[aria-controls="node-${name}"]`)?.getAttribute('aria-expanded') === 'true')));
     await page.screenshot('inspector-desktop-1440');
     await click('[data-testid="motion-enabled"]');
@@ -716,46 +729,49 @@ export const scenarios: readonly Scenario[] = [{
       }
       throw new Error(`Tab did not reach ${selector}`);
     };
-    const pinkFocus = async (label: string): Promise<void> => {
+    const markFocus = async (label: string): Promise<void> => {
       const focus = await focusedControl();
-      t.ok(`${label}: keyboard focus is a separate inset 2 px accent ring`, focus.focused && focus.visible && focus.width === '2px' && focus.color === 'rgb(255, 61, 127)' && focus.offset === '-2px', focus);
+      t.ok(`${label}: keyboard focus is a separate inset 2 px text ring`, focus.focused && focus.visible && focus.width === '2px' && focus.color === 'rgb(230, 230, 230)' && focus.offset === '-2px', focus);
     };
     await page.click('[data-testid="projects-toggle"]');
     await page.click('[data-testid="projects-return"]');
-    await tabTo('.scene-sidebar .layer-select[aria-pressed="true"]');
-    await pinkFocus('selected object layer');
+    await page.click('[data-testid=tool-layers]');
+    await tabTo('[data-testid=panel-layers] .layer-select[aria-pressed="true"]');
+    await markFocus('selected object layer');
     t.equal('Tab focus never changes the selected layer', await page.evaluate(z.string(), () => JSON.stringify(window.__noisyTest?.demo.objects().filter((object) => object.selected))), selectionBefore);
     await tabTo('[data-testid="style-fry"]');
-    await pinkFocus('Fry range');
-    await tabTo('.bottom-bar .mode-rail button:first-child');
-    await pinkFocus('pressed Motion mode');
+    await markFocus('Fry range');
+    await tabTo('[data-testid=mode-pill] button:first-child');
+    await markFocus('pressed Motion mode');
     t.equal('Motion retains its pressed state while focused', (await focusedControl()).pressed, 'true');
     await tabTo('[data-testid="projects-toggle"]');
     await page.press('Enter');
-    await pinkFocus('active Projects toggle');
+    await markFocus('active Projects toggle');
     t.equal('Projects retains its pressed state while focused', (await focusedControl()).pressed, 'true');
     await tabTo('.top-bar .primary-action');
     const downloadFocus = await focusedControl();
-    t.ok('Download retains the contrasting text ring inset 4 px', downloadFocus.focused && downloadFocus.width === '2px' && downloadFocus.color === 'rgb(230, 230, 230)' && downloadFocus.offset === '-4px', downloadFocus);
+    t.ok('Download retains the contrasting ground ring inset 4 px', downloadFocus.focused && downloadFocus.width === '2px' && downloadFocus.color === 'rgb(26, 26, 26)' && downloadFocus.offset === '-4px', downloadFocus);
     await page.click('[data-testid="projects-return"]');
-    await tabTo('.inspector .swatch[aria-label="Coral"]');
+    await tabTo('[data-testid=context-bar] .swatch[aria-label="Coral"]');
     const swatchFocus = await focusedControl();
     t.ok('swatches retain the contrasting ground ring inset 5 px', swatchFocus.focused && swatchFocus.width === '2px' && swatchFocus.color === 'rgb(26, 26, 26)' && swatchFocus.offset === '-5px', swatchFocus);
     // Plate is a selected button itself, the original specificity regression.
-    await page.click('.scene-sidebar .layer-row:first-child');
+    await page.click('[data-testid=tool-layers]');
+    await page.click('[data-testid=panel-layers] .layer-row:first-child');
     const unfocused = await page.evaluate(z.string(), () => {
-      const plate = document.querySelector('.scene-sidebar .layer-row:first-child');
+      const plate = document.querySelector('[data-testid=panel-layers] .layer-row:first-child');
       return plate === null ? '' : getComputedStyle(plate).outlineWidth;
     });
-    await tabTo('.scene-sidebar button.layer-row.is-selected');
-    await pinkFocus('selected Plate layer');
+    await tabTo('[data-testid=panel-layers] button.layer-row.is-selected');
+    await markFocus('selected Plate layer');
     t.equal('pointer selection stays 1 px', unfocused, '1px');
     await page.screenshot('focus-1440');
     await page.emulate({ width: 1440, height: 550, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
-    t.ok('short desktop height keeps the status and mode rail visible without page scrolling', await page.evaluate(z.boolean(), () => {
-      const footer = document.querySelector('.bottom-bar')?.getBoundingClientRect();
-      return footer !== undefined && footer.height === 44 && footer.bottom === innerHeight &&
-        document.querySelectorAll('.bottom-bar .mode-rail button').length === 3 &&
+    t.ok('short full tier keeps the status and mode pill visible without page scrolling', await page.evaluate(z.boolean(), () => {
+      const pill = document.querySelector('[data-testid=mode-pill]')?.getBoundingClientRect();
+      const status = document.querySelector('[data-testid=status]')?.getBoundingClientRect();
+      return pill !== undefined && pill.height >= 44 && pill.bottom <= innerHeight && status !== undefined && status.bottom <= innerHeight &&
+        document.querySelectorAll('[data-testid=mode-pill] button[aria-pressed]').length === 3 &&
         scrollY === 0 && document.documentElement.scrollHeight === innerHeight;
     }));
   },

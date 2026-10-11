@@ -130,6 +130,7 @@
 
 ### Changed
 
+- `2026-10-10` - Aligned current product/operational documentation with the iPad creative photo-to-motion direction and adversarial feature review; added separate [implementation](../plan/handoffs/claude-orchestrator.md) and [UI](../plan/handoffs/ui-redesign.md) handoffs, corrected stale hybrid/perspective/schema facts, and labeled retained planning history. This entry records documentation only, not newly shipped app features or physical-device verification.
 - `2026-10-01` - `headers.json` caches `/vendor/ort/*` as immutable and sends `/models/*` as `no-store`, and the dev server sends any response the fault state altered as `no-store`.
 - `2026-10-01` - The dev server's default directory for `/vendor/ort/` is the build's own copy, `<root>/vendor/ort`, instead of a top-level `vendor/ort`.
 - `2026-10-01` - `main.tsx` boots through the composition root, which logs one `env` event and every CSP violation the page sees, with its disposition; the shell's text is unchanged, and when the boot throws the shell still renders and adds the error.

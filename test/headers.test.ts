@@ -20,6 +20,29 @@ test('headers.json names COOP, COEP, and the CSP', async () => {
   assert.equal(contract.all['Content-Security-Policy'], CSP);
 });
 
+for (const mode of ['dev', 'production']) test(`gallery page aliases use HTML, no-cache and the unchanged CSP in ${mode}`, async () => {
+  const dir = await tempDir('gallery-headers');
+  try {
+    const built = await runTool('tools/build.mjs', ['--mode', mode, '--outdir', `${dir}/build`, '--gpu', '']);
+    assert.equal(built.code, 0, built.stderr);
+    const server = await startServer(['--mode', mode, '--root', `${dir}/build`]);
+    try {
+      const html = await readFile(`${dir}/build/gallery.html`, 'utf8');
+      for (const page of ['gallery', 'gallery/', 'gallery.html', 'gallery/00000000-0000-4000-8000-000000000001']) {
+        const response = await fetch(`${server.url}${page}`);
+        assert.equal(response.status, 200, page);
+        assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+        assert.equal(response.headers.get('cache-control'), 'no-cache');
+        assert.equal(response.headers.get('content-security-policy'), CSP);
+        assert.equal(await response.text(), html);
+      }
+      for (const page of ['gallery/not-a-piece', 'gallery/00000000-0000-4000-8000-000000000001/extra']) {
+        assert.equal((await fetch(`${server.url}${page}`)).status, 404);
+      }
+    } finally { await server.stop(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('browser foreign-request guard admits only the configured GPU origin and analytics', () => {
   const origin = 'http://127.0.0.1:8790';
   const requests = [origin, 'https://static.cloudflareinsights.com', 'https://cloudflareinsights.com', 'https://gpu.nathan.fish', 'https://other.nathan.fish'].map((url) => ({

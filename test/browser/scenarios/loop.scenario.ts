@@ -447,6 +447,7 @@ const exportScenario: Scenario = {
     const { page } = t;
     await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
     await page.goto(t.baseUrl);
+    await page.click('[data-testid="tool-actions"]');
     await page.click('[data-testid="try-sample"]');
     await page.waitFor('sample ready for loop export', z.literal(true), () => {
       const a = window.__noisyTest?.demo.analysis(); return a?.decoderReady && a.depth && !a.alive.heavy ? true : null;
@@ -459,6 +460,7 @@ const exportScenario: Scenario = {
       demo.setMotion({ enabled: true, loopSeconds: 2 }); await demo.requestPlate();
       const id = demo.objects()[0]?.id; if (id === undefined) throw new Error('No selected export fixture.');
       demo.select(id);
+      document.querySelector<HTMLButtonElement>('[data-testid="tool-adjust"]')?.click();
       const motion = document.querySelector('[aria-label="Motion"] .node-disclosure');
       if (motion instanceof HTMLButtonElement && motion.getAttribute('aria-expanded') === 'false') motion.click();
       return null;

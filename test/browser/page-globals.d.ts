@@ -8,7 +8,7 @@
 import type { DiagnosticEvent, EnvironmentSnapshot } from '../../src/app/events.ts';
 import type { SceneDocument } from '../../src/core/types.ts';
 import type { StylePatch } from '../../src/core/edits.ts';
-import type { Renderer, RendererDebug } from '../../src/render/types.ts';
+import type { Renderer, RendererDebug, CompareMode, SampleColorResult } from '../../src/render/types.ts';
 import type { Oklch, Plane } from '../../src/core/raster.ts';
 import type { SymbolsDebug, LoopDebug, SelectionDebug } from '../../src/render/debug.ts';
 import type { FaceDetection } from '../../src/analysis/protocol.ts';
@@ -18,6 +18,7 @@ import type { createViewDriver, SourceMode } from '../../src/session/view-driver
 import type { createTiltSource } from '../../src/session/tilt.ts';
 import type { createWindowSource } from '../../src/session/window.ts';
 import type { PerspectiveRenderResult } from '../../src/render/types.ts';
+import type { AuthoringState, SampleMode, OperationTarget, Tool, CommandResult, GestureStart, GestureToken, GestureUpdate } from '../../src/session/authoring.ts';
 type ViewDriver = ReturnType<typeof createViewDriver>;
 type LiveDebug = ReturnType<ReturnType<typeof createTiltSource>['readings']>
   & ReturnType<ReturnType<typeof createWindowSource>['preview']>
@@ -32,8 +33,24 @@ declare global {
   const NOISY_WORKER_URLS: { readonly sequence: string; readonly decode: string; readonly face: string };
   interface Window {
     readonly __noisyTest?: {
-      readonly session?: { renderer(): Renderer | null };
+      readonly session?: { renderer(): (Renderer & { exportStill(capture: { frame: number; canvas: HTMLCanvasElement }): void }) | null };
       readonly demo: {
+        authoringState(): AuthoringState;
+        historyState(): { canUndo: boolean; canRedo: boolean; undoDepth: number; redoDepth: number };
+        previewDocument(): SceneDocument | null;
+        setColor(input: { target: OperationTarget; color: Oklch | null }): CommandResult;
+        setTarget(target: OperationTarget): CommandResult;
+        setTool(tool: Tool): CommandResult;
+        beginGesture(start: GestureStart): GestureToken | null;
+        updateGesture(update: GestureUpdate): CommandResult;
+        commitGesture(token: GestureToken): CommandResult;
+        cancelGesture(token: GestureToken): void;
+        setCompare(mode: CompareMode): void;
+        setSampleMode(mode: SampleMode): void;
+        sampleColor(at: { x: number; y: number }): SampleColorResult;
+        setSurface(patch: Partial<SceneDocument['surface']>): void;
+        readonly gallery: ReturnType<typeof import('../../src/session/publish.ts').createPublishSession>
+          & Pick<ReturnType<typeof import('../../src/session/authoring.ts').createAuthoring>, 'beginGesture' | 'updateGesture' | 'cancelGesture'>;
         importFile(file: File): Promise<void>;
         scene(): { status: string; master: { width: number; height: number } | null; clusters: number; path: 'resize' | 'fallback' | null };
         downloadPng(): Promise<Blob>;

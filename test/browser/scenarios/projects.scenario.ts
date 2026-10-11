@@ -40,8 +40,9 @@ export const scenarios: readonly Scenario[] = [{
   async run(t) {
     const { page } = t;
     const clickAction = async (label: string): Promise<void> => {
+      if (await page.evaluate(z.boolean(), () => document.querySelector('[data-testid=tool-actions]')?.getAttribute('aria-expanded') === 'false')) await page.click('[data-testid=tool-actions]');
       const selector = await page.evaluate(z.string(), (label) => {
-        const button = Array.from(document.querySelectorAll('.top-bar .action-rail button')).find((button) => button.textContent === label);
+        const button = Array.from(document.querySelectorAll('[data-testid=panel-actions] button')).find((button) => button.textContent === label);
         if (!(button instanceof HTMLButtonElement)) throw new Error(`No ${label} action.`);
         button.dataset['projectsAction'] = label;
         return `[data-projects-action="${label}"]`;
@@ -101,6 +102,7 @@ export const scenarios: readonly Scenario[] = [{
         Object.fromEntries(Array.from(document.querySelectorAll('.scene-facts > div'), (row) =>
           [row.querySelector('dt')?.textContent ?? '', row.querySelector('dd')?.textContent ?? '']))),
       { Analysis: 'No photo', Master: 'No photo', Depth: 'No photo', Encoder: 'No photo', Plate: 'No photo' });
+      await page.click('[data-testid=tool-actions]');
       await page.screenshot('scene-empty-1440');
       await page.click('[data-testid="projects-toggle"]');
       await page.waitFor('empty Projects feedback', z.literal(true), () => document.querySelector('[data-testid="projects-state"]')?.textContent === 'No projects yet' ? true : null);
@@ -122,11 +124,13 @@ export const scenarios: readonly Scenario[] = [{
           expected: backend.kind === 'gpu' ? `GPU · ${backend.name}` : 'on device' };
       });
       t.equal('an imported photo identifies the actual analysis backend', backendFact.fact, backendFact.expected);
+      await page.click('[data-testid=tool-actions]');
       await page.screenshot('scene-analysis-1440');
       await page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(.38, .585); return true; });
       await page.waitFor('object swatches', z.literal(true), () => document.querySelector('[data-testid="swatches"]') === null ? null : true);
       await page.click('[data-testid="swatches"] button[aria-label="Green"]');
-      await page.click('[data-testid="layer-rename"]');
+      await page.click('[data-testid="tool-layers"]');
+      await page.click('[data-testid=panel-layers] [data-testid="layer-rename"]');
       await page.press('Backspace');
       await page.type('[data-testid="layer-name-input"]', 'Saved ball');
       await page.press('Enter');
@@ -170,6 +174,8 @@ export const scenarios: readonly Scenario[] = [{
       await page.waitFor('scrolling project rows loaded', z.literal(true), () => document.querySelectorAll('[data-testid="project-row"]').length === 13 ? true : null);
       await page.evaluate(z.literal(true), () => { Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 }); return true; });
       await page.emulate({ width: 402, height: 874, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+      await page.waitFor('compact editor after crossing the tier boundary', z.literal(true), () => document.querySelector('.phone-editor') === null ? null : true);
+      if (await page.evaluate(z.boolean(), () => document.querySelector('[data-testid="projects-toggle"]')?.getAttribute('aria-pressed') === 'false')) await page.click('[data-testid="projects-toggle"]');
       await page.waitFor('phone Projects panel', z.literal(true), () => document.querySelector('.phone-stage [data-testid="projects-panel"]') === null ? null : true);
       const phone = await page.evaluate(z.object({ fits: z.boolean(), stageFilled: z.boolean(), toggleBeforeCapture: z.boolean(), controlsHidden: z.boolean(), sheetHidden: z.boolean(), railAbsent: z.boolean(), lastTappable: z.boolean(), scrolled: z.boolean() }), () => {
         const panel = document.querySelector('[data-testid="projects-panel"]')?.getBoundingClientRect(), stage = document.querySelector('.phone-stage')?.getBoundingClientRect();
@@ -209,7 +215,7 @@ export const scenarios: readonly Scenario[] = [{
       t.equal('browsing a saved row makes no claim that it was just saved', await page.evaluate(z.string(), () => document.querySelector('[data-testid="projects-state"]')?.textContent ?? ''), 'Choose a project to open.');
       const beforeOpen = await page.evaluate(listing, async () => (await fetch('/api/projects')).json());
       await page.click('.project-open');
-      await page.waitFor('restored scene and closed panel', z.literal(true), () => window.__noisyTest?.demo.document()?.objects.length && document.querySelector('[data-testid="projects-panel"]') === null ? true : null, { timeoutMs: 30_000 });
+      await page.waitFor('restored scene and closed panel', z.literal(true), () => window.__noisyTest?.demo.document()?.objects.length && !document.querySelector('[data-testid="projects-panel"]')?.checkVisibility() ? true : null, { timeoutMs: 30_000 });
       await page.click('[data-testid="projects-toggle"]');
       const storedTime = beforeOpen.projects.find((project) => project.id === saved.id)?.updatedAt;
       t.equal('opening an existing project preserves its stored timestamp before any new save', await page.evaluate(z.string().nullable(), () => {
@@ -352,6 +358,8 @@ export const scenarios: readonly Scenario[] = [{
       t.ok('Reset keeps the project id and saves cleared objects and masks', reset.id === saved.id && reset.objects === 0 && reset.masksMatch, reset);
       t.equal('Reset scene equals the page document', reset.json, await page.evaluate(z.string(), () => JSON.stringify(window.__noisyTest?.demo.document())));
 
+      // Reset lives in Actions, which replaced Projects as the open panel; reopen Projects before deleting.
+      if (await page.evaluate(z.boolean(), () => document.querySelector('[data-testid="projects-toggle"]')?.getAttribute('aria-pressed') === 'false')) await page.click('[data-testid="projects-toggle"]');
       await page.click('[data-testid="project-delete"]');
       t.ok('one delete click removes the row and offers Undo', await page.evaluate(z.boolean(), () => document.querySelector('[data-testid="project-row"]') === null && document.querySelector('[data-testid="project-undo"]') !== null));
       await page.waitFor('project removed from panel', z.literal(true), () => document.querySelector('[data-testid="project-row"]') === null && document.querySelector('.projects-empty') !== null ? true : null);
@@ -424,7 +432,9 @@ export const scenarios: readonly Scenario[] = [{
     const { page } = t;
     await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
     await page.goto('/');
+    await page.click('[data-testid="tool-actions"]');
     await page.click('[data-testid="try-sample"]');
+    await page.click('[data-testid="tool-actions"]');
     await page.waitFor('sample ready and saved', z.literal(true), () => {
       const demo = window.__noisyTest?.demo;
       return demo?.analysis().decoderReady && demo.projects().state === 'saved' ? true : null;
@@ -487,7 +497,7 @@ export const scenarios: readonly Scenario[] = [{
       await page.click(`${row(current)} .project-open`);
       await page.waitFor('Undo/Open restores the pending edit', z.literal(true), () => {
         const doc = window.__noisyTest?.demo.document();
-        return doc?.style.fry === .77 && document.querySelector('[data-testid="projects-panel"]') === null ? true : null;
+        return doc?.style.fry === .77 && !document.querySelector('[data-testid="projects-panel"]')?.checkVisibility() ? true : null;
       }, { timeoutMs: 30_000 });
       t.equal('Undo opens the current project id', await page.evaluate(z.string(), () => window.__noisyTest?.demo.document()?.id ?? ''), current);
       t.equal('Undo/Open stored the actual current document', (await page.evaluate(savedSchema, savedChecks)).json, await page.evaluate(z.string(), () => JSON.stringify(window.__noisyTest?.demo.document())));
@@ -499,7 +509,7 @@ export const scenarios: readonly Scenario[] = [{
       await page.click(`${row(alternate)} .project-open`);
       await page.waitFor('non-current Undo restores its own saved content', z.literal(true), () => {
         const doc = window.__noisyTest?.demo.document();
-        return doc?.title === 'Saved alternate' && doc.style.fry === .24 && document.querySelector('[data-testid="projects-panel"]') === null ? true : null;
+        return doc?.title === 'Saved alternate' && doc.style.fry === .24 && !document.querySelector('[data-testid="projects-panel"]')?.checkVisibility() ? true : null;
       }, { timeoutMs: 30_000 });
       t.equal('Undo opens the non-current project id', await page.evaluate(z.string(), () => window.__noisyTest?.demo.document()?.id ?? ''), alternate);
       await page.click('[data-testid="projects-toggle"]');
@@ -519,7 +529,7 @@ export const scenarios: readonly Scenario[] = [{
       await page.click('[data-testid="projects-toggle"]');
       t.ok('refresh cannot erase the failure notice', await page.evaluate(z.boolean(), (id) => document.querySelector(`[data-testid="project-deletion"][data-project-id="${id}"]`)?.getAttribute('data-phase') === 'failed', alternate));
       await page.click(`${row(alternate)} .project-open`);
-      await page.waitFor('failed deletion still opens exact saved content', z.literal(true), () => window.__noisyTest?.demo.document()?.style.fry === .24 && document.querySelector('[data-testid="projects-panel"]') === null ? true : null);
+      await page.waitFor('failed deletion still opens exact saved content', z.literal(true), () => window.__noisyTest?.demo.document()?.style.fry === .24 && !document.querySelector('[data-testid="projects-panel"]')?.checkVisibility() ? true : null);
       await page.waitFor('reopened analysis and autosave settle before clicking a sorted row', z.literal(true), () => {
         const demo = window.__noisyTest?.demo;
         return demo?.analysis().decoderReady && demo.projects().state === 'saved' ? true : null;

@@ -1,5 +1,5 @@
 import { layers, maskCovers, holeMask, holeRadius, anchorDisparity, cameraRadius, parallaxClamp, plateNeeded } from '../core/derive.ts';
-import type { ObjectId } from '../core/ids.ts';
+import type { EffectId, ObjectId } from '../core/ids.ts';
 import type { Plane } from '../core/raster.ts';
 import { frameCount, loopPhase, cameraOffset, parallaxDisplacement, effectiveOrbit, loopZoom, parallaxMargin } from '../core/motion.ts';
 import type { Vec2 } from '../core/motion.ts';
@@ -25,7 +25,9 @@ import { dog } from './shaders/dog.ts';
 import { up } from './shaders/up.ts';
 import { quantize } from './shaders/quantize.ts';
 import { outline, OUTLINE_SLOPE_PER_WORKING_TEXEL } from './shaders/outline.ts';
-import { present } from './shaders/present.ts';
+import { present, copy, sourceLookup } from './shaders/present.ts';
+import { parseSrgbChannels } from '../core/color.ts';
+import { samplePixel, type CompareMode, type SampleColorRequest, type SampleColorResult } from './compare.ts';
 import { select } from './shaders/select.ts';
 import { grain, grainHashReadback } from './shaders/grain.ts';
 import { clip } from './shaders/clip.ts';
@@ -34,6 +36,9 @@ import { ATLAS_SIZE, GLYPHS, glyphAtlas, cellGrid } from './symbols.ts';
 import { cellsReduce } from './shaders/cells-reduce.ts';
 import { cellsDraw } from './shaders/cells-draw.ts';
 import { surface, surfaceLookup } from './shaders/surface.ts';
+import { LOCAL_EFFECT_BATCH, prepareLocalEffects, type PreparedLocalEffect } from './local-effects.ts';
+import { localEffects, localCoverage, stillLookup } from './shaders/local-effects.ts';
+import type { LocalEffectReadback } from './types.ts';
 
 const tex = (value: Texture): Uniform => ({ kind: 'texture', value });
 const float = (value: number): Uniform => ({ kind: 'float', value });
@@ -44,6 +49,7 @@ type Buffers = { readonly grid: Grid; readonly simplified: Target; readonly quan
 type CrunchBuffers = { readonly y: readonly [Target, Target]; readonly c: readonly [Target, Target] };
 type CellBuffers = { readonly variant: Target; readonly cells: Target; readonly decisions: Target; readonly size: number };
 type LiveBuffers = { readonly color: Target; readonly label: Target; readonly depth: Target; readonly source: Target; readonly composite: Target };
+type Lookup = { readonly label: Target; readonly source: Target };
 type LiveProducts = {
   readonly identity: NonNullable<RenderScene['livePlate']> | null;
   readonly depthIdentity: RenderScene['depth']; readonly labels: string;
@@ -78,7 +84,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     return {
       geometry: gpu.program(geometry, geometryVertex), coverage: gpu.program(geometryCoverage, geometryVertex), backsource: gpu.program(backsource),
       down: gpu.program(down), tensor: gpu.program(tensor), blur: gpu.program(blur), akf: gpu.program(akf),
-      dog: gpu.program(dog), up: gpu.program(up), quantize: gpu.program(quantize), outline: gpu.program(outline), present: gpu.program(present), select: gpu.program(select),
+      dog: gpu.program(dog), up: gpu.program(up), quantize: gpu.program(quantize), outline: gpu.program(outline), present: gpu.program(present), copy: gpu.program(copy), select: gpu.program(select),
       grain: gpu.program(grain), clip: gpu.program(clip), extract: gpu.program(crunchExtract), rowDct: gpu.program(crunchRowDct),
       columnDct: gpu.program(crunchColumnDct), columnIdct: gpu.program(crunchColumnIdct), rowIdct: gpu.program(crunchRowIdct), combine: gpu.program(crunchCombine),
       hash: NOISY_DEV ? gpu.program(grainHashReadback) : null,
@@ -108,8 +114,19 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   let liveProducts: LiveProducts | null = null;
   const backMesh = gpu.mesh(backGrid());
   const objectMeshes = new Map<ObjectId, { key: string; mesh: ReturnType<typeof gpu.mesh>; mask: Plane<'u8'>; texture: Texture }>();
-  let lastRender: { frame: number; loop: boolean; camera: Vec2 | null; showSelection: boolean; perspective: PerspectiveRenderRequest | null } =
-    { frame: 0, loop: false, camera: null, showSelection: true, perspective: null };
+  let hasRendered = false;
+  let sourcePrograms: { lookup: ReturnType<typeof gpu.program>; warp: ReturnType<typeof gpu.program>; still: ReturnType<typeof gpu.program> } | null = null;
+  let localPrograms: { effects: ReturnType<typeof gpu.program>; coverage: ReturnType<typeof gpu.program> } | null = null;
+  let legacyLookup: Lookup | null = null;
+  let legacyWarp: Lookup | null = null;
+  let lastFrameLookup: Lookup | null = null;
+  let localBefore: Target | null = null;
+  let localCoverageTarget: Target | null = null;
+  let appliedLocalEffects = false;
+  let preparedLocalEffects: readonly PreparedLocalEffect[] = [];
+  const scopeTextures = new Map<Plane<'u8'>, Texture>();
+  let lastRender: { compare: CompareMode; frame: number; loop: boolean; camera: Vec2 | null; showSelection: boolean; perspective: PerspectiveRenderRequest | null } =
+    { compare: 'edited', frame: 0, loop: false, camera: null, showSelection: true, perspective: null };
   let featherEnabled = true;
   let renderedCamera: Vec2 = { x: 0, y: 0 };
   let exportedEdges: boolean | null = null;
@@ -222,6 +239,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   function releaseBuffers(): void {
     releaseCells();
     endPerspective();
+    releaseLocalTargets();
     if (crunchBuffers !== null) for (const target of [...crunchBuffers.y, ...crunchBuffers.c]) gpu.release(target);
     crunchBuffers = null; finalTarget = null; selectionSource = null;
     if (buffers !== null) {
@@ -235,6 +253,8 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     buffers = null;
   }
   function endPerspective(): void {
+    hasRendered = false;
+    lastFrameLookup = null; appliedLocalEffects = false;
     releaseLiveProducts();
     if (liveBuffers !== null) for (const target of Object.values(liveBuffers)) gpu.release(target);
     if (liveWarp !== null) for (const target of Object.values(liveWarp)) gpu.release(target);
@@ -311,9 +331,19 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   }
   function setScene(next: RenderScene): void {
     checkLive();
+    if (next.compositing === 'scene-depth' || 'compositing' in next.doc && next.doc.compositing === 'scene-depth') {
+      throw new Error('Scene-depth composition is not available in C2; physical layer depth requires C3.');
+    }
+    const nextEffects = prepareLocalEffects(next.localEffects ?? [], next.doc.objects);
     const maxSize: unknown = gl.getParameter(gl.MAX_TEXTURE_SIZE);
     if (typeof maxSize !== 'number') checkLive();
     if (typeof maxSize !== 'number' || next.master.width > maxSize || next.master.height > maxSize) throw new Error('The photo exceeds this WebGL2 device’s texture limit.');
+    for (const effect of nextEffects) if (effect.plane !== null &&
+      (effect.plane.size.width > maxSize || effect.plane.size.height > maxSize)) {
+      throw new Error('The local selection exceeds this device’s texture limit.');
+    }
+    hasRendered = false;
+    lastFrameLookup = null; appliedLocalEffects = false;
     if (scene?.master !== next.master) {
       endPerspective();
       if (master !== null) gpu.release(master);
@@ -392,6 +422,8 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     exportedEdges = null;
     // A hit may only describe a draw of this exact scene, not a preceding edit.
     lastRender = { ...lastRender, perspective: null };
+    updateScopeTextures(nextEffects);
+    preparedLocalEffects = nextEffects;
     scene = next;
   }
 
@@ -457,7 +489,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     } catch (error) { for (const resource of allocated) gpu.release(resource); throw error; }
   }
 
-  function perspectiveInputs(request: PerspectiveRenderRequest, cells: CellBuffers | null): LiveBuffers {
+  function perspectiveInputs(request: PerspectiveRenderRequest, cells: CellBuffers | null, treatments: boolean): LiveBuffers {
     if (scene === null || buffers === null || master === null) throw new Error('Open a photo before rendering perspective.');
     if (livePrograms === null) {
       const count: unknown = gl.getParameter(gl.MAX_DRAW_BUFFERS), attachments: unknown = gl.getParameter(gl.MAX_COLOR_ATTACHMENTS);
@@ -489,8 +521,10 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     const validBackground = liveBackgroundMatches(prepared, request);
     if (prepared.dirty && prepared.image !== null && prepared.background !== null && prepared.simplified !== null) {
       gpu.draw(programs.backsource, prepared.background, { master: tex(master), plate: tex(prepared.image), hole: tex(prepared.hole) });
-      simplify(prepared.background, prepared.simplified, buffers.grid, scene.doc.style.simplify, { label: backgroundLabel, clarity: backgroundClarity });
-      prepared.dirty = false;
+      if (treatments) {
+        simplify(prepared.background, prepared.simplified, buffers.grid, scene.doc.style.simplify, { label: backgroundLabel, clarity: backgroundClarity });
+        prepared.dirty = false;
+      }
     }
     const { geometry: config, eye } = request;
     const uniforms = {
@@ -510,7 +544,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     const cover = (mesh: ReturnType<typeof gpu.mesh>, mask: Texture, objectId: number, plane: Texture): void => {
       if (!featherEnabled) return;
       gl.disable(gl.DEPTH_TEST);
-      const styled = stylize(target, cells);
+      const styled = treatments ? stylize(target, cells) : copyColor(target.color);
       gl.bindFramebuffer(gl.FRAMEBUFFER, target.color.framebuffer);
       // Keep the four-attachment WebGL2 floor: temporarily route only color
       // coverage to slot 3, preserving the source-UV texture for exact picking.
@@ -529,7 +563,8 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     };
     try {
       gpu.draw(livePrograms.geometry, liveBuffers.color, { ...uniforms,
-        simplified: tex(validBackground ? prepared.simplified ?? buffers.simplified : buffers.simplified),
+        simplified: tex(treatments ? (validBackground ? prepared.simplified ?? buffers.simplified : buffers.simplified) :
+          (validBackground ? prepared.background ?? master : master)),
         depthPlane: tex(validBackground ? prepared.depth : depth ?? prepared.depth), mask: tex(label), objectId: int(0) }, backMesh);
       cover(backMesh, label, 0, validBackground ? prepared.depth : depth ?? prepared.depth);
       for (const layer of layers(scene.doc)) {
@@ -537,7 +572,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         const entry = objectMeshes.get(layer.object.id);
         if (entry === undefined) continue;
         gl.clear(gl.DEPTH_BUFFER_BIT);
-        gpu.draw(livePrograms.geometry, liveBuffers.color, { ...uniforms, simplified: tex(buffers.simplified),
+        gpu.draw(livePrograms.geometry, liveBuffers.color, { ...uniforms, simplified: tex(treatments ? buffers.simplified : master),
           depthPlane: tex(validBackground ? prepared.objectDepths.get(layer.object.id) ?? prepared.depth : depth ?? prepared.depth),
           mask: tex(entry.texture), objectId: int(scene.doc.objects.indexOf(layer.object) + 1) }, entry.mesh);
         cover(entry.mesh, entry.texture, scene.doc.objects.indexOf(layer.object) + 1,
@@ -616,8 +651,8 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     }
   }
 
-  function geometryInputs(offset: Vec2, zoom: number, cells: CellBuffers | null): { color: Texture; label: Texture; depth: Texture } {
-    if (scene === null || buffers === null) throw new Error('Open a photo before rendering.');
+  function geometryInputs(offset: Vec2, zoom: number, cells: CellBuffers | null, treatments: boolean): { color: Texture; label: Texture; depth: Texture } {
+    if (scene === null || buffers === null || master === null) throw new Error('Open a photo before rendering.');
     if (gbuffer === null) {
       gbuffer = { color: gpu.target(canvas.width, canvas.height), label: gpu.target(canvas.width, canvas.height), depth: gpu.target(canvas.width, canvas.height, 'r16f'), composite: gpu.target(canvas.width, canvas.height) };
       gpu.attachMany(gbuffer.color, [gbuffer.label, gbuffer.depth, gbuffer.composite]);
@@ -648,7 +683,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       // turning the soft rim back into a hard edge. Each layer sees the
       // existing accumulated scene, using the very same styling programs.
       gl.disable(gl.DEPTH_TEST);
-      const styled = stylize(target, cells);
+      const styled = treatments ? stylize(target, cells) : copyColor(target.color);
       gl.bindFramebuffer(gl.FRAMEBUFFER, target.color.framebuffer);
       gl.drawBuffers([gl.NONE, gl.NONE, gl.NONE, gl.COLOR_ATTACHMENT3]);
       gl.enable(gl.DEPTH_TEST);
@@ -666,7 +701,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       }
     };
     try {
-      gpu.draw(programs.geometry, target.color, { ...displacement, simplified: tex(plateSimplified ?? buffers.simplified),
+      gpu.draw(programs.geometry, target.color, { ...displacement, simplified: tex(treatments ? plateSimplified ?? buffers.simplified : backSource ?? master),
         depthPlane: tex(backgroundDepth ?? depth ?? label), mask: tex(label), objectId: int(0) }, backMesh);
       cover(backMesh, label, 0, backgroundDepth ?? depth ?? label);
       for (const layer of layers(scene.doc)) {
@@ -676,7 +711,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         // Layer order still owns inter-object occlusion; depth resolves folds
         // within each mesh independently.
         gl.clear(gl.DEPTH_BUFFER_BIT);
-        gpu.draw(programs.geometry, target.color, { ...displacement, simplified: tex(buffers.simplified),
+        gpu.draw(programs.geometry, target.color, { ...displacement, simplified: tex(treatments ? buffers.simplified : master),
           depthPlane: tex(depth ?? label), mask: tex(entry.texture), objectId: int(scene.doc.objects.indexOf(layer.object) + 1) }, entry.mesh);
         cover(entry.mesh, entry.texture, scene.doc.objects.indexOf(layer.object) + 1, depth ?? label);
       }
@@ -724,6 +759,22 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     }
     return buffers.final;
   }
+  function copyColor(source: Texture): Target {
+    if (buffers === null) throw new Error('Open a photo before comparing.');
+    gpu.draw(programs.copy, buffers.final, { src: tex(source) });
+    return buffers.final;
+  }
+  function setCompare(compare: CompareMode): void {
+    const previous = lastRender;
+    try { render(previous.frame, previous.loop, previous.showSelection, previous.camera, previous.perspective, compare); }
+    catch (error) {
+      try { restoreRender(previous); } catch { /* The session reports the original render failure. */ }
+      throw error;
+    }
+  }
+  function restoreRender(previous: typeof lastRender): void {
+    render(previous.frame, previous.loop, previous.showSelection, previous.camera, previous.perspective, previous.compare);
+  }
   function renderStill(showSelection = true): void { render(0, false, showSelection); }
   function renderFrame(frame: number, showSelection = true): void { render(frame, true, showSelection); }
   function renderView(camera: Vec2, frame = 0, showSelection = true): void { render(frame, true, showSelection, camera); }
@@ -760,9 +811,20 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     }
   }
   function render(frame: number, loop: boolean, showSelection: boolean, camera: Vec2 | null = null,
-    perspective: PerspectiveRenderRequest | null = null): void {
+    perspective: PerspectiveRenderRequest | null = null, compare: CompareMode = lastRender.compare): void {
     checkLive();
     if (scene === null || buffers === null || master === null || palette === null || lut === null) throw new Error('Open a photo before rendering.');
+    hasRendered = false;
+    lastFrameLookup = null; appliedLocalEffects = false;
+    if (compare === 'source-photo') {
+      finalTarget = selectionSource = copyColor(master);
+      gpu.draw(programs.present, null, { src: tex(finalTarget) });
+      checkRenderError();
+      lastRender = { frame, loop, showSelection, camera: camera === null ? null : { ...camera }, perspective, compare };
+      hasRendered = true;
+      return;
+    }
+    const treatments = compare === 'edited';
     if (camera !== null) {
       if (!Number.isFinite(camera.x) || !Number.isFinite(camera.y)) throw new Error('The camera offset must contain finite frame fractions.');
       const reach = parallaxClamp(scene.doc);
@@ -771,7 +833,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     const index = loop && (camera === null || depth !== null) ? wrapFrame(frame, frameCount(scene.doc.motion, LOOP_FPS)) : 0;
     const moving = camera !== null ? depth !== null : loop && effectiveOrbit(scene.doc.motion) > 0 && !plateNeeded(scene.doc);
     const start = probe?.begin() ?? 0;
-    if (dirty) {
+    if (dirty && treatments) {
       const run = (): void => {
         if (scene === null || buffers === null || master === null) return;
         simplify(master, buffers.simplified, buffers.grid, scene.doc.style.simplify);
@@ -782,24 +844,26 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     }
     if (backDirty && plate !== null && plateSimplified !== null && backSource !== null && hole !== null) {
       gpu.draw(programs.backsource, backSource, { master: tex(master), plate: tex(plate), hole: tex(hole) });
-      simplify(backSource, plateSimplified, buffers.grid, scene.doc.style.simplify, { label: backgroundLabel, clarity: backgroundClarity });
-      backDirty = false;
+      if (treatments) {
+        simplify(backSource, plateSimplified, buffers.grid, scene.doc.style.simplify, { label: backgroundLabel, clarity: backgroundClarity });
+        backDirty = false;
+      }
     }
     const drawCamera = moving ? camera ?? cameraOffset(cameraRadius(scene.doc), loopPhase(index, frameCount(scene.doc.motion, LOOP_FPS)), scene.doc.motion.drift.direction) : { x: 0, y: 0 };
     renderedCamera = drawCamera;
-    const cells = scene.doc.symbols.enabled ? ensureCells(canvas.width, canvas.height, scene.doc.symbols.cellSize) : null;
+    const cells = treatments && scene.doc.symbols.enabled ? ensureCells(canvas.width, canvas.height, scene.doc.symbols.cellSize) : null;
     const hiding = plate !== null && scene.doc.objects.some((object) => object.hidden);
-    const inputs = perspective !== null ? perspectiveInputs(perspective, cells) : moving || hiding ? geometryInputs(drawCamera, moving ? loopZoom(scene.doc.motion.parallax) : 1, cells) :
-      { color: buffers.simplified, label, depth: depth ?? label };
+    const inputs = perspective !== null ? perspectiveInputs(perspective, cells, treatments) : moving || hiding ? geometryInputs(drawCamera, moving ? loopZoom(scene.doc.motion.parallax) : 1, cells, treatments) :
+      { color: treatments ? buffers.simplified : master, label, depth: depth ?? label };
     let displayLabel: Texture = inputs.label;
     const composite = perspective !== null ? liveBuffers?.composite : moving || hiding ? gbuffer?.composite : undefined;
-    const styled = featherEnabled && composite !== undefined ? composite : stylize(inputs, cells);
+    const styled = featherEnabled && composite !== undefined ? composite : treatments ? stylize(inputs, cells) : copyColor(inputs.color);
     const { style } = scene.doc;
     const currentBuffers = buffers;
     let output = styled;
     const other = (input: Target): Target => input === currentBuffers.final ? currentBuffers.quantized : currentBuffers.final;
     const coating = scene.doc.surface;
-    if (coating.enabled && (coating.relief !== 0 || coating.refraction !== 0 || coating.shine !== 0)) {
+    if (treatments && coating.enabled && (coating.relief !== 0 || coating.refraction !== 0 || coating.shine !== 0)) {
       const target = other(output);
       const patterns = { bars: 0, cracks: 1, scales: 2 } satisfies Record<typeof coating.pattern, number>;
       cameraDraw('surface', programs.surface, target, { src: tex(output), depth: tex(inputs.depth), hasDepth: int(depth === null ? 0 : 1),
@@ -826,19 +890,19 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         lastLiveLookup = liveWarp; displayLabel = liveWarp.label;
       }
     }
-    if (style.grain !== 0 || style.colorNoise !== 0) {
+    if (treatments && (style.grain !== 0 || style.colorNoise !== 0)) {
       const target = other(output);
       cameraDraw('grain', programs.grain, target, { src: tex(output), label: tex(displayLabel),
         seed: { kind: 'uint', value: scene.doc.seed }, hold: { kind: 'uint', value: holdIndex(index, frameCount(scene.doc.motion, LOOP_FPS), style.grainHold) },
         grainSize: int(style.grainSize), amount: float(style.grain), colorNoise: float(style.colorNoise), clarity: { kind: 'floatArray', value: clarity } });
       output = target;
     }
-    if (style.clipping !== 0) {
+    if (treatments && style.clipping !== 0) {
       const target = other(output);
       cameraDraw('clipping', programs.clip, target, { src: tex(output), amount: float(style.clipping) });
       output = target;
     }
-    if (style.crunch !== 0) {
+    if (treatments && style.crunch !== 0) {
       if (crunchBuffers === null) {
         // Edge-replicate incomplete 8x8 blocks, retaining all coefficients.
         const pad = (n: number): number => Math.ceil(n / 8) * 8;
@@ -860,10 +924,26 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       cameraDraw('crunch.combine', programs.combine, target, { luma: tex(crunchBuffers.y[0]), chroma: tex(crunchBuffers.c[0]) });
       output = target;
     }
+    const activeEffects = preparedLocalEffects.filter((effect) => treatments || effect.kind !== 2);
+    if (activeEffects.length > 0) {
+      const lookup = frameLookup({ frame: index, loop, camera, showSelection, perspective, compare });
+      if (NOISY_DEV) {
+        localBefore ??= gpu.target(canvas.width, canvas.height);
+        gpu.draw(programs.copy, localBefore, { src: tex(output) });
+      }
+      ensureLocalPrograms();
+      if (localPrograms === null) throw new Error('The local operation program is unavailable.');
+      for (let index = 0; index < activeEffects.length; index += LOCAL_EFFECT_BATCH) {
+        const target = other(output);
+        cameraDraw('local-effects', localPrograms.effects, target, { src: tex(output), ...effectUniforms(activeEffects.slice(index, index + LOCAL_EFFECT_BATCH), lookup) });
+        output = target;
+      }
+      appliedLocalEffects = true;
+    }
     const selectedId = scene.selected;
     const selected = selectedId === null ? -1 : scene.doc.objects.findIndex((object) => object.id === selectedId);
     selectionSource = output;
-    if (showSelection && selected >= 0) {
+    if (treatments && showSelection && selected >= 0) {
       const box = canvas.getBoundingClientRect();
       // Camera passes swap these targets; never sample the selection target.
       const target = other(output);
@@ -876,18 +956,243 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     if (profiling && probe !== null) {
       gl.finish(); cameraCosts.present = probe.measure(() => gpu.draw(programs.present, null, { src: tex(output) }), () => gl.finish());
     } else gpu.draw(programs.present, null, { src: tex(output) });
-    if (NOISY_DEV) {
-      const error = gl.getError();
-      if (error !== gl.NO_ERROR) { checkLive(); throw new Error(`The ${loop ? 'loop' : 'still'} render failed (WebGL 0x${error.toString(16)}).`); }
-    }
+    checkRenderError();
     if (probe !== null) probe.end(start, loop ? index : null);
-    lastRender = { frame: index, loop, camera: camera === null ? null : { ...camera }, showSelection, perspective };
+    lastRender = { frame: index, loop, camera: camera === null ? null : { ...camera }, showSelection, perspective, compare };
+    hasRendered = true;
+  }
+  // getError blocks on the GPU; per-frame draws check it in dev builds only, as before C1b.
+  function checkRenderError(): void {
+    if (!NOISY_DEV) return;
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) { checkLive(); throw new Error(`The image render failed (WebGL 0x${error.toString(16)}).`); }
+  }
+
+  function preserveFramebuffers<T>(read: () => T): T {
+    const beforeRead: unknown = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+    const beforeDraw: unknown = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+    if (!(beforeRead === null || beforeRead instanceof WebGLFramebuffer) ||
+      !(beforeDraw === null || beforeDraw instanceof WebGLFramebuffer)) throw new Error('The render readback state is unavailable.');
+    try { return read(); }
+    finally {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, beforeRead);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, beforeDraw);
+    }
+  }
+  function readPixel(target: Target, at: Vec2): Uint8Array {
+    const bytes = new Uint8Array(4);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.framebuffer);
+    gl.readPixels(at.x, at.y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) { checkLive(); throw new Error(`The color sample failed (WebGL 0x${error.toString(16)}).`); }
+    return bytes;
+  }
+  function sampled(bytes: Uint8Array): SampleColorResult {
+    const result = parseSrgbChannels({ r: bytes[0] ?? 0, g: bytes[1] ?? 0, b: bytes[2] ?? 0 });
+    if (result.kind === 'invalid') throw new Error(result.reason);
+    return { kind: 'sampled', color: result.color };
+  }
+  function sampleColor({ at, source }: SampleColorRequest): SampleColorResult {
+    checkLive();
+    if (!hasRendered || scene === null || master === null || selectionSource === null) {
+      return { kind: 'refused', reason: 'Render the current photo before sampling.' };
+    }
+    const pixel = samplePixel(at, canvas);
+    if (pixel === null) return { kind: 'refused', reason: 'Choose a point inside the image.' };
+    const sourceTexture = master;
+    const editedTexture = selectionSource;
+    return preserveFramebuffers(() => {
+      if (source === 'edited') return sampled(readPixel(editedTexture, pixel));
+      let sourceUV = at;
+      if (lastRender.compare !== 'source-photo') {
+        if (lastRender.perspective !== null) {
+          const hit = hitTest(at);
+          if (hit.kind !== 'original') return { kind: 'refused', reason: hit.kind === 'generated'
+            ? 'This pixel was generated and has no source color.' : 'There is no source pixel at this point.' };
+          sourceUV = hit.sourceUV;
+        } else {
+          const hit = legacySourceAt(pixel);
+          if (hit.kind === 'refused') return hit;
+          sourceUV = hit.at;
+        }
+      }
+      const sourcePixel = samplePixel(sourceUV, sourceTexture);
+      if (sourcePixel === null) return { kind: 'refused', reason: 'There is no source pixel at this point.' };
+      const framebuffer = gl.createFramebuffer();
+      if (framebuffer === null) throw new Error('The source sample framebuffer could not be created.');
+      try {
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, framebuffer);
+        gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sourceTexture.texture, 0);
+        if (gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('The source sample framebuffer is incomplete.');
+        return sampled(readPixel({ ...sourceTexture, framebuffer }, sourcePixel));
+      } finally { gl.deleteFramebuffer(framebuffer); }
+    });
+  }
+  function ensureSourcePrograms() {
+    if (sourcePrograms !== null) return sourcePrograms;
+    const allocated: ReturnType<typeof gpu.program>[] = [];
+    const keep = (source: string, vertex?: string) => { const value = gpu.program(source, vertex); allocated.push(value); return value; };
+    try {
+      sourcePrograms = { lookup: keep(sourceLookup, geometryVertex), warp: keep(surfaceLookup), still: keep(stillLookup) };
+      return sourcePrograms;
+    } catch (error) { for (const value of allocated) gpu.releaseProgram(value); throw error; }
+  }
+  function allocateLookup(withDepth: boolean): Lookup {
+    const labels = gpu.target(canvas.width, canvas.height);
+    let source: Target | null = null;
+    try {
+      source = gpu.target(canvas.width, canvas.height); gpu.attach(labels, source);
+      if (withDepth) gpu.attachDepth(labels);
+      return { label: labels, source };
+    } catch (error) { gpu.release(labels); if (source !== null) gpu.release(source); throw error; }
+  }
+  function frameLookup(snapshot: typeof lastRender): Lookup {
+    if (lastFrameLookup !== null) return lastFrameLookup;
+    if (scene === null) throw new Error('Open a photo before reading source coordinates.');
+    if (snapshot.perspective !== null && snapshot.compare !== 'source-photo') {
+      if (lastLiveLookup === null) throw new Error('The perspective source lookup is unavailable.');
+      lastFrameLookup = lastLiveLookup;
+      return lastFrameLookup;
+    }
+    const programs = ensureSourcePrograms();
+    legacyLookup ??= allocateLookup(true);
+    const lookup = legacyLookup;
+    const moving = snapshot.compare !== 'source-photo' && (snapshot.camera !== null ? depth !== null : snapshot.loop && effectiveOrbit(scene.doc.motion) > 0 && !plateNeeded(scene.doc));
+    const composed = snapshot.compare !== 'source-photo' && (moving || plate !== null && scene.doc.objects.some((object) => object.hidden));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, lookup.label.framebuffer);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    if (!composed) {
+      // C1b's static UV map was owner zero; local whole-owner scopes also
+      // need the same label map used by still palette/selection rendering.
+      gpu.draw(programs.still, lookup.label, { labels: tex(snapshot.compare === 'source-photo' ? backgroundLabel : label),
+        frameSize: { kind: 'ivec2', value: [canvas.width, canvas.height] } });
+    } else {
+      const anchor = anchorDisparity(scene.doc);
+      const lo = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(renderedCamera, 0, anchor);
+      const hi = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(renderedCamera, 1, anchor);
+      const uniforms = { displacementX: { kind: 'vec3', value: [lo.x, hi.x, 0] }, displacementY: { kind: 'vec3', value: [lo.y, hi.y, 0] },
+        zoom: float(moving ? loopZoom(scene.doc.motion.parallax) : 1), hole: tex(hole ?? backgroundLabel) } satisfies Record<string, Uniform>;
+      gl.clearBufferfv(gl.COLOR, 0, new Float32Array(4)); gl.clearBufferfv(gl.COLOR, 1, new Float32Array(4));
+      gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS); gl.depthRange(0, 1 - 1 / 65535); gl.clearDepth(1); gl.clear(gl.DEPTH_BUFFER_BIT);
+      try {
+        gpu.draw(programs.lookup, lookup.label, { ...uniforms, depthPlane: tex(backgroundDepth ?? depth ?? label), mask: tex(label), objectId: int(0) }, backMesh);
+        for (const layer of layers(scene.doc)) {
+          if (layer.kind === 'plate') continue;
+          const entry = objectMeshes.get(layer.object.id);
+          if (entry === undefined) continue;
+          gl.clear(gl.DEPTH_BUFFER_BIT);
+          gpu.draw(programs.lookup, lookup.label, { ...uniforms, depthPlane: tex(depth ?? label), mask: tex(entry.texture),
+            objectId: int(scene.doc.objects.indexOf(layer.object) + 1) }, entry.mesh);
+        }
+      } finally { gl.disable(gl.DEPTH_TEST); gl.depthRange(0, 1); }
+    }
+    const coating = scene.doc.surface;
+    if (snapshot.compare === 'edited' && coating.enabled && coating.relief > 0 && coating.refraction > 0) {
+      legacyWarp ??= allocateLookup(false);
+      const patterns = { bars: 0, cracks: 1, scales: 2 } satisfies Record<typeof coating.pattern, number>;
+      gpu.draw(programs.warp, legacyWarp.label, { labels: tex(lookup.label), sourceMap: tex(lookup.source),
+        seed: { kind: 'uint', value: scene.doc.seed }, pattern: int(patterns[coating.pattern]), relief: float(coating.relief),
+        refraction: float(coating.refraction), scale: float(coating.scale), phase: float(loopPhase(snapshot.frame, frameCount(scene.doc.motion, LOOP_FPS))) });
+      lastFrameLookup = legacyWarp;
+    } else lastFrameLookup = lookup;
+    return lastFrameLookup;
+  }
+  function legacySourceAt(pixel: Vec2): { readonly kind: 'source'; readonly at: Vec2 } | { readonly kind: 'refused'; readonly reason: string } {
+    const lookup = frameLookup(lastRender);
+    const id = readPixel(lookup.label, pixel), uv = readPixel(lookup.source, pixel);
+    if (id[3] !== 255) return { kind: 'refused', reason: 'There is no source pixel at this point.' };
+    if (id[1] !== 255) return { kind: 'refused', reason: 'This pixel was generated and has no source color.' };
+    return { kind: 'source', at: { x: ((uv[0] ?? 0) * 256 + (uv[1] ?? 0)) / 65535,
+      y: ((uv[2] ?? 0) * 256 + (uv[3] ?? 0)) / 65535 } };
+  }
+
+  function releaseLocalTargets(): void {
+    for (const lookup of [legacyLookup, legacyWarp]) if (lookup !== null) { gpu.release(lookup.label); gpu.release(lookup.source); }
+    for (const target of [localBefore, localCoverageTarget]) if (target !== null) gpu.release(target);
+    legacyLookup = null; legacyWarp = null; lastFrameLookup = null; localBefore = null; localCoverageTarget = null;
+  }
+  function updateScopeTextures(effects: readonly PreparedLocalEffect[]): void {
+    const needed = new Set(effects.flatMap((effect) => effect.plane === null ? [] : [effect.plane]));
+    const added: Plane<'u8'>[] = [];
+    try {
+      for (const plane of needed) {
+        if (!scopeTextures.has(plane)) {
+          scopeTextures.set(plane, gpu.texture(plane.size.width, plane.size.height, 'r8', plane.data)); added.push(plane);
+        }
+      }
+    } catch (error) {
+      for (const plane of added) { const texture = scopeTextures.get(plane); if (texture !== undefined) gpu.release(texture); scopeTextures.delete(plane); }
+      throw error;
+    }
+    for (const [plane, texture] of scopeTextures) if (!needed.has(plane)) { gpu.release(texture); scopeTextures.delete(plane); }
+  }
+  function ensureLocalPrograms() {
+    if (localPrograms !== null) return localPrograms;
+    const effects = gpu.program(localEffects);
+    try { localPrograms = { effects, coverage: gpu.program(localCoverage) }; return localPrograms; }
+    catch (error) { gpu.releaseProgram(effects); throw error; }
+  }
+  function effectUniforms(effects: readonly PreparedLocalEffect[], lookup: Lookup): Readonly<Record<string, Uniform>> {
+    const owners = new Float32Array(LOCAL_EFFECT_BATCH).fill(-1), masked = new Float32Array(LOCAL_EFFECT_BATCH);
+    const kinds = new Float32Array(LOCAL_EFFECT_BATCH), colors = new Float32Array(LOCAL_EFFECT_BATCH * 3), amounts = new Float32Array(LOCAL_EFFECT_BATCH);
+    const uniforms: Record<string, Uniform> = { labels: tex(lookup.label), sourceMap: tex(lookup.source), count: int(effects.length) };
+    for (let index = 0; index < LOCAL_EFFECT_BATCH; index++) {
+      const effect = effects[index];
+      const plane = effect?.plane ?? null;
+      const texture = plane === null ? backgroundLabel : scopeTextures.get(plane);
+      if (texture === undefined) throw new Error('The frozen local selection texture is unavailable.');
+      uniforms[`scope${index}`] = tex(texture);
+      if (effect === undefined) continue;
+      owners[index] = effect.label; masked[index] = plane === null ? 0 : 1; kinds[index] = effect.kind;
+      colors.set(effect.color, index * 3); amounts[index] = effect.amount;
+    }
+    return { ...uniforms, owners: { kind: 'floatArray', value: owners }, masked: { kind: 'floatArray', value: masked },
+      kinds: { kind: 'floatArray', value: kinds }, colors: { kind: 'vec3Array', value: colors }, amounts: { kind: 'floatArray', value: amounts } };
+  }
+  function localResources(): { readonly targets: number; readonly textures: number } {
+    return { targets: (legacyLookup === null ? 0 : 2) + (legacyWarp === null ? 0 : 2) + (localBefore === null ? 0 : 1) + (localCoverageTarget === null ? 0 : 1), textures: scopeTextures.size };
+  }
+  function validateLocalPatch(x: number, y: number, w: number, h: number): void {
+    checkLive();
+    if (!hasRendered || selectionSource === null || ![x, y, w, h].every(Number.isInteger) || x < 0 || y < 0 || w < 1 || h < 1 ||
+      x + w > canvas.width || y + h > canvas.height) throw new Error('Render the current image before reading a local patch inside the master.');
+  }
+  function readTargetPatch(target: Target, x: number, y: number, w: number, h: number): Uint8Array {
+    const bytes = new Uint8Array(w * h * 4);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.framebuffer); gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) { checkLive(); throw new Error(`The local readback failed (WebGL 0x${error.toString(16)}).`); }
+    return bytes;
+  }
+  function readLocalEffectPatch(x: number, y: number, w: number, h: number): LocalEffectReadback {
+    validateLocalPatch(x, y, w, h);
+    if (selectionSource === null) throw new Error('The local result is unavailable.');
+    const after = selectionSource, before = appliedLocalEffects && localBefore !== null ? localBefore : after;
+    return preserveFramebuffers(() => {
+      const lookup = frameLookup(lastRender);
+      return { before: readTargetPatch(before, x, y, w, h), after: readTargetPatch(after, x, y, w, h),
+        owners: readTargetPatch(lookup.label, x, y, w, h), sourceUV: readTargetPatch(lookup.source, x, y, w, h) };
+    });
+  }
+  function readLocalCoveragePatch(id: EffectId, x: number, y: number, w: number, h: number): Uint8Array {
+    validateLocalPatch(x, y, w, h);
+    const effect = preparedLocalEffects.find((effect) => effect.id === id);
+    if (effect === undefined && !scene?.localEffects?.some((effect) => effect.id === id)) throw new Error('The local operation is unavailable.');
+    if (effect === undefined || lastRender.compare === 'source-photo' || lastRender.compare === 'treatments-off' && effect.kind === 2) {
+      return Uint8Array.from({ length: w * h * 4 }, (_, index) => index % 4 === 3 ? 255 : 0);
+    }
+    return preserveFramebuffers(() => {
+      const lookup = frameLookup(lastRender), programs = ensureLocalPrograms();
+      localCoverageTarget ??= gpu.target(canvas.width, canvas.height);
+      gpu.draw(programs.coverage, localCoverageTarget, effectUniforms([effect], lookup));
+      return readTargetPatch(localCoverageTarget, x, y, w, h);
+    });
   }
 
   function hitTest(at: Vec2): PerspectiveHit {
     checkLive();
     const request = lastRender.perspective;
-    if (request === null || lastLiveLookup === null || scene === null ||
+    if (!hasRendered || lastRender.compare === 'source-photo' || request === null || lastLiveLookup === null || scene === null ||
       !Number.isFinite(at.x) || !Number.isFinite(at.y) || at.x < 0 || at.x > 1 || at.y < 0 || at.y > 1) return { kind: 'miss' };
     // Offscreen row zero is the photo's top row; present alone flips for the browser framebuffer.
     const x = Math.min(canvas.width - 1, Math.floor(at.x * canvas.width));
@@ -977,25 +1282,25 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   function exportFrame(frame: number): Promise<Blob> {
     checkLive();
     const restore = lastRender;
-    renderFrame(frame, false);
-    exportedEdges = scene !== null && effectiveOrbit(scene.doc.motion) > 0 && !plateNeeded(scene.doc) ? readGeometryEdges() : null;
     try {
+      render(frame, true, false, null, null, 'edited');
+      exportedEdges = scene !== null && effectiveOrbit(scene.doc.motion) > 0 && !plateNeeded(scene.doc) ? readGeometryEdges() : null;
       return new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => {
         if (blob === null) reject(new Error('The loop PNG could not be encoded.'));
         else resolve(blob);
       }, 'image/png'));
-    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera, restore.perspective); }
+    } finally { restoreRender(restore); }
   }
   function exportView(camera: Vec2, frame = 0): Promise<Blob> {
     checkLive();
     const restore = lastRender;
-    renderView(camera, frame, false);
     try {
+      render(frame, true, false, camera, null, 'edited');
       return new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => {
         if (blob === null) reject(new Error('The view PNG could not be encoded.'));
         else resolve(blob);
       }, 'image/png'));
-    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera, restore.perspective); }
+    } finally { restoreRender(restore); }
   }
   function exportStill(): Promise<Blob>;
   function exportStill(capture: LoopCapture): void;
@@ -1003,8 +1308,8 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     checkLive();
     const restore = lastRender;
     try {
-      if (capture === undefined) renderStill(false);
-      else renderFrame(capture.frame, false);
+      if (capture === undefined) render(0, false, false, null, null, 'edited');
+      else render(capture.frame, true, false, null, null, 'edited');
       if (capture !== undefined) {
         const context = capture.canvas.getContext('2d', { alpha: false, willReadFrequently: true });
         if (context === null) throw new Error('The loop export canvas could not be created.');
@@ -1016,10 +1321,10 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         if (blob === null) reject(new Error('The rendered PNG could not be encoded.'));
         else resolve(blob);
       }, 'image/png'));
-    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera, restore.perspective); }
+    } finally { restoreRender(restore); }
   }
   return {
-    setScene, renderStill,
+    setScene, setCompare, sampleColor, renderStill,
     renderFrame, renderView, exportView, renderPerspective, hitTest, endPerspective,
     exportStill,
     dispose(): void {
@@ -1027,9 +1332,11 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       disposed = true;
       canvas.removeEventListener('webglcontextlost', onContextLost);
       endPerspective();
-      gpu.dispose(); scene = null; buffers = null; cellBuffers = null; crunchBuffers = null; finalTarget = null; selectionSource = null; master = null; plate = null; depth = null; lut = null; palette = null;
+      gpu.dispose(); scopeTextures.clear(); preparedLocalEffects = []; legacyLookup = null; legacyWarp = null; lastFrameLookup = null; localBefore = null; localCoverageTarget = null;
+      scene = null; buffers = null; cellBuffers = null; crunchBuffers = null; finalTarget = null; selectionSource = null; master = null; plate = null; depth = null; lut = null; palette = null;
     },
     debug: probe === null ? null : { ...probe.debug, readGeometryPatch, perspectiveResources,
+      readLocalEffectPatch, readLocalCoveragePatch, localResources,
       motionCamera: () => ({ ...renderedCamera }),
       setMotionFeather: (enabled: boolean): void => { featherEnabled = enabled; },
     },

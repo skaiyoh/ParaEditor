@@ -15,7 +15,7 @@ import { renderStereo, STEREO_3DS_SIZE } from '../export/stereo.ts';
 import type { Size } from '../core/raster.ts';
 import { readBuildId } from '../platform/build-id.ts';
 import { applyEdit, applyEdits } from '../core/reduce.ts';
-import { EMPTY_HISTORY, coalesceKey, push, undo, redo, referencedAssets, type History, type HistoryEntry } from '../core/history.ts';
+import { EMPTY_HISTORY, coalesceKey, push, undo, redo, referencedAssets, recordEdit, type History, type HistoryEntry } from '../core/history.ts';
 import type { Edit, StylePatch } from '../core/edits.ts';
 import { createRenderer } from '../render/renderer.ts';
 import { renderPng } from '../export/png.ts';
@@ -31,10 +31,12 @@ import { createWindowSource } from './window.ts';
 import { createTiltSource, type Orientation } from './tilt.ts';
 import { liveCoverage } from '../core/live-coverage.ts';
 import { apertureFromRect, containedImageRect, createPerspectiveGeometry, constrainEye, lateralEnvelope } from '../core/perspective.ts';
-import type { PerspectiveRenderResult } from '../render/types.ts';
+import type { PerspectiveRenderResult, SampleColorResult } from '../render/types.ts';
 import { createViewDriver, type ViewHost, type ViewSubmission } from './view-driver.ts';
 import { createProjectSession } from './projects.ts';
+import { createPublishSession } from './publish.ts';
 import { anchoredSize, candidateSize, draggedSize, maskArea, rankCandidates, refinementChoice, thresholdMask } from './refine.ts';
+import { captureCommitted, createAuthoring, type AuthoringState, type CommandResult, type GestureStart } from './authoring.ts';
 
 /** D2a consumes doc and master; D3 makes fresh worker bitmaps from masterPixels. */
 export type DemoScene = {
@@ -49,6 +51,7 @@ export type DemoScene = {
   readonly selected: ObjectId | null;
 };
 export type DemoState = {
+  readonly authoring: AuthoringState;
   readonly exportProgress: string | null;
   readonly status: string; readonly scene: DemoScene | null;
   readonly analysisStatus: string; readonly analysisTiming: { readonly stage: string; readonly ms: number } | null;
@@ -93,7 +96,8 @@ async function importScene(file: File): Promise<DemoScene> {
 }
 
 export function createDemoSession() {
-  let state: DemoState = { exportProgress: null, status: 'Drop a photo', scene: null, analysisStatus: 'Fetching models 0%', analysisTiming: null, parallaxEnabled: false, refiningObject: null, refinementSize: null };
+  const authoring = createAuthoring({ read: () => state.scene?.doc ?? null, record: (change) => edit(change, null), changed: authoringChanged });
+  let state: DemoState = { authoring: authoring.snapshot(), exportProgress: null, status: 'Drop a photo', scene: null, analysisStatus: 'Fetching models 0%', analysisTiming: null, parallaxEnabled: false, refiningObject: null, refinementSize: null };
   const products = createProducts();
   let history: History = EMPTY_HISTORY;
   let generation = 0;
@@ -114,6 +118,7 @@ export function createDemoSession() {
   };
   let refinement: Refinement | null = null;
   const invalidateTaps = (): void => {
+    authoring.cancel();
     cancelRefinement();
     objectEpoch++;
     for (const controller of tapControllers) controller.abort();
@@ -121,6 +126,13 @@ export function createDemoSession() {
   };
   let pendingMask = Promise.resolve();
   let renderer: ReturnType<typeof createRenderer> | null = null;
+  let rendererCompare: AuthoringState['compare'] = 'edited';
+  function syncCompare(): void {
+    const compare = authoring.snapshot().compare;
+    if (renderer !== null && rendererCompare !== compare) {
+      renderer.setCompare(compare); rendererCompare = compare;
+    }
+  }
   let exportJob: AbortController | null = null;
   let recordingJob: AbortController | null = null;
   function cancelExport(): void {
@@ -132,9 +144,20 @@ export function createDemoSession() {
     state = { ...state, exportProgress: text };
     for (const listener of listeners) listener(state);
   }
-  const projects = createProjectSession(() => {
+  const projects = createProjectSession((document) => {
     if (renderer === null) throw new Error('The photo renderer is unavailable.');
-    return renderPng(renderer);
+    const activeRenderer = renderer;
+    return committedRender(() => renderPng(activeRenderer), document);
+  });
+  let sourceFile: File | null = null;
+  const gallery = createPublishSession({
+    read: () => ({ document: readyScene?.generation === generation ? state.scene?.doc ?? null : null,
+      source: sourceFile, products, gesture: authoring.snapshot().gesture !== null || refinement !== null, exporting: exportJob !== null }),
+    renderStill(document) {
+      if (renderer === null) throw new Error('The photo renderer is unavailable.');
+      const activeRenderer = renderer;
+      return committedRender(() => renderPng(activeRenderer), document);
+    },
   });
   let renderError: unknown = null;
   let stageCanvas: HTMLCanvasElement | null = null;
@@ -144,9 +167,21 @@ export function createDemoSession() {
     for (const listener of listeners) listener(state);
   });
   const listeners = new Set<(state: DemoState) => void>();
+  function authoringChanged(): void {
+    const previous = state.authoring;
+    state = { ...state, authoring: authoring.snapshot() };
+    try {
+      syncCompare();
+      // Transient tool/target/sample changes must preserve the displayed frame and hit identity.
+      if (state.scene !== null && (previous.gesture !== null || state.authoring.gesture !== null)) draw(state.scene);
+    }
+    catch (error) { state = { ...state, status: error instanceof Error ? error.message : String(error) }; }
+    for (const listener of listeners) listener(state);
+  }
   const publish = (next: Pick<DemoState, 'status' | 'scene'>, refuseOnRenderError = false): void => {
     if (next.scene?.doc !== state.scene?.doc) cancelExport();
     const scene = next.scene === null ? null : { ...next.scene, ...products.forScene(next.scene.doc) };
+    if (scene !== null) authoring.reconcile(scene.doc, scene.selected);
     let status = next.status;
     if (status === 'Still analyzing…' && analysis.snapshot().decoderReady) status = 'Ready';
     if (status === 'Ready' && viewEnabled()) status = view.status();
@@ -158,10 +193,11 @@ export function createDemoSession() {
       status = error instanceof Error ? error.message : String(error);
     }
     if (viewEnabled() && liveResult.kind === 'limited') status = `${view.status()} - ${liveResult.reason}`;
-    state = { exportProgress: state.exportProgress, status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), parallaxEnabled: view.enabled(), refiningObject: refinement?.id ?? null, refinementSize: refinement?.size ?? null };
+    state = { authoring: authoring.snapshot(), exportProgress: state.exportProgress, status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), parallaxEnabled: view.enabled(), refiningObject: refinement?.id ?? null, refinementSize: refinement?.size ?? null };
     if (scene !== null && readyScene?.generation === generation) projects.observe(scene.doc, products.masks);
     for (const listener of listeners) listener(state);
   };
+  // Analysis/import setter; UI mutations use the recorded session actions.
   const setDocument = (doc: SceneDocument): void => {
     const scene = state.scene;
     if (scene === null || scene.doc.id !== doc.id) throw new Error('The document belongs to another photo.');
@@ -270,14 +306,27 @@ export function createDemoSession() {
     const starting = view.start();
     await starting;
   }
+  let committedRendering = false;
+  // Export methods capture their pixels synchronously before returning a promise.
+  // Queued autosave thumbnails must never capture a transient authoring preview.
+  function committedRender<T>(capture: () => T, document = state.scene?.doc): T {
+    const scene = state.scene;
+    if (scene === null || document === undefined || document.id !== scene.doc.id) throw new Error('The output document is not in this photo.');
+    if (document === scene.doc && authoring.snapshot().gesture === null && refinement?.preview == null) return capture();
+    return captureCommitted({ document, capture,
+      render(doc) { committedRendering = true; draw({ ...scene, doc, ...products.forScene(doc) }); },
+      restore() { committedRendering = false; if (state.scene !== null) draw(state.scene); },
+    });
+  }
   function draw(scene: DemoScene): void {
     if (renderer === null) {
       if (renderError !== null) throw renderError;
       return;
     }
-    const preview = refinement?.preview;
-    const doc = preview === null || preview === undefined ? scene.doc : {
-      ...scene.doc, objects: scene.doc.objects.map((object) => object.id === refinement?.id ? { ...object, produced: preview } : object),
+    const base = committedRendering ? scene.doc : authoring.previewDocument(scene.doc);
+    const preview = committedRendering ? null : refinement?.preview;
+    const doc = preview === null || preview === undefined ? base : {
+      ...base, objects: base.objects.map((object) => object.id === refinement?.id ? { ...object, produced: preview } : object),
     };
     const masks = preview === null || preview === undefined ? scene.masks : products.forScene(doc).masks;
     const selected = doc.objects.some((object) => object.id === scene.selected && !object.hidden) ? scene.selected : null;
@@ -285,6 +334,7 @@ export function createDemoSession() {
     const matchingLive = live.kind === 'ready' && geometry !== null && live.product.key === liveCoverage(doc, geometry)?.key ? live.product : null;
     renderer.setScene({ doc, master: scene.master, masks, depth: scene.depth, plate: scene.plate, selected,
       livePlate: matchingLive });
+    syncCompare();
     if (viewEnabled()) {
       loop.stop(); renderLive(scene, view.frame());
     } else if (scene.doc.motion.enabled && readyScene?.generation === generation && readyScene.id === scene.doc.id && !plateNeeded(scene.doc) &&
@@ -309,17 +359,30 @@ export function createDemoSession() {
     history = push(history, { key: coalesceKey(edit), at: performance.now(), forward: [edit], inverse, masks }, doc);
     retainMasks(doc);
   }
-  function edit(edit: Edit): void {
+  // Direct setters keep the legacy 600 ms coalescing until C1u moves the UI onto
+  // gestures; an authoring gesture or color pick commits as its own step (key null).
+  function edit(edit: Edit, key: string | null = coalesceKey(edit)): CommandResult {
+    authoring.cancel();
     cancelRefinement();
-    if (state.scene === null) return;
-    const result = applyEdit(state.scene.doc, edit, new Date().toISOString());
+    if (state.scene === null) return { kind: 'refused', reason: 'Open a photo first.' };
+    const result = recordEdit({ doc: state.scene.doc, history, edit, key, now: new Date().toISOString(), at: performance.now(), masks: products.masks });
     if (result.kind === 'refused') {
-      publish({ ...state, status: `The edit was refused: ${result.detail}` }); return;
+      state = { ...state, status: `The edit was refused: ${result.detail}` };
+      for (const listener of listeners) listener(state);
+      return { kind: 'refused', reason: result.detail };
     }
-    if (result.kind === 'unchanged') return;
-    record(edit, result.inverse, result.doc);
+    if (result.kind === 'unchanged') return { kind: 'unchanged' };
+    history = result.history;
+    retainMasks(result.doc);
     setDocument(result.doc);
     if (edit.kind !== 'motion') publish({ ...state, status: viewEnabled() ? view.status() : 'Ready' });
+    if (edit.kind === 'motion' && edit.patch.enabled === true && state.scene?.doc.motion.enabled) {
+      const current = generation;
+      void requestPlateIfNeeded().catch((error: unknown) => {
+        if (current === generation) publish({ ...state, status: error instanceof Error ? error.message : String(error) });
+      });
+    }
+    return { kind: 'applied' };
   }
   function stepHistory(direction: 'undo' | 'redo'): void {
     invalidateTaps();
@@ -342,6 +405,7 @@ export function createDemoSession() {
     return analysis.requestPlateIfNeeded();
   }
   function select(id: ObjectId | null): void {
+    if (id !== state.scene?.selected) authoring.cancel();
     cancelRefinement();
     const scene = state.scene;
     if (scene === null) return;
@@ -349,6 +413,7 @@ export function createDemoSession() {
     publish({ status: 'Ready', scene: { ...scene, selected: id } });
   }
   function tap(at: ImagePoint): Promise<void> {
+    authoring.cancel();
     cancelRefinement();
     if (![at.x, at.y].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) return Promise.resolve();
     const decoder = analysis.decoder();
@@ -468,6 +533,7 @@ export function createDemoSession() {
     });
   }
   function beginRefinement(id: ObjectId): boolean {
+    authoring.cancel();
     cancelExport();
     cancelRefinement();
     const scene = state.scene, decoder = analysis.decoder();
@@ -528,6 +594,7 @@ export function createDemoSession() {
   }
   type LoadedProject = Awaited<ReturnType<typeof projects.load>>;
   function installImported(imported: DemoScene, file: File, project: LoadedProject | null, current: number, refuseOnRenderError: boolean): void {
+    authoring.reset();
     const scene = project === null ? imported : { ...imported, doc: { ...imported.doc, id: project.document.id } };
     const previous = state.scene;
     history = EMPTY_HISTORY;
@@ -535,6 +602,7 @@ export function createDemoSession() {
     try { publish({ status: 'Ready', scene }, refuseOnRenderError); }
     catch (error) { readyScene = null; scene.master.close(); throw error; }
     baseline = scene.doc;
+    sourceFile = file;
     previous?.master.close();
     if (project !== null) {
       for (const [asset, mask] of project.masks) products.putMask(asset, mask);
@@ -580,12 +648,14 @@ export function createDemoSession() {
     const scene = state.scene;
     if (scene === null) throw new Error('Open a photo before downloading.');
     if (renderer === null) throw new Error('The photo renderer is unavailable.');
-    return renderStereo(renderer, scene.doc, size);
+    const activeRenderer = renderer;
+    return committedRender(() => renderStereo(activeRenderer, scene.doc, size));
   }
   function exportLoopFrame(frame: number, edge = GIF_LONG_EDGE): ImageData {
     if (renderer === null || state.scene === null) throw new Error('Open a photo before exporting a loop.');
     const canvas = loopCanvas(state.scene.master, edge, true);
-    renderer.exportStill({ frame, canvas });
+    const activeRenderer = renderer;
+    committedRender(() => activeRenderer.exportStill({ frame, canvas }));
     const context = canvas.getContext('2d');
     if (context === null) throw new Error('The loop export canvas is unavailable.');
     return context.getImageData(0, 0, canvas.width, canvas.height);
@@ -606,7 +676,7 @@ export function createDemoSession() {
       const progress = (completed: number) => exportProgress(controller, `Exporting: ${completed} of ${frames} frames`);
       const render = (frame: number) => {
         signal.throwIfAborted();
-        activeRenderer.exportStill({ frame: Math.floor(frame * loopFrames / frames), canvas });
+        committedRender(() => activeRenderer.exportStill({ frame: Math.floor(frame * loopFrames / frames), canvas }));
       };
       progress(0);
       let blob: Blob, extension: string;
@@ -653,13 +723,42 @@ export function createDemoSession() {
     }
   }
   return {
-    products, projects, saveLoop, movieFormat, exportLoopFrame,
+    authoringState: authoring.snapshot,
+    capability: authoring.capability,
+    setTarget: authoring.setTarget,
+    setTool: authoring.setTool,
+    setCompare: authoring.setCompare,
+    setSampleMode: authoring.setSampleMode,
+    sampleColor(at: ImagePoint): SampleColorResult {
+      let result: SampleColorResult;
+      try {
+        result = renderer === null ? { kind: 'refused', reason: 'Open a photo before sampling a color.' }
+          : renderer.sampleColor({ at, source: authoring.snapshot().sampleMode });
+      } catch (error) {
+        result = { kind: 'refused', reason: error instanceof Error ? error.message : String(error) };
+      }
+      authoring.setTool('select');
+      state = { ...state, status: result.kind === 'refused' ? result.reason : 'Color sampled. Apply it to recolor the selected object.' };
+      for (const listener of listeners) listener(state);
+      return result;
+    },
+    setColor: authoring.setColor,
+    beginGesture(input: GestureStart) {
+      cancelExport(); cancelRefinement();
+      return authoring.beginGesture(input);
+    },
+    updateGesture: authoring.updateGesture,
+    commitGesture: authoring.commitGesture,
+    cancelGesture: authoring.cancelGesture,
+    previewDocument: (): SceneDocument | null => state.scene === null ? null : authoring.previewDocument(state.scene.doc),
+    products, projects, gallery, saveLoop, movieFormat, exportLoopFrame,
     tap, select, objectAt, beginRefinement, moveRefinement, commitRefinement, cancelRefinement,
-    historyState: () => ({ canUndo: history.undo.length > 0, canRedo: history.redo.length > 0 }),
+    historyState: () => ({ canUndo: history.undo.length > 0, canRedo: history.redo.length > 0,
+      undoDepth: history.undo.length, redoDepth: history.redo.length }),
     undo: (): void => stepHistory('undo'),
     redo: (): void => stepHistory('redo'),
-    renameObject: (id: ObjectId, name: string): void => edit({ kind: 'object.rename', id, name }),
-    setObjectHidden: (id: ObjectId, hidden: boolean): void => edit({ kind: hidden ? 'object.hide' : 'object.show', id }),
+    renameObject: (id: ObjectId, name: string): void => { edit({ kind: 'object.rename', id, name }); },
+    setObjectHidden: (id: ObjectId, hidden: boolean): void => { edit({ kind: hidden ? 'object.hide' : 'object.show', id }); },
     deleteObject(id: ObjectId): void { invalidateTaps(); edit({ kind: 'object.remove', id }); },
     refinementProbe() {
       const current = refinement;
@@ -683,6 +782,7 @@ export function createDemoSession() {
       if (scene === null || baseline === null || baseline.id !== scene.doc.id) return;
       stopView();
       invalidateTaps();
+      authoring.reset();
       const product = scene.doc.analysis.depth;
       const depth = product === null ? null : products.depths.get(product.map.asset) ?? null;
       products.clear();
@@ -698,7 +798,6 @@ export function createDemoSession() {
       publish({ status: 'Reset', scene: { ...(state.scene ?? scene), selected: null } });
     },
     analysis,
-    setDocument,
     snapshot: (): DemoState => state,
     subscribe(listener: (state: DemoState) => void): () => void {
       listeners.add(listener);
@@ -715,6 +814,7 @@ export function createDemoSession() {
       });
     },
     async openProject(id: SceneId): Promise<boolean> {
+      authoring.cancel();
       cancelExport();
       importController?.abort();
       const controller = new AbortController(); importController = controller;
@@ -794,11 +894,6 @@ export function createDemoSession() {
       const scene = state.scene;
       if (scene === null) throw new Error('Open a photo before enabling Motion.');
       edit({ kind: 'motion', patch });
-      const current = generation;
-      if (patch.enabled === true && state.scene?.doc.motion.enabled) void requestPlateIfNeeded().catch((error: unknown) => {
-        if (current !== generation) return;
-        publish({ ...state, status: error instanceof Error ? error.message : String(error) });
-      });
     },
     injectMask(plane: { width: number; height: number; data: Uint8Array }): void {
       if (!NOISY_DEV) throw new Error('Mask injection is available only in dev builds.');
@@ -829,13 +924,15 @@ export function createDemoSession() {
       const scene = state.scene;
       if (scene === null) throw new Error('Open a photo before downloading.');
       if (renderer === null) throw new Error('The photo renderer is unavailable.');
-      return renderPng(renderer);
+      const activeRenderer = renderer;
+      return committedRender(() => renderPng(activeRenderer));
     },
     async savePng(): Promise<void> {
       const scene = state.scene;
       if (scene === null) throw new Error('Open a photo before downloading.');
       if (renderer === null) throw new Error('The photo renderer is unavailable.');
-      savePng(await renderPng(renderer), scene.doc.title);
+      const activeRenderer = renderer;
+      savePng(await committedRender(() => renderPng(activeRenderer)), scene.doc.title);
     },
     exportStereo,
     async saveStereo(): Promise<void> {
@@ -848,6 +945,7 @@ export function createDemoSession() {
       }
     },
     setStyle(patch: StylePatch): void { edit({ kind: 'style', patch }); },
+    setSymbols(patch: Partial<SceneDocument['symbols']>): void { edit({ kind: 'symbols', patch }); },
     setSurface(patch: Partial<SceneDocument['surface']>): void { edit({ kind: 'surface', patch }); },
     setFry(fry: number): void { edit({ kind: 'fry', fry }); },
     frame: (): number => viewEnabled() ? view.frame() : loop.frame(),
@@ -857,17 +955,23 @@ export function createDemoSession() {
     },
     renderer: (): ReturnType<typeof createRenderer> | null => renderer,
     attachCanvas(canvas: HTMLCanvasElement): () => void {
+      authoring.cancel();
+      const cancelAuthoring = (): void => { authoring.cancel(); };
+      canvas.addEventListener('webglcontextlost', cancelAuthoring);
       cancelExport();
       loop.stop(); stopView(); renderer?.dispose(); renderer = null; renderError = null; stageCanvas = canvas;
       try {
         renderer = createRenderer(canvas);
+        rendererCompare = 'edited';
         if (state.scene !== null) draw(state.scene);
       } catch (error) {
         loop.stop(); stopView(); renderer?.dispose(); renderer = null; renderError = error;
         publish({ ...state, status: error instanceof Error ? error.message : String(error) });
       }
       return () => {
+        canvas.removeEventListener('webglcontextlost', cancelAuthoring);
         if (stageCanvas !== canvas) return;
+        authoring.cancel();
         cancelExport();
         loop.stop(); stopView(); renderer?.dispose(); renderer = null; renderError = null; stageCanvas = null;
       };

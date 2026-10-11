@@ -1,5 +1,5 @@
 import { bundledLock } from '../analysis/bundled-lock.ts';
-import type { AnalysisEvent, AnalysisService, AnalysisServiceDeps, Decoder, FaceTracker, HeavyStage } from '../analysis/service.ts';
+import type { AnalysisError, AnalysisEvent, AnalysisService, AnalysisServiceDeps, Decoder, FaceTracker, HeavyStage } from '../analysis/service.ts';
 import type { AnalysisBackend, ComposedAnalysisService } from '../analysis/composed.ts';
 import { holeMask, plateNeeded, reconcile } from '../core/derive.ts';
 import { liveCoverage, liveHoleMask, type LiveCoverage } from '../core/live-coverage.ts';
@@ -44,6 +44,25 @@ type Host = {
   readonly products: Products;
 };
 const reason = (error: unknown): string => error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error);
+
+type DriverEvent = AnalysisEvent | { readonly event: 'fetch.failed'; readonly error: unknown };
+const modelsUnavailable = 'Models unavailable: reload to try loading the models again.';
+
+/** Product copy never includes model identifiers or diagnostic messages. */
+function modelFailure(error: AnalysisError): string {
+  switch (error.kind) {
+    case 'download':
+      return error.status === 'offline'
+        ? 'Models unavailable: check your connection and reload to download them.'
+        : 'Models unavailable: the download stopped; reload to try again.';
+    case 'integrity': return 'Models unavailable: a model failed its check; reload to fetch it again.';
+    case 'timeout': return 'Models unavailable: loading took too long; reload to try again.';
+    case 'worker': return 'Models unavailable: loading failed; reload to try again.';
+    case 'quota': return 'Models unavailable: free some device storage, then reload.';
+    case 'cancelled': return 'Models unavailable: loading was cancelled; reload to try again.';
+    default: { const unhandled: never = error; return modelsUnavailable; }
+  }
+}
 
 function retryDelay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -115,7 +134,7 @@ async function makeGuide(master: ImageData): Promise<Rgb8> {
 
 export function createAnalysisDriver(host: Host) {
   const clock = createBrowserClock(window);
-  const diag = createDiagnostics<AnalysisEvent>(clock);
+  const diag = createDiagnostics<DriverEvent>(clock);
   const threads = Math.max(2, Math.min(8, Math.floor(navigator.hardwareConcurrency || 2)));
   const lock = bundledLock();
   let driver: ReturnType<typeof createDriver> | null = null;
@@ -135,7 +154,7 @@ export function createAnalysisDriver(host: Host) {
 /** Policy execution takes its service and guide boundary explicitly for lifecycle tests. */
 export function createDriver(host: Host, { clock, diag, service, threads, prepareGuide, models }: {
   readonly clock: Pick<ReturnType<typeof createBrowserClock>, 'now'>;
-  readonly diag: Pick<ReturnType<typeof createDiagnostics<AnalysisEvent>>, 'log' | 'events'>;
+  readonly diag: Pick<ReturnType<typeof createDiagnostics<DriverEvent>>, 'log' | 'events'>;
   readonly service: (AnalysisService & { readonly backend?: AnalysisBackend; readonly routing?: ComposedAnalysisService['routing']; readonly remoteTimings?: ComposedAnalysisService['remoteTimings']; readonly releaseImport?: () => void }) | null;
   readonly threads: number;
   readonly prepareGuide: typeof makeGuide;
@@ -356,22 +375,28 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
     } catch (error) { failed(plate ? 'inpaint' : 'depth', error); }
   }
   let loadingModels = false;
+  const failModels = (error: unknown, sentence = modelsUnavailable): void => {
+    loadingModels = false;
+    diag.log({ event: 'fetch.failed', error });
+    setStatus(sentence);
+    settle(status);
+  };
   function loadModels(): void {
     if (loadingModels || policy.modelsReady) return;
-    if (service === null || models.kind !== 'ready') { setStatus(`Models unavailable: ${models.kind === 'ready' ? 'service unavailable' : models.message}`); return; }
+    if (service === null || models.kind !== 'ready') { failModels(models.kind === 'ready' ? 'service unavailable' : models.message); return; }
     loadingModels = true;
     setStatus('Fetching models 0%');
     const progress = new Map<string, number>();
-    void service.fetchModels(['depth', 'encode', 'decode', 'inpaint', 'face'], fetchController.signal, (model, fraction) => {
+    void Promise.resolve().then(() => service.fetchModels(['depth', 'encode', 'decode', 'inpaint', 'face'], fetchController.signal, (model, fraction) => {
       progress.set(model, fraction);
       const percent = Math.floor([...progress.values()].reduce((sum, value) => sum + value, 0) * 100 / models.ids.length);
       setStatus(`Fetching models ${percent}%`);
-    }).then((result) => {
+    })).then((result) => {
       loadingModels = false;
-      if (!result.ok) { setStatus(`Models unavailable: ${reason(result.error)}`); settle(status); return; }
+      if (!result.ok) { failModels(result.error, modelFailure(result.error)); return; }
       setStatus(host.read() === null ? 'Models ready - drop a photo' : 'Waiting to analyze');
       dispatch({ kind: 'models-ready' });
-    }).catch((error: unknown) => { loadingModels = false; setStatus(`Models unavailable: ${reason(error)}`); settle(status); });
+    }).catch((error: unknown) => { failModels(error); });
   }
   queueMicrotask(loadModels);
   return {

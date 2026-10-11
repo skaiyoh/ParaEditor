@@ -162,6 +162,18 @@ components:
 
 # Design System: noisy
 
+> Owns: the pre-RS1 implemented visual system recorded below.
+> Does not own: current feature requirements ([PRODUCT.md](PRODUCT.md) and the [UI handoff](plan/handoffs/ui-redesign.md)), demo priorities ([revision.md](plan/revision.md)), or redesign decisions still being settled in [RS1](plan/evidence/RS1-decisions.md).
+
+## Current redesign status: 2026-10-10
+
+The pink-accent desktop system below is the earlier implementation record, not the direction for the coming redesign.
+Nathan's settled RS1 direction is neutral gray, near-white interaction emphasis, touch-scale rounded controls, vertical edge Fry, and floating tool panels/icon toolbar.
+The [RS1 record](plan/evidence/RS1-decisions.md) names remaining composition/key-treatment choices; its sketch has not been approved wholesale.
+The [UI handoff](plan/handoffs/ui-redesign.md) adds the current inventory and creative-tool requirements.
+Per Nathan's RS1 decision, the design session rewrites this document from the built redesign once it lands.
+This review preserves old tokens/layout rather than pretending a new visual system has shipped.
+
 ## Overview
 
 **Creative North Star: "The Working Editor"**
@@ -223,7 +235,7 @@ Pure black appears nowhere in the shell; the icon's near-black is an open produc
 - **Title** (600, 13 px, 16 px line): the inspector scope heading "Scene", the Object node's name, each node's disclosure label, and the primary action.
 - **Body** (400, 13 px, 16 px line): the photo name, button labels, the status line, the Fry value, and the empty-state prompt.
 - **Label** (400, 12 px): range row labels and values, scene facts, the viewer toolbar, mode-rail buttons, and the layer hint at 1.5 line height.
-- **Meta** (400, 11 px): timings beside scene facts, "3 models local", and the build line.
+- **Meta** (400, 11 px): timings beside scene facts, the observed analysis backend/local-model count, and the build line.
   11 px is the floor; nothing is set smaller.
 - **Panel heading** (600, 11 px, 0.08 em tracking, uppercase, `secondary`): LAYERS and SCENE in the left column only.
   The inspector's headings are title case, not caps.

@@ -42,6 +42,18 @@
       }
     },
     {
+      "path": "/gallery",
+      "headers": { "Cache-Control": "no-cache" }
+    },
+    {
+      "path": "/gallery/*",
+      "headers": { "Cache-Control": "no-cache" }
+    },
+    {
+      "path": "/gallery.html",
+      "headers": { "Cache-Control": "no-cache" }
+    },
+    {
       "path": "*",
       "headers": {
         "Cache-Control": "no-cache"

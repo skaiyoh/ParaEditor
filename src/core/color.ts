@@ -52,3 +52,44 @@ export function oklchToOklab({ l, c, h }: Oklch): Oklab {
   const angle = h * Math.PI / 180;
   return { L: l, a: c * Math.cos(angle), b: c * Math.sin(angle) };
 }
+
+/** Picker channels are sRGB bytes, unlike the normalized Rgb conversion inputs. */
+export type SrgbChannels = { readonly r: number; readonly g: number; readonly b: number };
+export type InputColor = { readonly hex: string; readonly srgb: SrgbChannels; readonly oklch: Oklch };
+export type ColorInputResult =
+  | { readonly kind: 'valid'; readonly color: InputColor }
+  | { readonly kind: 'invalid'; readonly reason: string };
+
+export function srgbToOklch(rgb: Rgb): Oklch { return oklabToOklch(srgbToOklab(rgb)); }
+export function oklchToSrgb(color: Oklch): Rgb { return oklabToSrgb(oklchToOklab(color)); }
+
+/** Accept finite channels in [0,255], rounding fractional input to the nearest byte. */
+export function parseSrgbChannels({ r, g, b }: SrgbChannels): ColorInputResult {
+  if (![r, g, b].every((value) => Number.isFinite(value) && value >= 0 && value <= 255)) {
+    return { kind: 'invalid', reason: 'Enter sRGB channels between 0 and 255.' };
+  }
+  const srgb = { r: Math.round(r), g: Math.round(g), b: Math.round(b) };
+  const hex = '#' + [srgb.r, srgb.g, srgb.b].map((value) => value.toString(16).padStart(2, '0')).join('');
+  const converted = srgbToOklch({ r: srgb.r / 255, g: srgb.g / 255, b: srgb.b / 255 });
+  // Matrix roundoff must not push white outside the saved lightness range.
+  const oklch = { ...converted, l: Math.max(0, Math.min(1, converted.l)) };
+  return { kind: 'valid', color: { hex, srgb, oklch } };
+}
+
+/** Strict CSS opaque hex only; no trimming, alpha, names or missing '#'. */
+export function parseHex(value: unknown): ColorInputResult {
+  if (typeof value !== 'string' || (value.length !== 4 && value.length !== 7) || !/^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(value)) {
+    return { kind: 'invalid', reason: 'Enter a color as #RGB or #RRGGBB.' };
+  }
+  const digits = value.length === 4 ? [...value.slice(1)].map((digit) => digit + digit).join('') : value.slice(1);
+  return parseSrgbChannels({ r: Number.parseInt(digits.slice(0, 2), 16),
+    g: Number.parseInt(digits.slice(2, 4), 16), b: Number.parseInt(digits.slice(4, 6), 16) });
+}
+
+/** Display conversion clips to sRGB; the caller's stored OKLCH remains untouched. */
+export function colorInputFromOklch(color: Oklch): ColorInputResult {
+  if (![color.l, color.c, color.h].every(Number.isFinite)) return { kind: 'invalid', reason: 'The color must be finite.' };
+  const rgb = oklchToSrgb(color);
+  const byte = (value: number): number => Math.max(0, Math.min(255, value * 255));
+  return parseSrgbChannels({ r: byte(rgb.r), g: byte(rgb.g), b: byte(rgb.b) });
+}

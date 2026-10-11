@@ -160,7 +160,7 @@ const isLeaf = (m: ModuleName): m is Leaf => LEAVES.some((l) => l === m);
 const isDirectory = (top: string): top is (typeof DIRECTORIES)[number] => DIRECTORIES.some((d) => d === top);
 
 function moduleOf(rel: string): ModuleName | null {
-  if (rel === 'main.tsx') return 'main';
+  if (rel === 'main.tsx' || rel === 'gallery.ts') return 'main';
   const [top, ...rest] = rel.split('/');
   return top !== undefined && rest.length > 0 && isDirectory(top) ? top : null;
 }
@@ -185,7 +185,7 @@ function packageName(specifier: string): string {
 
 /** The rule an edge between two modules of the map breaks, or null when the direction allows it. */
 function edgeRule(from: ModuleFile, to: ModuleFile, imp: ImportRecord): string | null {
-  if (to.module === 'main') return 'nothing imports main.tsx';
+  if (to.module === 'main') return `nothing imports ${to.rel}`;
   if (to.module === 'dev' && from.module !== 'dev') return 'the dev pages are entries: nothing outside dev/ imports them';
   if (to.module === 'app') {
     if (from.module === 'main' || from.module === 'app') return null;
@@ -300,6 +300,26 @@ export async function checkImportGraph(root: string): Promise<readonly Violation
       else if (!pkg.allowed(from)) report(imp, pkg.rule);
     }
     violations.push(...own.sort((a, b) => a.line - b.line));
+  }
+  // Gallery has the same composition rules as main, with the additional view-only boundary.
+  // Check every reachable import, including types and re-exports, so an app/session hop cannot hide analysis.
+  for (const first of parsed.get('gallery.ts')?.imports ?? []) {
+    if (!first.specifier.startsWith('./') && !first.specifier.startsWith('../')) continue;
+    const pending = [path.posix.normalize(first.specifier)];
+    const seen = new Set<string>();
+    for (let rel = pending.pop(); rel !== undefined; rel = pending.pop()) {
+      if (seen.has(rel)) continue;
+      seen.add(rel);
+      if (moduleOf(rel) === 'analysis') {
+        violations.push({ file: 'gallery.ts', line: first.line, specifier: first.specifier, rule: 'gallery entry cannot reach analysis/' });
+        break;
+      }
+      for (const imp of parsed.get(rel)?.imports ?? []) {
+        if (imp.specifier.startsWith('./') || imp.specifier.startsWith('../')) {
+          pending.push(path.posix.normalize(path.posix.join(path.posix.dirname(rel), imp.specifier)));
+        }
+      }
+    }
   }
   return violations.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line));
 }

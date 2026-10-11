@@ -1,8 +1,10 @@
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { DemoScene, DemoSession } from '../session/scene.ts';
 import type { SceneObject } from '../core/types.ts';
+import type { Oklch } from '../core/raster.ts';
 import { LENGTHS } from '../core/ranges.ts';
 import { Swatches } from './swatches.tsx';
+import { Icon } from './icons.tsx';
 
 function Thumbnail({ scene, bounds }: {
   readonly scene: DemoScene; readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
@@ -35,6 +37,12 @@ function NameInput({ object, session, onFinish }: {
     if (commit && name.length > 0) session.renameObject(object.id, name);
     onFinish();
   };
+  useLayoutEffect(() => {
+    const node = input.current;
+    const cancel = (): void => finish(false);
+    node?.addEventListener('cancel', cancel);
+    return () => node?.removeEventListener('cancel', cancel);
+  }, []);
   return <input ref={input} class="layer-name-input" data-testid="layer-name-input" aria-label="Layer name"
     aria-invalid={invalid} title={invalid ? 'Enter a name' : undefined} value={name}
     maxLength={LENGTHS['objects[].name'].max} onInput={(event) => { setName(event.currentTarget.value); setInvalid(false); }}
@@ -52,26 +60,26 @@ function Eye({ hidden }: { readonly hidden: boolean }) {
   </svg>;
 }
 
-function ObjectActions({ object, session, placement }: {
-  readonly object: SceneObject; readonly session: DemoSession; readonly placement: 'layer' | 'object';
+function ObjectActions({ object, session, placement, icons = false }: {
+  readonly object: SceneObject; readonly session: DemoSession; readonly placement: 'layer' | 'object'; readonly icons?: boolean;
 }) {
   const row = placement === 'layer';
   return <div class={`${placement}-actions`}>
-    <button class={row ? 'layer-icon' : undefined} type="button" data-testid={`${placement}-hide`}
-      aria-label={`${object.hidden ? 'Show' : 'Hide'} ${object.name}`}
+    <button class={row ? 'layer-icon' : icons ? 'icon-button' : undefined} type="button" data-testid={`${placement}-hide`}
+      aria-label={`${object.hidden ? 'Show' : 'Hide'} ${object.name}`} aria-pressed={object.hidden}
       onClick={() => session.setObjectHidden(object.id, !object.hidden)}>
-      {row ? <Eye hidden={object.hidden} /> : object.hidden ? 'Show' : 'Hide'}
+      {icons ? <Icon name="hide" /> : row ? <Eye hidden={object.hidden} /> : object.hidden ? 'Show' : 'Hide'}
     </button>
-    <button class={row ? 'layer-icon' : undefined} type="button" data-testid={`${placement}-delete`}
+    <button class={row ? 'layer-icon' : icons ? 'icon-button' : undefined} type="button" data-testid={`${placement}-delete`}
       aria-label={`Delete ${object.name}`} onClick={() => session.deleteObject(object.id)}>
-      {row ? <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+      {icons ? <Icon name="trash" /> : row ? <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
         <path d="M2 4h12M6 4V2h4v2M4 4l1 10h6l1-10M6.5 6v5M9.5 6v5" />
       </svg> : 'Delete'}
     </button>
   </div>;
 }
 
-export function ObjectInspector({ object, session }: { readonly object: SceneObject; readonly session: DemoSession }) {
+export function ObjectInspector({ object, session, onColorApplied }: { readonly object: SceneObject; readonly session: DemoSession; readonly onColorApplied: (color: Oklch | null) => void }) {
   const [renaming, setRenaming] = useState(false);
   return <section class="object-node" aria-label="Object">
     <div class="object-name-row">
@@ -79,40 +87,55 @@ export function ObjectInspector({ object, session }: { readonly object: SceneObj
         : <h3 class="object-heading" title={object.name}>{object.name}</h3>}
       {!renaming && <button type="button" data-testid="layer-rename" onClick={() => setRenaming(true)}>Rename</button>}
     </div>
-    <Swatches session={session} recolor={object.recolor} />
+    <Swatches session={session} recolor={object.recolor} onColorApplied={onColorApplied} />
     <ObjectActions object={object} session={session} placement="object" />
   </section>;
 }
 
-function ObjectRow({ object, scene, session }: { readonly object: SceneObject; readonly scene: DemoScene; readonly session: DemoSession }) {
+export function ContextBar({ scene, object, session, onColorApplied }: { readonly scene: DemoScene; readonly object: SceneObject; readonly session: DemoSession; readonly onColorApplied: (color: Oklch | null) => void }) {
+  const [renaming, setRenaming] = useState(false);
+  const rename = useRef<HTMLButtonElement>(null);
+  return <section class="context-bar" data-testid="context-bar" aria-label="Selected object">
+    <Thumbnail scene={scene} bounds={object.produced.bounds} />
+    {renaming ? <NameInput object={object} session={session} onFinish={() => { setRenaming(false); queueMicrotask(() => rename.current?.focus()); }} />
+      : <button ref={rename} class="context-name" type="button" data-testid="object-rename" aria-label={`Rename ${object.name}`} title={object.name} onClick={() => setRenaming(true)}>{object.name}</button>}
+    <Swatches session={session} recolor={object.recolor} onColorApplied={onColorApplied} full />
+    <ObjectActions object={object} session={session} placement="object" icons />
+    <button class="icon-button" type="button" aria-label="Deselect" title="Deselect" onClick={() => session.select(null)}><Icon name="close" /></button>
+  </section>;
+}
+
+function ObjectRow({ object, scene, session, full }: { readonly object: SceneObject; readonly scene: DemoScene; readonly session: DemoSession; readonly full: boolean }) {
   const [renaming, setRenaming] = useState(false);
   const selected = scene.selected === object.id;
   return <div class={`layer-row${selected ? ' is-selected' : ''}${object.hidden ? ' is-hidden' : ''}`} data-object-id={object.id}>
     <button class="layer-select" type="button" aria-pressed={selected} aria-label={`Select ${object.name}`}
       onClick={() => session.select(object.id)} onDblClick={() => setRenaming(true)}>
       <Thumbnail scene={scene} bounds={object.produced.bounds} />
-      {!renaming && <span class="layer-name" title={object.name}>{object.name}</span>}
+      {!full && !renaming && <span class="layer-name" title={object.name}>{object.name}</span>}
     </button>
-    {renaming && <NameInput object={object} session={session} onFinish={() => setRenaming(false)} />}
-    <ObjectActions object={object} session={session} placement="layer" />
+    {renaming ? <NameInput object={object} session={session} onFinish={() => setRenaming(false)} />
+      : full && <button class="layer-name" type="button" data-testid="layer-rename" title={object.name} aria-label={selected ? `Rename ${object.name}` : `Select ${object.name}`}
+        onClick={() => { if (selected) setRenaming(true); else session.select(object.id); }}>{object.name}</button>}
+    <ObjectActions object={object} session={session} placement="layer" icons={full} />
   </div>;
 }
 
-export function Layers({ scene, session }: { readonly scene: DemoScene | null; readonly session: DemoSession }) {
+export function Layers({ scene, session, full = false }: { readonly scene: DemoScene | null; readonly session: DemoSession; readonly full?: boolean }) {
   const history = session.historyState();
   return <section class="layers" aria-labelledby="layers-heading">
     <div class="layers-header"><h2 id="layers-heading" class="panel-heading">Layers</h2>
-      <div class="history-actions">
+      {!full && <div class="history-actions">
         <button type="button" data-testid="history-undo" disabled={!history.canUndo} onClick={() => session.undo()}>Undo</button>
         <button type="button" data-testid="history-redo" disabled={!history.canRedo} onClick={() => session.redo()}>Redo</button>
-      </div>
+      </div>}
     </div>
     {scene !== null && <div class="layer-list">
       <button class={`layer-row${scene.selected === null ? ' is-selected' : ''}`} type="button" aria-pressed={scene.selected === null} onClick={() => session.select(null)}>
         <Thumbnail scene={scene} bounds={{ x: 0, y: 0, ...scene.doc.frame.master.size }} />
         <span class="layer-name">Plate</span>
       </button>
-      {scene.doc.objects.map((object) => <ObjectRow key={object.id} object={object} scene={scene} session={session} />)}
+      {scene.doc.objects.map((object) => <ObjectRow key={object.id} object={object} scene={scene} session={session} full={full} />)}
     </div>}
     {scene !== null && scene.doc.objects.length === 0 && <p class="layer-hint">Tap the picture to add a layer</p>}
   </section>;

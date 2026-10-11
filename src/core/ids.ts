@@ -8,6 +8,12 @@ export type Brand<T, B extends string> = T & { readonly __brand: B };
 export type SceneId = Brand<string, 'SceneId'>;
 /** UUID v4. */
 export type ObjectId = Brand<string, 'ObjectId'>;
+/** UUID v4, an immutable imported raster's identity. */
+export type SourceId = Brand<string, 'SourceId'>;
+/** UUID v4, independent of a layer except for migrated legacy ownership. */
+export type RemovalId = Brand<string, 'RemovalId'>;
+/** UUID v4, an owner-local operation's identity. */
+export type EffectId = Brand<string, 'EffectId'>;
 /** UUID v4. */
 export type LightId = Brand<string, 'LightId'>;
 /** 64 lowercase hex: the SHA-256 of the asset's bytes. */
@@ -42,6 +48,18 @@ export function isSceneId(text: string): text is SceneId {
 
 /** True for a lowercase UUID v4. */
 export function isObjectId(text: string): text is ObjectId {
+  return UUID_V4.test(text);
+}
+
+export function isSourceId(text: string): text is SourceId {
+  return UUID_V4.test(text);
+}
+
+export function isRemovalId(text: string): text is RemovalId {
+  return UUID_V4.test(text);
+}
+
+export function isEffectId(text: string): text is EffectId {
   return UUID_V4.test(text);
 }
 

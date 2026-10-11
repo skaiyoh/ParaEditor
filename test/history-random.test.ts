@@ -10,7 +10,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Edit, Produce } from '../src/core/edits.ts';
-import { coalesceKey, EMPTY_HISTORY, HISTORY_LIMIT, push, redo, undo, type History, type HistoryStep } from '../src/core/history.ts';
+import { coalesceKey, EMPTY_HISTORY, HISTORY_LIMIT, push, recordEdit, redo, undo, type History, type HistoryStep } from '../src/core/history.ts';
+import { createAuthoring } from '../src/session/authoring.ts';
 import { applyProduce, sortedMasks } from '../src/core/produce.ts';
 import { applyEdit, applyEdits } from '../src/core/reduce.ts';
 import { parseDocument } from '../src/core/schema.ts';
@@ -24,6 +25,55 @@ const STEPS = 160;
 const SEED = 0x5eed_4157;
 
 type Random = () => number;
+
+test('100 seeded gesture sessions preserve separate actions, cancellation and analysis through every undo/redo', () => {
+  const random = seeded(SEED + 1);
+  for (let sequence = 0; sequence < 100; sequence++) {
+    let doc = validDocuments()[sequence % validDocuments().length]; assert.ok(doc);
+    let current: SceneDocument = doc, history = EMPTY_HISTORY, at = 0, saves = 0;
+    const snapshots: SceneDocument[] = [current];
+    const authoring = createAuthoring({ read: () => current, changed: () => {}, record: (edit) => {
+      const result = recordEdit({ doc: current, history, edit, at, now: new Date(Date.UTC(2026, 9, 11, 0, 0, 0, at)).toISOString() });
+      assert.notEqual(result.kind, 'refused');
+      if (result.kind === 'refused') return { kind: 'refused', reason: result.detail };
+      if (result.kind === 'applied') { current = result.doc; history = result.history; saves++; snapshots.push(current); }
+      return { kind: result.kind };
+    } });
+    for (let gesture = 0; gesture < 25; gesture++) {
+      const before = current, beforeHistory = history, saved = saves;
+      const token = authoring.beginGesture({ operation: 'style', target: { kind: 'scene' } }); assert.ok(token);
+      const end = Math.floor(random() * 3);
+      for (let move = 0; move < 8; move++) {
+        at += Math.floor(random() * 2000);
+        authoring.updateGesture({ token, value: { kind: 'style', patch: { saturation: random() } } });
+        assert.equal(current, before); assert.equal(history, beforeHistory); assert.equal(saves, saved);
+      }
+      if (end === 0) authoring.cancelGesture(token);
+      else {
+        if (end === 1) authoring.updateGesture({ token, value: { kind: 'style', patch: { saturation: before.style.saturation } } });
+        authoring.commitGesture(token);
+      }
+      if (end !== 2) { assert.equal(current, before); assert.equal(history, beforeHistory); assert.equal(saves, saved); }
+      assert.equal(history.undo.length, saves);
+      at += Math.floor(random() * 100);
+    }
+    const landed = applyProduce(current, { kind: 'depth', depth: depthProduct(3) }, current.updatedAt);
+    assert.notEqual(landed.kind, 'refused'); current = landed.doc;
+    for (let i = snapshots.length - 2; i >= 0; i--) {
+      const step = undo(history); assert.ok(step);
+      const result = applyEdits(current, step.edits, current.updatedAt); assert.notEqual(result.kind, 'refused');
+      current = result.doc; history = step.history;
+      const expected = snapshots[i]; assert.ok(expected);
+      assert.deepEqual(editable(current), editable(expected)); assert.deepEqual(current.analysis.depth, depthProduct(3));
+    }
+    for (const expected of snapshots.slice(1)) {
+      const step = redo(history); assert.ok(step);
+      const result = applyEdits(current, step.edits, current.updatedAt); assert.notEqual(result.kind, 'refused');
+      current = result.doc; history = step.history;
+      assert.deepEqual(editable(current), editable(expected)); assert.deepEqual(current.analysis.depth, depthProduct(3));
+    }
+  }
+});
 
 /** mulberry32: a small seeded generator of uniform numbers in [0, 1). */
 function seeded(seed: number): Random {

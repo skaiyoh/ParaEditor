@@ -309,3 +309,52 @@ The reasons below are the design's (section 21).
 
 - Storage on the phone becomes the binding limit.
 - A browser decodes the same PNG to different pixels.
+
+## ADR-008 - iPad creative photo-to-motion direction
+
+Status: Accepted for product direction; composition implementation is proposed in the feature review.
+
+Date: 2026-10-10
+
+### Context
+
+Nathan changed the demonstration from desktop/offline editing with a 3DS ending to an iPad editor using Radeon preparation and local interaction.
+He then requested adversarial review of creative freedom, citing fixed colors, AI-only objects, missing placement, and Pencil drawing.
+Source reviewed through `ab48fa1` includes PX10 perspective viewing but remains a one-photo, semantic-mask effects editor.
+The [feature review](../plan/feature-review.md) records the three independent critiques, source evidence, proposed contracts, and acceptance cases.
+
+### Decision
+
+- Make the iPad the primary judging device and photo-to-editable-depth-to-perspective-motion the product proof.
+- Make arbitrary color, human-directed selection, durable composition layers/transforms, drawing, and explicit math-effect scope core creative requirements, implemented in complete stages.
+- AI supplies editable preparation rather than restricting what the user may select; ordinary interaction/rendering stays local.
+- Keep the current hybrid policy: GPU depth/plate, device SAM Tiny taps/face/render/export, with documented automatic fallback.
+- Keep the 3DS optional and the current effects workflow as honest recovery while the creative slice is implemented.
+- Keep full reconstruction, clip/timeline expansion, and native 3D import separate from bounded 2.5D perspective claims.
+- Preserve historical decisions at their original dates; clarify current applicability here rather than rewriting prior rationale.
+
+### Consequences
+
+The [revision](../plan/revision.md) supersedes older demo priorities.
+The [UI handoff](../plan/handoffs/ui-redesign.md) distinguishes delivered controls, approved additions, and open UX defaults.
+Scene/source/mask/transform/paint changes require schema/migrations, history, store validation, and preview/export agreement; this direction ADR does not freeze the exact implementation contract.
+Actual-iPad input, permissions, memory, Pencil behavior, and output must be tested rather than inferred from Chrome.
+The judging build may contain fewer completed stages, but missing core requirements remain explicit release choices for Nathan.
+
+Earlier ADR applicability:
+
+- ADR-001/002 remain toolchain/local-runtime foundations; remote analysis and hosting add paths, not proof every stage is local.
+- ADR-003's local sequence-worker lifecycle still underpins the device path; hybrid orchestration adds remote-session ownership.
+- ADR-005's portable scene archive remains a planned file format, not the delivered shared Projects transport.
+- ADR-006's 2048px master remains current; its MP4-at-master/GIF-480 dimensions are superseded by current ≤1080px/30fps movie and 640px/15fps GIF, with browser-selected container.
+- ADR-007's local PNG/plane representation does not make remote upload lossless; the adapter uploads quality-92 JPEG. No pixel-identical remote/local-input claim is implied.
+
+### Alternatives considered
+
+- Preserve fixed swatches/AI-only regions and add global filters: rejected because it leaves Nathan's identified creative limits.
+- Rebuild full Photoshop/Resolve or embed a desktop editor engine: unnecessary for the coherent creative slice and existing browser stack.
+- Prioritize a 3DS viewer or unrestricted reconstruction: does not serve the approved iPad workflow and is not established by monocular depth.
+
+### Revisit when
+
+Nathan changes the primary user/device or creative task; device evidence requires a different compute split; prepared/native scene import becomes accepted scope; or asset/storage/security/cost constraints materially change the proposed composition contract.

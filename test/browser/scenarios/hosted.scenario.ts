@@ -55,13 +55,15 @@ export const scenarios: readonly Scenario[] = [{
     await t.page.waitFor('the hosted sample button', z.literal(true), () => [...document.querySelectorAll('button')].some((button) => button.textContent === 'Try a sample') ? true : null);
     const facts = await t.page.evaluate(Boundary, boundary, model.served);
     t.equal('the hosted browser boundary', facts, { isolated: true, testSurface: false, modelStatus: 206, modelBytes: 32, modelRange: `bytes 0-31/${model.bytes}`, devStatus: 404 });
+    await t.page.click('[data-testid=tool-actions]');
     const selector = await t.page.evaluate(z.string(), () => {
-      const button = [...document.querySelectorAll('button')].find((item) => item.textContent === 'Try a sample');
+      const button = [...document.querySelectorAll('button')].find((item) => item.checkVisibility() && item.textContent === 'Try a sample');
       if (button === undefined) throw new Error('Sample button is missing.');
       button.dataset['hostedAction'] = 'sample';
       return '[data-hosted-action="sample"]';
     });
     await t.page.click(selector);
+    await t.page.click('[data-testid=tool-actions]');
     await t.page.waitFor('the real hosted sample analysis to finish', z.literal(true), () => document.querySelector('[data-testid="status"]')?.textContent === 'Ready to tap' ? true : null, { timeoutMs: 240_000 });
     t.equal('the hosted stage exists', await t.page.evaluate(z.boolean(), () => {
       const stage = document.querySelector<HTMLCanvasElement>('[data-testid="stage"]');
@@ -77,7 +79,7 @@ export const scenarios: readonly Scenario[] = [{
     const List = z.object({ projects: z.array(z.object({ id: z.string(), name: z.string() }).passthrough()) });
     const clickText = async (text: string) => {
       const selector = await t.page.evaluate(z.string(), (label: string) => {
-        const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === label || item.getAttribute('aria-label') === label);
+        const button = [...document.querySelectorAll('button')].find((item) => item.checkVisibility() && (item.textContent?.trim() === label || item.getAttribute('aria-label') === label));
         if (button === undefined) throw new Error(`Missing hosted action: ${label}`);
         button.dataset['hostedAction'] = label.toLowerCase().replace(/[^a-z0-9]+/g, '-');
         return `[data-hosted-action="${button.dataset['hostedAction']}"]`;
@@ -85,7 +87,7 @@ export const scenarios: readonly Scenario[] = [{
       await t.page.click(selector);
     };
     const setProjectsPanel = async (open: boolean) => {
-      const isOpen = await t.page.evaluate(z.boolean(), () => document.querySelector('[data-testid="projects-panel"]') !== null);
+      const isOpen = await t.page.evaluate(z.boolean(), () => document.querySelector('[data-testid="projects-panel"]')?.checkVisibility() === true);
       if (isOpen !== open) await clickText('Projects');
     };
     const list = async () => t.page.evaluate(List, async () => {
@@ -110,6 +112,7 @@ export const scenarios: readonly Scenario[] = [{
       };
       return true;
     });
+    await t.page.click('[data-testid=tool-actions]');
     await clickText('Try a sample');
     await t.page.waitFor('hosted sample analysis', z.literal(true), () => document.querySelector('[data-testid="status"]')?.textContent === 'Ready to tap' ? true : null, { timeoutMs: 240_000 });
     await setProjectsPanel(true);

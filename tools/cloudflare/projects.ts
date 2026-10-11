@@ -1,5 +1,8 @@
 import { z } from '../../src/core/zod.ts';
-import { deserializeScene, serializeDocument } from '../../src/projects/serialize.ts';
+import { deserializeProjectEnvelope } from '../../src/projects/serialize.ts';
+
+import { compositionAssetLimit, compositionAssetPath, readAssetBody, validateCompositionAssets, validateGenericAsset, MAX_ASSET_BYTES } from '../../src/projects/assets.ts';
+import { isAssetId } from '../../src/core/ids.ts';
 
 type ObjectInfo = { readonly size: number };
 export type ProjectsEnv = {
@@ -106,8 +109,8 @@ export async function handleProjects(request: Request, pathname: string, env: Pr
   const method = (): Response => new Response('method not allowed\n', { status: 405, headers: { ...headers, 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8' } });
   const [, , , id, resource, asset, extra] = pathname.split('/');
   if (pathname !== '/api/projects' && (id === undefined || !projectId.test(id) || extra !== undefined ||
-    (resource === 'masks' ? !assetId.test(asset ?? '') : asset !== undefined) ||
-    (resource !== undefined && !['scene', 'photo', 'thumbnail', 'masks'].includes(resource)))) return bad('The project path is invalid.');
+    (['masks', 'assets'].includes(resource ?? '') ? !assetId.test(asset ?? '') : asset !== undefined) ||
+    (resource !== undefined && !['scene', 'photo', 'thumbnail', 'masks', 'assets'].includes(resource)))) return bad('The project path is invalid.');
   try {
     if (pathname === '/api/projects') {
       if (request.method !== 'GET') return method();
@@ -128,20 +131,23 @@ export async function handleProjects(request: Request, pathname: string, env: Pr
     if (request.method !== 'GET' && request.method !== 'PUT') return method();
     const current = stateSchema.parse((await neonSql(env.NEON_DATABASE_URL, state(id)))[0]);
     if (current.deleted) return request.method === 'PUT' ? deleted() : missing();
-    const key = `${prefix}${resource === 'masks' ? `masks/${asset}` : resource}`;
+    const originalAsset = request.headers.get('X-Project-Asset');
+    if (originalAsset !== null && (resource !== 'photo' || !isAssetId(originalAsset))) return bad('The original asset id is invalid.');
+    const key = originalAsset !== null && request.method === 'PUT' ? `${prefix}assets/${originalAsset}` : `${prefix}${['masks', 'assets'].includes(resource) ? `${resource}/${asset}` : resource}`;
     if (request.method === 'GET') {
       if (resource === 'scene') {
         const rows = await neonSql(env.NEON_DATABASE_URL, { query: 'SELECT scene, masks, revision::text FROM projects WHERE id = $1', params: [id] });
         if (rows.length === 0) return missing();
         const row = rowSchema.parse(rows[0]);
-        return reply({ document: row.scene, masks: row.masks, revision: row.revision });
+        const v5 = typeof row.scene === 'object' && row.scene !== null && 'version' in row.scene && row.scene.version === 5;
+        return reply(v5 ? { transportVersion: 2, document: row.scene, revision: row.revision } : { document: row.scene, masks: row.masks, revision: row.revision });
       }
       const object = await env.PROJECTS.get(key);
       if (object === null) return missing();
       return new Response(object.body, { headers: { ...headers, 'Content-Length': String(object.size),
-        'Content-Type': resource === 'thumbnail' ? 'image/jpeg' : resource === 'masks' ? 'application/octet-stream' : object.httpMetadata?.contentType ?? 'application/octet-stream' } });
+        'Content-Type': resource === 'thumbnail' ? 'image/jpeg' : ['masks', 'assets'].includes(resource) ? 'application/octet-stream' : object.httpMetadata?.contentType ?? 'application/octet-stream' } });
     }
-    const limit = resource === 'scene' ? 1024 * 1024 : resource === 'thumbnail' ? 59_999 : resource === 'masks' ? 16 * 1024 * 1024 : 24 * 1024 * 1024;
+    const limit = resource === 'scene' ? 1024 * 1024 : resource === 'thumbnail' ? 59_999 : resource === 'masks' ? 16 * 1024 * 1024 : resource === 'assets' ? MAX_ASSET_BYTES : 24 * 1024 * 1024;
     const buffer = await readBody(request, limit);
     if (buffer === null) return error(413, 'The project body is too large.');
     if (buffer.byteLength === 0) return bad('The project body is empty or too large.');
@@ -149,20 +155,36 @@ export async function handleProjects(request: Request, pathname: string, env: Pr
     const type = (request.headers.get('Content-Type') ?? '').split(';', 1)[0]?.trim().toLowerCase() ?? '';
     if (resource === 'scene') {
       if (type !== 'application/json') return bad('The project scene must be JSON.');
-      let scene;
-      try { scene = deserializeScene(JSON.parse(new TextDecoder().decode(bytes))); }
+      let envelope;
+      try { envelope = deserializeProjectEnvelope(JSON.parse(new TextDecoder().decode(bytes))); }
       catch { return bad('The project scene or its mask metadata is invalid.'); }
+      const scene = envelope.scene;
       if (scene.document.id !== id) return bad('The project document id must match its path.');
       if (current.revision !== null && scene.revision <= current.revision) return error(409, 'The project scene revision must increase.');
-      for (const [mask, size] of Object.entries(scene.masks)) {
+      if (envelope.kind === 'composition') {
+        try {
+          await validateCompositionAssets(envelope.scene.document, async (asset, refs) => {
+            const object = await env.PROJECTS.get(`${prefix}${compositionAssetPath(asset, refs)}`);
+            if (object === null) return null;
+            if (object.size > compositionAssetLimit(refs)) { await object.body.cancel(); throw new Error('Asset exceeds its byte limit.'); }
+            return readAssetBody(object.body, compositionAssetLimit(refs));
+          });
+        } catch { return bad('The project assets are missing or invalid.'); }
+      }
+      const masks = envelope.kind === 'legacy' ? envelope.scene.masks : {};
+      for (const [mask, size] of Object.entries(masks)) {
         const info = await env.PROJECTS.head(`${prefix}masks/${mask}`);
         if (info !== null && info.size !== size.width * size.height) return bad('The project mask size does not match its bytes.');
       }
       const result = statusSchema.parse((await neonSql(env.NEON_DATABASE_URL, [lock(id),
-        upsert(id, scene.document.title, JSON.stringify(serializeDocument(scene.document)), JSON.stringify(scene.masks), scene.revision)]))[0]);
+        upsert(id, scene.document.title, JSON.stringify(scene.document), JSON.stringify(masks), scene.revision)]))[0]);
       return result.status === 'deleted' ? deleted() : result.status === 'conflict' ? error(409, 'The project scene revision must increase.') : reply({ ok: true });
     }
-    if (resource === 'thumbnail') {
+    if (resource === 'assets') {
+      if (type !== 'application/octet-stream' || asset === undefined || !isAssetId(asset)) return bad('The project asset must be raw bytes.');
+      try { await validateGenericAsset(bytes, asset); }
+      catch { return bad('The project asset bytes are invalid.'); }
+    } else if (resource === 'thumbnail') {
       if (type !== 'image/jpeg' || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes.at(-2) !== 0xff || bytes.at(-1) !== 0xd9) return bad('The project thumbnail must be a JPEG under 60 KB.');
     } else if (resource === 'masks') {
       if (type !== 'application/octet-stream') return bad('The project mask must be raw bytes.');
@@ -171,6 +193,10 @@ export async function handleProjects(request: Request, pathname: string, env: Pr
       const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', buffer));
       if ([...hash].map((value) => value.toString(16).padStart(2, '0')).join('') !== asset) return bad('The project mask bytes do not match their asset id.');
     } else if (!/^(image\/[a-z0-9.+-]+|application\/octet-stream)$/.test(type)) return bad('The project photo must carry its original content type.');
+    if (originalAsset !== null) {
+      const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', buffer));
+      if ([...hash].map((value) => value.toString(16).padStart(2, '0')).join('') !== originalAsset) return bad('The project asset bytes are invalid.');
+    }
     // Recheck after receiving bytes: the client may have timed out while uploading.
     if (stateSchema.parse((await neonSql(env.NEON_DATABASE_URL, state(id)))[0]).deleted) return deleted();
     await env.PROJECTS.put(key, buffer, { httpMetadata: { contentType: type } });

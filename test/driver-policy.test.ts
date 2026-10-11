@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { initialPolicy, nextWake, transition, type Policy, type PolicyEvent, type Stage } from '../src/session/policy.ts';
 import { createProducts, productAsset } from '../src/session/products.ts';
 import { createDriver, warmDecoder } from '../src/session/driver.ts';
-import type { AnalysisService, Decoder, SequenceListener } from '../src/analysis/service.ts';
+import type { AnalysisError, AnalysisService, Decoder, SequenceListener } from '../src/analysis/service.ts';
 import { isAssetId, isBuildId, isModelId, isObjectId, isSceneId } from '../src/core/ids.ts';
 import { newDocument, newObject } from '../src/core/defaults.ts';
 import { photoStats } from '../src/photo/stats.ts';
@@ -15,7 +15,11 @@ Object.defineProperty(globalThis, 'NOISY_DEV', { value: false, configurable: tru
 
 const flush = async (): Promise<void> => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 
-function driverRig(failures: readonly string[] = []) {
+function driverRig(failures: readonly string[] = [], options: {
+  readonly fetchModels?: AnalysisService['fetchModels'];
+  readonly models?: Parameters<typeof createDriver>[1]['models'];
+  readonly serviceUnavailable?: boolean;
+} = {}) {
   const id = '00000000-0000-4000-8000-000000000001';
   const asset = 'a'.repeat(64);
   const model = `depth-anything-v2-small@${'a'.repeat(64)}`;
@@ -57,16 +61,17 @@ function driverRig(failures: readonly string[] = []) {
       };
       return decoder;
     },
-    async fetchModels() { return { ok: true, value: undefined }; },
+    fetchModels: options.fetchModels ?? (async () => ({ ok: true, value: undefined })),
     openFaceTracker() { throw new Error('No face tracker in driver fixture.'); },
     get alive() { return { heavy, decoder: decoderAlive }; },
     lastHeavyTermination: null,
   };
   const products = createProducts(), produced: Produce[] = [];
+  const diagnostics: (Parameters<Parameters<typeof createDriver>[1]['diag']['log']>[0] & { readonly t: number })[] = [];
   const driver = createDriver({ read: () => ({ doc: { ...doc, objects: plateWanted ? [object] : doc.objects, motion: { ...doc.motion, enabled: plateWanted } }, masterPixels: master }),
     products, produce: (product) => produced.push(product), changed: () => changed() }, {
-    clock: { now: () => now }, diag: { events: [], log: () => {} }, service, threads: 2,
-    prepareGuide: async () => guide, models: { kind: 'ready', ids: [model], depth: model, inpaint: model, count: 1 },
+    clock: { now: () => now }, diag: { events: diagnostics, log: (event) => diagnostics.push({ ...event, t: now }) }, service: options.serviceUnavailable ? null : service, threads: 2,
+    prepareGuide: async () => guide, models: options.models ?? { kind: 'ready', ids: [model], depth: model, inpaint: model, count: 1 },
   });
   return {
     driver, events, master, products, produced,
@@ -97,6 +102,77 @@ function driverRig(failures: readonly string[] = []) {
     failPlate() { if (listener === null) throw new Error('No plate running.'); heavy = false; events.push('sequence.terminate'); listener.onFailed('inpaint', { kind: 'worker', op: 'inpaint', message: 'background error' }); },
   };
 }
+
+test('every model failure kind has short recovery copy and retains its full detail once', async (t) => {
+  const model = `depth-anything-v2-small@${'a'.repeat(64)}`;
+  assert.ok(isModelId(model));
+  const cases = {
+    download: { error: { kind: 'download', model, status: 503 }, sentence: 'Models unavailable: the download stopped; reload to try again.' },
+    integrity: { error: { kind: 'integrity', model }, sentence: 'Models unavailable: a model failed its check; reload to fetch it again.' },
+    timeout: { error: { kind: 'timeout', op: 'depth', visibleMs: 60_000 }, sentence: 'Models unavailable: loading took too long; reload to try again.' },
+    worker: { error: { kind: 'worker', op: 'depth', message: JSON.stringify({ model, cause: 'runtime failed' }) }, sentence: 'Models unavailable: loading failed; reload to try again.' },
+    quota: { error: { kind: 'quota' }, sentence: 'Models unavailable: free some device storage, then reload.' },
+    cancelled: { error: { kind: 'cancelled' }, sentence: 'Models unavailable: loading was cancelled; reload to try again.' },
+  } satisfies { [Kind in AnalysisError['kind']]: { error: Extract<AnalysisError, { kind: Kind }>; sentence: string } };
+  const downloads = [
+    { error: { kind: 'download', model, status: 'offline' }, sentence: 'Models unavailable: check your connection and reload to download them.' },
+    { error: { kind: 'download', model, status: 'stalled' }, sentence: cases.download.sentence },
+  ] satisfies { error: AnalysisError; sentence: string }[];
+  for (const { error, sentence } of [...Object.values(cases), ...downloads]) {
+    await t.test(`${error.kind}${'status' in error ? `:${error.status}` : ''}`, async () => {
+      const r = driverRig([], { fetchModels: async () => ({ ok: false, error }) });
+      await flush();
+      assert.equal(r.driver.snapshot().status, sentence);
+      assert.equal(r.driver.snapshot().modelsReady, false);
+      assert.deepEqual(r.driver.snapshot().alive, { heavy: false, decoder: false });
+      assert.deepEqual(r.events, []);
+      const logged = r.driver.diagnostics().events;
+      assert.equal(logged.length, 1);
+      assert.equal(logged[0]?.event, 'fetch.failed');
+      assert.ok(logged[0]?.event === 'fetch.failed');
+      assert.equal(logged[0].error, error, 'original detail is retained, including the digest');
+    });
+  }
+});
+
+test('unknown model fetch throws and rejections stay generic and are logged once without serialization', async () => {
+  const cyclic: { cause?: unknown } = {}; cyclic.cause = cyclic;
+  for (const error of [new Error('private model@digest'), '{"kind":"integrity","model":"private@digest"}', null, undefined, 1n, cyclic]) {
+    for (const fetchModels of [() => { throw error; }, async () => { throw error; }]) {
+      const r = driverRig([], { fetchModels });
+      await flush();
+      assert.equal(r.driver.snapshot().status, 'Models unavailable: reload to try loading the models again.');
+      assert.equal(r.driver.snapshot().modelsReady, false);
+      const logged = r.driver.diagnostics().events;
+      assert.equal(logged.length, 1);
+      assert.ok(logged[0]?.event === 'fetch.failed');
+      assert.equal(logged[0].error, error);
+    }
+  }
+});
+
+test('unavailable model configuration and service use recovery copy and retain details', async () => {
+  const message = '{"model":"depth@private-digest","reason":"invalid lock"}';
+  for (const options of [{ models: { kind: 'unavailable', message } } satisfies Parameters<typeof driverRig>[1], { serviceUnavailable: true }]) {
+    const r = driverRig([], options); await flush();
+    assert.equal(r.driver.snapshot().status, 'Models unavailable: reload to try loading the models again.');
+    const logged = r.driver.diagnostics().events;
+    assert.equal(logged.length, 1);
+    assert.ok(logged[0]?.event === 'fetch.failed');
+    assert.equal(logged[0].error, 'models' in options ? message : 'service unavailable');
+  }
+});
+
+test('a new import retries failed model loading and can recover without duplicate failure logs', async () => {
+  let attempts = 0;
+  const r = driverRig([], { fetchModels: async () => ++attempts === 1 ? { ok: false, error: { kind: 'quota' } } : { ok: true, value: undefined } });
+  await flush(); assert.equal(r.driver.snapshot().modelsReady, false);
+  r.driver.beginImport(); await flush();
+  assert.equal(attempts, 2);
+  assert.equal(r.driver.snapshot().modelsReady, true);
+  assert.equal(r.driver.snapshot().status, 'Waiting to analyze');
+  assert.equal(r.driver.diagnostics().events.length, 1);
+});
 
 const liveGeometry: PerspectiveGeometry = { aperture: { center: { x: 0, y: 0 }, width: 1, height: .75 }, crop: .04, neutralDistance: 1, nearFactor: 1.1, farFactor: 2 };
 

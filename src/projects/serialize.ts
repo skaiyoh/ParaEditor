@@ -4,6 +4,7 @@ import type { Plane, Size } from '../core/raster.ts';
 import { parseDocument } from '../core/schema.ts';
 import type { SceneDocument } from '../core/types.ts';
 import { z } from '../core/zod.ts';
+import { compositionDocumentSchema } from '../core/composition-schema.ts';
 
 export const MAX_MASK_BYTES = 16 * 1024 * 1024;
 const sizeSchema = z.strictObject({ width: z.number().int().min(1).max(4096), height: z.number().int().min(1).max(4096) });
@@ -67,4 +68,22 @@ export function serializeScene(document: SceneDocument, planes: ReadonlyMap<Asse
   const payload = { document: serializeDocument(document), masks, revision };
   deserializeScene(payload);
   return payload;
+}
+
+const compositionSceneSchema = z.strictObject({ transportVersion: z.literal(2), document: compositionDocumentSchema, revision: revisionSchema }).readonly();
+export type SavedComposition = z.infer<typeof compositionSceneSchema>;
+
+/** Staged v2 boundary. Never migrate an old envelope into a complete checkpoint. */
+export function deserializeCompositionScene(json: unknown): SavedComposition {
+  return compositionSceneSchema.parse(json);
+}
+export function serializeCompositionScene(document: SavedComposition['document'], revision: number): SavedComposition {
+  return deserializeCompositionScene({ transportVersion: 2, document, revision });
+}
+export type ProjectEnvelope =
+  | { readonly kind: 'legacy'; readonly scene: SavedScene }
+  | { readonly kind: 'composition'; readonly scene: SavedComposition };
+export function deserializeProjectEnvelope(json: unknown): ProjectEnvelope {
+  if (typeof json === 'object' && json !== null && 'transportVersion' in json) return { kind: 'composition', scene: deserializeCompositionScene(json) };
+  return { kind: 'legacy', scene: deserializeScene(json) };
 }

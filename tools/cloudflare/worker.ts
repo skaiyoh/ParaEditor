@@ -1,4 +1,6 @@
 import { handleProjects, type ProjectsEnv } from './projects.ts';
+import { handleGallery, type GalleryEnv } from './gallery.ts';
+import { isGalleryId } from '../../src/core/gallery.ts';
 
 type HeaderMap = Readonly<Record<string, string>>;
 type Route =
@@ -9,7 +11,7 @@ export type HostingConfig = {
   readonly errors: HeaderMap;
 };
 type ObjectInfo = { readonly size: number; readonly httpEtag: string; readonly uploaded: Date };
-export type HostingEnv = Partial<ProjectsEnv> & {
+export type HostingEnv = Partial<ProjectsEnv> & Partial<GalleryEnv> & {
   readonly ASSETS: { fetch(request: Request): Promise<Response> };
   readonly MODELS: {
     head(key: string): Promise<ObjectInfo | null>;
@@ -92,20 +94,30 @@ export function createHandler(config: HostingConfig): { fetch(request: Request, 
     async fetch(request, env) {
       let pathname: string;
       try { pathname = decodeURIComponent(new URL(request.url).pathname); }
-      catch { return error(request, 400, 'Invalid request path.'); }
+      catch {
+        if (new URL(request.url).pathname.startsWith('/api/gallery')) return error(request, 400, JSON.stringify({ error: 'The gallery path is invalid.' }), { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+        return error(request, 400, 'Invalid request path.');
+      }
+      if (pathname === '/api/gallery' || pathname.startsWith('/api/gallery/')) {
+        if (env.PROJECTS === undefined) return error(request, 502, JSON.stringify({ error: 'The gallery store is unavailable.' }), { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+        return handleGallery(request, pathname, { PROJECTS: env.PROJECTS,
+          ...(env.GALLERY_ADMIN_KEY === undefined ? {} : { GALLERY_ADMIN_KEY: env.GALLERY_ADMIN_KEY }) }, config.routes['/']?.headers ?? config.errors);
+      }
       if (pathname === '/api/projects' || pathname.startsWith('/api/projects/')) {
         const apiError = (status: number, sentence: string): Response => error(request, status, JSON.stringify({ error: sentence }), { 'Content-Type': 'application/json' });
         if (env.PROJECTS === undefined || env.NEON_DATABASE_URL === undefined) return apiError(502, 'The project store is unavailable.');
         const headers = config.routes['/']?.headers ?? config.errors;
         return handleProjects(request, pathname, { PROJECTS: env.PROJECTS, NEON_DATABASE_URL: env.NEON_DATABASE_URL }, headers, apiError);
       }
-      const route = routes.get(pathname);
+      const galleryAlias = pathname === '/gallery' || (pathname.startsWith('/gallery/') && isGalleryId(pathname.slice('/gallery/'.length)));
+      const route = routes.get(galleryAlias ? '/gallery.html' : pathname);
       if (route === undefined) return error(request, 404, 'Not found.');
       if (request.method !== 'GET' && request.method !== 'HEAD') return error(request, 405, 'Use GET or HEAD.', { Allow: 'GET, HEAD' });
       try {
         if (route.kind === 'asset') {
           // Pages redirects /index.html; the local production contract serves it directly.
           const url = new URL(request.url);
+          if (galleryAlias) url.pathname = '/gallery';
           if (pathname === '/index.html') url.pathname = '/';
           const tag = tags.get(route) ?? policyTag(route.headers);
           const forwarded = new Request(url, request);

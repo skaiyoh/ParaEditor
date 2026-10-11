@@ -6,6 +6,7 @@
 // their rows instead.
 
 import type { Scenario } from '../scenario.ts';
+import { scenarios as creativeC1 } from './creative-c1.scenario.ts';
 import { scenarios as boot } from './boot.scenario.ts';
 import { scenarios as checklist } from './checklist.scenario.ts';
 import { scenarios as demo } from './demo.scenario.ts';
@@ -13,6 +14,8 @@ import { scenarios as decoder } from './decoder.scenario.ts';
 import { scenarios as driver } from './driver.scenario.ts';
 // driver also registers D3's real-model import, plate and fault scenarios.
 import { scenarios as harness } from './harness.scenario.ts';
+import { scenarios as gallery } from './gallery.scenario.ts';
+import { scenarios as galleryUi } from './gallery-ui.scenario.ts';
 import { scenarios as hosted } from './hosted.scenario.ts';
 import { scenarios as levers } from './levers.scenario.ts';
 import { scenarios as objects } from './objects.scenario.ts';
@@ -28,6 +31,7 @@ import { scenarios as parallax } from './parallax.scenario.ts';
 import { scenarios as parallaxControls } from './parallax-controls.scenario.ts';
 import { scenarios as windowScenarios } from './window.scenario.ts';
 import { scenarios as phone } from './phone.scenario.ts';
+import { scenarios as rs1Shell } from './rs1-shell.scenario.ts';
 import { scenarios as projects } from './projects.scenario.ts';
 import { scenarios as stereo } from './stereo.scenario.ts';
 import { scenarios as symbols } from './symbols.scenario.ts';
@@ -54,6 +58,8 @@ export const SCENARIO_FILES = {
   'store.scenario.ts': store,
   'driver.scenario.ts': driver,
   'harness.scenario.ts': harness,
+  'gallery.scenario.ts': gallery,
+  'gallery-ui.scenario.ts': galleryUi,
   'checklist.scenario.ts': checklist,
   'production.scenario.ts': production,
   'hosted.scenario.ts': hosted,
@@ -69,6 +75,8 @@ export const SCENARIO_FILES = {
   'parallax.scenario.ts': parallax,
   'parallax-real.scenario.ts': parallaxReal,
   'phone.scenario.ts': phone,
+  'rs1-shell.scenario.ts': rs1Shell,
+  'creative-c1.scenario.ts': creativeC1,
   'projects.scenario.ts': projects,
   'stereo.scenario.ts': stereo,
 } as const satisfies Readonly<Record<string, readonly Scenario[]>>;

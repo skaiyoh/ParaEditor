@@ -31,6 +31,45 @@ test('src/ follows the dependency direction', async () => {
   assert.deepEqual((await checkImportGraph(path.join(REPO, 'src'))).map(describe), []);
 });
 
+test('gallery is a second composition entry while every incoming and dev-entry rule stays closed', async () => {
+  assert.deepEqual(await check({
+    'gallery.ts': "import './app/page.ts';\nimport './session/viewer.ts';\nimport './ui/page.tsx';\nimport './core/types.ts';\nimport 'preact';\n",
+    'app/page.ts': 'export {};', 'session/viewer.ts': 'export {};',
+    'ui/page.tsx': 'export const Page = () => <main />;', 'core/types.ts': 'export {};',
+  }), []);
+  assert.deepEqual(await check({
+    'main.tsx': 'export {};',
+    'gallery.ts': "import './main.tsx';\nimport './dev/page.ts';\n",
+    'app/page.ts': "import '../gallery.ts';\n",
+    'dev/page.ts': 'export {};',
+  }), [
+    'app/page.ts:1 ../gallery.ts: nothing imports gallery.ts',
+    'gallery.ts:1 ./main.tsx: nothing imports main.tsx',
+    'gallery.ts:2 ./dev/page.ts: the dev pages are entries: nothing outside dev/ imports them',
+  ]);
+});
+
+test('gallery cannot reach analysis through direct imports, types, dynamic imports or re-exports', async () => {
+  for (const source of ["import './analysis/a.ts';", "import type { A } from './analysis/a.ts';",
+    "export * from './analysis/a.ts';", "const a = import('./analysis/a.ts');"]) {
+    assert.deepEqual(await check({ 'gallery.ts': source, 'analysis/a.ts': 'export type A = 1;' }), [
+      'gallery.ts:1 ./analysis/a.ts: gallery entry cannot reach analysis/',
+    ]);
+  }
+});
+
+test('gallery cannot reach analysis through composition modules, session modules or a type cycle', async () => {
+  assert.deepEqual(await check({
+    'main.tsx': "import './app/editor.ts';",
+    'gallery.ts': "import './app/page.ts';",
+    'app/editor.ts': "import '../analysis/a.ts';",
+    'app/page.ts': "import '../session/viewer.ts';",
+    'session/viewer.ts': "import type { State } from './state.ts';",
+    'session/state.ts': "import type { Viewer } from './viewer.ts';\nimport type { A } from '../analysis/a.ts';\nexport type State = 1;",
+    'analysis/a.ts': 'export type A = 1;',
+  }), ['gallery.ts:1 ./app/page.ts: gallery entry cannot reach analysis/']);
+});
+
 test('a leaf that imports app/ fails, with import type too', async () => {
   const found = await check({
     'app/events.ts': 'export type E = { readonly event: string };\nexport const x = 1;\n',

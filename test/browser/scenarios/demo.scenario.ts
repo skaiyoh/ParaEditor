@@ -152,8 +152,12 @@ export const scenarios: readonly Scenario[] = [
         Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 });
         return true;
       });
+      // The touch fixture changed after boot; a panel toggle triggers the render
+      // that observes it without remounting the full-tier stage on rotation.
+      await t.page.click('[data-testid=tool-actions]');
+      await t.page.click('[data-testid=tool-actions]');
       await t.page.emulate({ width: 820, height: 1180, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
-      await t.page.waitFor('portrait frame', z.literal(true), () => document.querySelector('.phone-editor') === null ? null : true);
+      await t.page.waitFor('portrait full frame', z.literal(true), () => ['tool-actions', 'tool-adjust', 'tool-layers'].every((id) => document.querySelector(`[data-testid=${id}]`)?.checkVisibility() === true) && document.querySelector('.phone-editor') === null ? true : null);
       await t.page.emulate({ width: 1180, height: 820, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await t.page.waitFor('landscape touch camera input', z.literal(true), () => document.querySelector('.editor .top-bar input[type=file][capture]') === null ? null : true);
       const inputs = await t.page.evaluate(z.array(z.object({ accept: z.string(), capture: z.string().nullable() })), () =>
@@ -167,7 +171,11 @@ export const scenarios: readonly Scenario[] = [
       for (const kind of ['jpeg', 'png', 'sample'] as const) {
         const fixture = await t.page.evaluate(Fixture, replacementFixture, kind);
         const name = kind === 'sample' ? 'sample.jpg' : `three.${kind}`;
-        if (kind === 'sample') await t.page.click('[data-testid=try-sample]');
+        if (kind === 'sample') {
+          await t.page.click('[data-testid=tool-actions]');
+          await t.page.click('[data-testid=try-sample]');
+          await t.page.click('[data-testid=tool-actions]');
+        }
         else await t.page.setFiles('input[type=file]:not([capture])', [await t.file(name, Buffer.from(fixture.bytes, 'base64'))]);
         await t.page.evaluate(z.literal(true), (expected: string) => { document.body.dataset['threeExpected'] = expected; return true; }, name);
         await t.page.waitFor(`${kind}: new photo Ready to tap`, z.literal(true), () => {
@@ -227,7 +235,9 @@ export const scenarios: readonly Scenario[] = [
       }));
       await t.page.screenshot('three-heic-refused');
       await t.page.emulate({ width: 820, height: 1180, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
-      await t.page.waitFor('portrait camera input requests JPEG/PNG too', z.literal(true), () =>
+      await t.page.waitFor('portrait full top bar', z.literal(true), () => ['tool-actions', 'tool-adjust', 'tool-layers'].every((id) => document.querySelector(`[data-testid=${id}]`)?.checkVisibility() === true) && document.querySelector('.phone-editor') === null ? true : null);
+      await t.page.emulate({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+      await t.page.waitFor('phone camera input requests JPEG/PNG too', z.literal(true), () =>
         document.querySelector<HTMLInputElement>('.phone-strip input[type=file]')?.accept === 'image/jpeg,image/png' ? true : null);
       t.equal('portrait capture keeps rear camera hint', await t.page.evaluate(z.string().nullable(), () =>
         document.querySelector('.phone-strip input[type=file]')?.getAttribute('capture') ?? null), 'environment');

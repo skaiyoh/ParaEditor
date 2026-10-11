@@ -22,6 +22,11 @@ Startup checks HIP, the GPU, source and weight hashes, then warms synthetic inpu
 SAM returns its three multimask candidates in model order, with bilinear logit resizing and sigmoid soft bytes; zero logits map to 128.
 The default health answer names depth, segment and MI-GAN; LaMa is the explicit optional fill.
 
+These are service capabilities, not a statement that every stage runs remotely in the editor.
+The integrated hybrid app consumes GPU depth and background plates, while SAM Tiny encoding, taps/refinement, face tracking, rendering, and export stay on the device.
+It does not call the remote SAM Large tap endpoint or consume its embeddings.
+See [the app contract](../plan/gpu-contract.md#hybrid-behavior-and-fallback-the-app-applies).
+
 The MI-GAN checkpoint mirror was verified byte for byte against the official project's linked checkpoint.
 Its source, checkpoint hashes and URLs are in `migan.py`; the upstream code and weights are MIT licensed.
 Depth/SAM assets and their pinned source manifests are reused from the GP0/GP1 prepared workspace.
@@ -100,7 +105,9 @@ Do not edit or publish the provider's managed connector state or credentials.
 [The provider documents](https://amd-aim.github.io/radeon-cloud-docs/guides/tunnel/) one exposed port per notebook and a randomly assigned `rc-<id>.radeon.firstdg.ai` hostname.
 Its `--prefix` flag is for operations compatibility, not a supported stable-hostname reservation; custom domains are unsupported.
 An official stop revokes the old hostname and freezes its prefix for 24 hours, so recovery allocates a different URL.
-The URL changes on every connector restart; update the app build's `gpu` setting to the printed URL before an export.
+The restart script retains a healthy active connector and its hostname when the broker still accepts it.
+A new allocation after revocation or lost reservation can change the URL; inspect the printed value and update the app build's `gpu` setting when needed.
+Verify public health, the exact app build configuration/CSP, and observed depth/plate routing before the demonstration.
 A missing broker reservation was observed after an origin interruption during model startup; the cause is unconfirmed, and even a model restart may require a new URL.
 The script prints the allocated `NOISY_GPU_URL`; verify its public health from the Mac before using it.
 The running app has no automatic URL discovery, and this service restart does not modify or publish an app build.

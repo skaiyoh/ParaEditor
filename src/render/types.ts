@@ -1,8 +1,12 @@
-import type { SceneDocument } from '../core/types.ts';
-import type { ObjectId } from '../core/ids.ts';
+import type { CompositingPolicy, SceneDocument } from '../core/types.ts';
+import type { EffectId, ObjectId } from '../core/ids.ts';
 import type { ImagePoint, Plane, Rgb8 } from '../core/raster.ts';
 import type { Vec2 } from '../core/motion.ts';
 import type { PerspectiveEye, PerspectiveGeometry } from '../core/perspective.ts';
+import type { CompareMode, SampleColorRequest, SampleColorResult } from './compare.ts';
+import type { RenderLocalEffect } from './local-effects.ts';
+export type { CompareMode, SampleSource, SampleColorRequest, SampleColorResult } from './compare.ts';
+export type { RenderLocalEffect } from './local-effects.ts';
 
 /** Transient prepared content; never used by the saved document's deterministic exports. */
 export type PerspectivePlate = { readonly key: string; readonly image: Rgb8; readonly hole: Plane<'u8'>; readonly depth: Plane<'f32'> };
@@ -29,6 +33,20 @@ export type RenderScene = {
   readonly plate: Rgb8 | null;
   readonly selected: ObjectId | null;
   readonly livePlate?: PerspectivePlate | null;
+  /** Ordered resolved C2a operations; omitted by existing v4 callers. */
+  readonly localEffects?: readonly RenderLocalEffect[];
+  /** C2 accepts legacy ordering only; C3 owns physical depth. */
+  readonly compositing?: CompositingPolicy;
+};
+
+export type LocalEffectReadback = {
+  /** Undecorated top-down RGBA8 immediately before and after local operations. */
+  readonly before: Uint8Array;
+  readonly after: Uint8Array;
+  /** C1b owner R byte, original/generated G flag and valid A flag. */
+  readonly owners: Uint8Array;
+  /** RG = x high/low, BA = y high/low, normalized by 65535. */
+  readonly sourceUV: Uint8Array;
 };
 
 export type RendererDebug = {
@@ -36,11 +54,19 @@ export type RendererDebug = {
   /** Geometry id RGBA attachment, after a depth view or moving loop draw; dev only. */
   readGeometryPatch?(x: number, y: number, w: number, h: number): Uint8Array;
   perspectiveResources?(): { readonly targets: number; readonly textures: number };
+  readLocalEffectPatch?(x: number, y: number, w: number, h: number): LocalEffectReadback;
+  /** RGBA8; R is the exact evaluated scope weight for this effect. */
+  readLocalCoveragePatch?(id: EffectId, x: number, y: number, w: number, h: number): Uint8Array;
+  localResources?(): { readonly targets: number; readonly textures: number };
   timings(): { readonly lastMs: number; readonly simplifyMs: number };
 };
 
 export type Renderer = {
   setScene(scene: RenderScene): void;
+  /** Redraw the preceding view with a transient comparison; exports always use Edited. */
+  setCompare(mode: CompareMode): void;
+  /** Read the displayed image before selection decoration, or its original source hit. */
+  sampleColor(request: SampleColorRequest): SampleColorResult;
   renderStill(): void;
   renderFrame(frame: number): void;
   /** Per-axis frame fractions, clamped to parallax reach; depth always uses the loop crop. */

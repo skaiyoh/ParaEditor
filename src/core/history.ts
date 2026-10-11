@@ -5,9 +5,9 @@
 // Pure: no browser global, no Node API, no I/O, no clock. Times arrive as
 // arguments, in milliseconds on any clock that does not go backwards.
 
-import type { Edit } from './edits.ts';
+import type { Edit, EditResult } from './edits.ts';
 import type { AssetId, NonEmpty } from './ids.ts';
-import { applyEdits } from './reduce.ts';
+import { applyEdit, applyEdits } from './reduce.ts';
 import type { SceneDocument } from './types.ts';
 import type { Plane } from './raster.ts';
 
@@ -40,6 +40,26 @@ export type History = { readonly undo: readonly HistoryEntry[]; readonly redo: r
 export type HistoryStep = { readonly edits: NonEmpty<Edit>; readonly history: History };
 
 export const EMPTY_HISTORY: History = { undo: [], redo: [] };
+
+/** A public action is its own step unless a legacy caller explicitly supplies a key. */
+export function recordEdit(input: {
+  readonly doc: SceneDocument; readonly history: History; readonly edit: Edit;
+  readonly now: string; readonly at: number; readonly key?: string | null;
+  readonly masks?: ReadonlyMap<AssetId, Plane<'u8'>>;
+}): EditResult & { readonly history: History } {
+  const result = applyEdit(input.doc, input.edit, input.now);
+  if (result.kind !== 'applied') return { ...result, history: input.history };
+  const masks = new Map<AssetId, Plane<'u8'>>();
+  for (const edit of [input.edit, ...result.inverse]) {
+    const asset = edit.kind === 'object.add' ? edit.object.produced.mask.asset
+      : edit.kind === 'object.refine' ? edit.produced.mask.asset : null;
+    const mask = asset === null ? undefined : input.masks?.get(asset);
+    if (asset !== null && mask !== undefined) masks.set(asset, mask);
+  }
+  return { ...result, history: push(input.history, {
+    key: input.key ?? null, at: input.at, forward: [input.edit], inverse: result.inverse, masks,
+  }, result.doc) };
+}
 
 /**
  * The key under which consecutive edits coalesce into one undo step, or null

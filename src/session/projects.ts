@@ -63,7 +63,7 @@ async function thumbnail(still: Promise<Blob>): Promise<Blob> {
   } finally { bitmap.close(); }
 }
 
-export function createProjectSession(exportStill: () => Promise<Blob>) {
+export function createProjectSession(exportStill: (document: SceneDocument) => Promise<Blob>) {
   const jobs = new Map<SceneId, SavingProject>();
   const locals = new Map<SceneId, Project>();
   const states = new Map<SceneId, SaveState>();
@@ -112,7 +112,7 @@ export function createProjectSession(exportStill: () => Promise<Blob>) {
   function capture(saved: Snapshot): Snapshot {
     if (saved.preview !== null) return saved;
     let preview: Promise<Blob>;
-    try { preview = thumbnail(exportStill()); }
+    try { preview = thumbnail(exportStill(saved.document)); }
     catch (error) { preview = Promise.reject(error); }
     void preview.catch(() => undefined);
     return { ...saved, preview };

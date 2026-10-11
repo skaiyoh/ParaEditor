@@ -1,0 +1,35 @@
+const ICONS = {
+  back: <><path d="m8 4-6 6 6 6M2 10h15"/></>,
+  share: <><path d="M10 12V2.5m-4 4 4-4 4 4M4 10v6.5h12V10"/></>,
+  link: <><path d="m8 12 4-4M7 7 5 9a3.5 3.5 0 0 0 5 5l2-2M8 8l2-2a3.5 3.5 0 0 1 5 5l-2 2"/></>,
+  actions: <><path d="M12.6 3.4a4 4 0 0 0-5 5.1L3.3 12.8a1.6 1.6 0 0 0 2.3 2.3l4.3-4.3a4 4 0 0 0 5-5.1l-2.3 2.3-2-.4-.4-2z"/></>,
+  adjust: <><path d="M3.5 16.5 11 9"/><path d="M14 2.5v5M11.5 5h5"/><path d="M15.5 10.5v3M14 12h3"/><path d="M7 4v2.5M5.75 5.25h2.5"/></>,
+  selection: <><path d="M6 4.5c4.5-2 9 0 7.5 2.75S4 9.5 5 13s6.5 3.5 9.5 1.75"/><path d="M3.5 3.5v.01M16.5 16.5v.01" stroke-width="2.5"/></>,
+  transform: <><path d="M4 3l11.5 5.25-5 1.25L8.75 15z"/><path d="m11 10 4.5 4.5"/></>,
+  brush: <><path d="M16.5 3.5 9 11"/><path d="M8.5 11.5c-2.5-.5-4.5 1-4.75 3.25-.2 1.4-.9 2-1.75 2.25 3 .9 6.5.2 7.25-2.25.4-1.3 0-2.5-.75-3.25z"/></>,
+  eraser: <><path d="m8 16.5 9-9-4.5-4.5-9.5 9.5 4 4h9"/><path d="m6.5 8.5 4.5 4.5"/></>,
+  layers: <><path d="m10 3 7 4-7 4-7-4z"/><path d="m3 10.5 7 4 7-4"/><path d="m3 14 7 4 7-4"/></>,
+  projects: <><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="3" width="6" height="6" rx="1.5"/><rect x="3" y="11" width="6" height="6" rx="1.5"/><rect x="11" y="11" width="6" height="6" rx="1.5"/></>,
+  download: <><path d="M10 3v10M6 9l4 4 4-4M3 14v1.5A1.5 1.5 0 0 0 4.5 17h11a1.5 1.5 0 0 0 1.5-1.5V14"/></>,
+  open: <><path d="M10 13V3M6 7l4-4 4 4M3 12v3.5A1.5 1.5 0 0 0 4.5 17h11a1.5 1.5 0 0 0 1.5-1.5V12"/></>,
+  sample: <><rect x="2.75" y="3.75" width="14.5" height="12.5" rx="2"/><circle cx="7" cy="8" r="1.5"/><path d="m3 14 4.5-4 3.5 3 2-1.75L17 15"/></>,
+  camera: <><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h2l1.5-2h4l1.5 2h2A1.5 1.5 0 0 1 17 7.5v7a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 14.5z"/><circle cx="10" cy="10.75" r="3"/></>,
+  reset: <><path d="M3.5 4.5v4h4"/><path d="M4 8.5A6.5 6.5 0 1 1 5.6 14.6"/></>,
+  undo: <><path d="M7 4.5 3.5 8 7 11.5"/><path d="M3.5 8H12a4.5 4.5 0 0 1 0 9H9"/></>,
+  redo: <><path d="M13 4.5 16.5 8 13 11.5"/><path d="M16.5 8H8a4.5 4.5 0 0 0 0 9h3"/></>,
+  motion: <><path d="M15.5 6.5A6.5 6.5 0 1 0 16.5 11"/><path d="M16.5 3.5v3.25h-3.25"/></>,
+  symbols: <><rect x="3" y="3" width="5.5" height="5.5" rx="1"/><circle cx="14.25" cy="5.75" r="2.75"/><path d="m5.75 11.5 2.75 5.5H3zM11.5 11.5h5.5v5.5h-5.5z"/></>,
+  parallax: <><rect x="2.75" y="3.75" width="14.5" height="12.5" rx="2"/><circle cx="10" cy="9" r="2.25"/><path d="M6.5 16c.5-2.25 1.75-3.5 3.5-3.5s3 1.25 3.5 3.5"/></>,
+  recenter: <><circle cx="10" cy="10" r="2.5"/><path d="M10 2.5v3M10 14.5v3M2.5 10h3M14.5 10h3"/></>,
+  hide: <><path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5Z"/><circle cx="10" cy="10" r="2.5"/></>,
+  trash: <><path d="M3.5 5.5h13M8 5.5V3.5h4v2M5.5 5.5l1 11h7l1-11M8.5 8.5v5M11.5 8.5v5"/></>,
+  close: <><path d="m5 5 10 10M15 5 5 15"/></>,
+  original: <><path d="m5 15 10-10"/></>,
+  sampler: <><path d="m11.5 5.5 2-2a2.1 2.1 0 0 1 3 3l-2 2"/><path d="m10.5 5.5 4 4"/><path d="m11.5 6.5-6.75 6.75-.5 2.5 2.5-.5 6.75-6.75M4.25 15.75 3 17"/></>,
+  compare: <><path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5Z"/><circle cx="10" cy="10" r="2.5"/><path d="m3 3 14 14"/></>,
+  check: <path d="m4 10 4 4 8-8" />,
+};
+
+export function Icon({ name }: { readonly name: keyof typeof ICONS }) {
+  return <svg class="ui-icon" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{ICONS[name]}</svg>;
+}

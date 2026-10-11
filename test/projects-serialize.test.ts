@@ -68,3 +68,23 @@ test('scene revisions are required, nonnegative safe integers and survive transp
   assert.throws(() => serializeScene(minimalDocument(), new Map(), -1));
   assert.equal(deserializeScene(serializeScene(minimalDocument(), new Map(), 13)).revision, 13);
 });
+
+test('staged v2 envelopes retain strict v5 refs and revisions without changing the v4 writer', async () => {
+  const { newComposition, artworkLayer } = await import('./fixtures/composition.ts');
+  const { serializeCompositionScene, deserializeCompositionScene, deserializeProjectEnvelope } = await import('../src/projects/serialize.ts');
+  const { SCENE_VERSION } = await import('../src/core/migrate.ts');
+  const document = newComposition(), envelope = serializeCompositionScene(document, 7);
+  assert.deepEqual(deserializeCompositionScene(JSON.parse(JSON.stringify(envelope))), { transportVersion: 2, document, revision: 7 });
+  assert.equal(deserializeProjectEnvelope(envelope).kind, 'composition');
+  assert.equal(deserializeProjectEnvelope(serializeScene(minimalDocument(), new Map(), 1)).kind, 'legacy');
+  assert.equal(SCENE_VERSION, 4);
+  assert.throws(() => deserializeScene(envelope));
+  assert.throws(() => deserializeDocument(document));
+  assert.throws(() => deserializeProjectEnvelope({ ...envelope, transportVersion: 3 }));
+  assert.throws(() => deserializeProjectEnvelope({ ...envelope, masks: {} }));
+  assert.throws(() => deserializeProjectEnvelope({ ...envelope, revision: -1 }));
+  assert.throws(() => deserializeProjectEnvelope({ ...envelope, document: { ...document, version: 6 } }));
+  for (const content of [{ kind: 'paint' }, { kind: 'paint', tiles: [] }, { kind: 'source', source: { kind: 'paint' } }]) {
+    assert.throws(() => deserializeProjectEnvelope({ ...envelope, document: { ...document, objects: [{ ...artworkLayer(), content }] } }));
+  }
+});

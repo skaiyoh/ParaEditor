@@ -17,7 +17,7 @@ export const DOMAIN = 'nathan.fish';
 const hashedScript = z.string().regex(/^\/assets\/[a-z-]+-[A-Z0-9]{8}\.js$/);
 const Build = z.object({
   gpu: z.string().default(''),
-  mode: z.literal('production'), buildId: z.string(), app: hashedScript,
+  mode: z.literal('production'), buildId: z.string(), app: hashedScript, gallery: hashedScript,
   workers: z.object({ sequence: hashedScript, decode: hashedScript, gif: hashedScript, face: hashedScript }),
   devPages: z.record(z.string(), z.never()), devWorkers: z.record(z.string(), z.never()),
   ort: z.object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), dir: z.string(), files: z.array(z.string()) }),
@@ -61,8 +61,8 @@ export async function prepare() {
   const ortFiles = ['ort.wasm.min.mjs', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm'];
   if (info.ort.dir !== `/vendor/ort/${info.ort.version}/` || JSON.stringify([...info.ort.files].sort()) !== JSON.stringify([...ortFiles].sort())) throw new Error('Unexpected ORT runtime inventory.');
   const assets = [...new Set([
-    'index.html', 'build.json', 'manifest.webmanifest', 'icon.svg',
-    'assets-static/app.css', 'assets-static/sample.jpg', info.app.slice(1),
+    'index.html', 'gallery.html', 'build.json', 'manifest.webmanifest', 'icon.svg',
+    'assets-static/app.css', 'assets-static/sample.jpg', info.app.slice(1), info.gallery.slice(1),
     ...Object.values(info.workers).map((value) => value.slice(1)),
     ...ortFiles.map((name) => `${info.ort.dir.slice(1)}${name}`),
   ])].sort();

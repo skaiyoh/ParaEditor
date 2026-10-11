@@ -82,7 +82,7 @@ export function ParallaxNode({ session, strength, enabled, available, onParallax
       <input data-testid="parallax-node-enabled" type="checkbox" aria-label="Parallax" checked={enabled} disabled={!available} onChange={onParallax} />
     </label>}>
     <RangeControl id="parallax-strength" label="Strength" min={RANGES['motion.parallax'].min} max={RANGES['motion.parallax'].max} step={0.1}
-      value={strength} onInput={(parallax) => session.setMotion({ parallax })} />
+      value={strength} session={session} valueFor={(parallax) => ({ kind: 'motion', patch: { parallax } })} />
     <p class="parallax-help">{enabled ? 'Hold still to center, then move your head. Recenter after changing position.' : 'Move your head to look into the photo. Tilt is used when face tracking is unavailable.'}</p>
     <div class="parallax-actions"><button type="button" data-testid="parallax-recenter" disabled={!enabled}
       onClick={() => session.recenterParallax()}>Recenter</button><button type="button" data-testid="parallax-debug-toggle" aria-pressed={debug}
@@ -94,7 +94,7 @@ export function ParallaxNode({ session, strength, enabled, available, onParallax
 export function MotionControls({ motion, session }: { readonly motion: Motion; readonly session: DemoSession }) {
   return <>
     <RangeControl id="motion-parallax" label="Depth" min={RANGES['motion.parallax'].min} max={RANGES['motion.parallax'].max} step={0.1}
-      value={motion.parallax} onInput={(parallax) => session.setMotion({ parallax })} />
+      value={motion.parallax} session={session} valueFor={(parallax) => ({ kind: 'motion', patch: { parallax } })} />
     <div class="motion-drift" role="group" aria-label="Drift">
       <span class="motion-drift-label">Drift</span>
       <div class="motion-directions">
@@ -104,9 +104,9 @@ export function MotionControls({ motion, session }: { readonly motion: Motion; r
       </div>
     </div>
     <RangeControl id="motion-drift-amount" label="Amount" min={RANGES['motion.drift.amount'].min} max={RANGES['motion.drift.amount'].max} step={0.01}
-      value={motion.drift.amount} onInput={(amount) => session.setMotion({ drift: { ...motion.drift, amount } })} />
+      value={motion.drift.amount} session={session} valueFor={(amount) => ({ kind: 'motion', patch: { drift: { ...motion.drift, amount } } })} />
     <RangeControl id="motion-loopSeconds" label="Loop seconds" min={2} max={6} step={0.1}
-      value={motion.loopSeconds} onInput={(loopSeconds) => session.setMotion({ loopSeconds })} />
+      value={motion.loopSeconds} session={session} valueFor={(loopSeconds) => ({ kind: 'motion', patch: { loopSeconds } })} />
   </>;
 }
 

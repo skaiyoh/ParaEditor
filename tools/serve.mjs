@@ -25,7 +25,7 @@ import { deflateSync } from 'node:zlib';
 import { gpuHeaders } from './build.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, createReadStream, createWriteStream, mkdirSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile, link } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
@@ -402,7 +402,9 @@ function createServer(options, contract, firstSeq, tls) {
     }
     res.writeHead(status, headers);
     if (mode.dev) {
-      const row = { seq: ++seq, at: new Date().toISOString(), scheme: tls === null ? 'http' : 'https', method: req.method, path: req.url, headers: req.headers, status, fault };
+      const loggedHeaders = urlPath === '/api/gallery' || urlPath.startsWith('/api/gallery/')
+        ? { ...req.headers, ...(req.headers.authorization === undefined ? {} : { authorization: '[redacted]' }) } : req.headers;
+      const row = { seq: ++seq, at: new Date().toISOString(), scheme: tls === null ? 'http' : 'https', method: req.method, path: req.url, headers: loggedHeaders, status, fault };
       writeLog(`${JSON.stringify(row)}\n`);
     }
   }
@@ -608,6 +610,92 @@ function createServer(options, contract, firstSeq, tls) {
     try { return JSON.parse(await readFile(file, 'utf8')); }
     catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   }
+  // The gallery fixture runs the edge protocol itself; only R2 is replaced.
+  // Conditional creation links a complete temporary file atomically, so parallel
+  // publishers observe the same manifest, including across server processes.
+  const galleryRoot = path.join(options.results, 'gallery');
+  const galleryFile = (key) => {
+    if (!/^gallery\/(?:[a-zA-Z0-9-]+\/)*[a-zA-Z0-9-]+$/.test(key)) throw new Error('Invalid gallery storage key.');
+    return path.join(galleryRoot, key.slice('gallery/'.length));
+  };
+  const galleryBucket = {
+    async head(key) {
+      try { return { size: (await stat(galleryFile(key))).size }; }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    },
+    async get(key) {
+      try {
+        const bytes = await readFile(galleryFile(key));
+        return { size: bytes.length, body: new Response(bytes).body };
+      } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    },
+    async put(key, bytes, options) {
+      const file = galleryFile(key);
+      if (options.onlyIf === undefined) { await atomicFile(file, Buffer.from(bytes)); return {}; }
+      await mkdir(path.dirname(file), { recursive: true });
+      const partial = `${file}.${randomBytes(6).toString('hex')}.part`;
+      try {
+        await writeFile(partial, Buffer.from(bytes), { flag: 'wx' });
+        try { await link(partial, file); return {}; }
+        catch (error) { if (error.code === 'EEXIST') return null; throw error; }
+      } finally { await unlink(partial).catch(() => {}); }
+    },
+    async delete(keys) {
+      for (const key of typeof keys === 'string' ? [keys] : keys) {
+        try { await unlink(galleryFile(key)); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+    },
+    async list({ prefix, cursor, limit = 100 }) {
+      const keys = [];
+      async function walk(dir, relative) {
+        let entries;
+        try { entries = await readdir(dir, { withFileTypes: true }); }
+        catch (error) { if (error.code === 'ENOENT') return; throw error; }
+        for (const entry of entries) {
+          const key = `${relative}${entry.name}`;
+          if (entry.isDirectory()) await walk(path.join(dir, entry.name), `${key}/`);
+          else if (!entry.name.endsWith('.part') && key.startsWith(prefix) && (cursor === undefined || key > cursor)) keys.push(key);
+        }
+      }
+      await walk(galleryRoot, 'gallery/');
+      keys.sort();
+      const page = keys.slice(0, limit);
+      return { objects: page.map((key) => ({ key })), truncated: keys.length > page.length,
+        ...(keys.length > page.length ? { cursor: page.at(-1) } : {}) };
+    },
+  };
+  let galleryModule;
+  async function handleGalleryApi(req, res, urlPath) {
+    const send = (status, value) => {
+      head(req, res, status, urlPath, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+      res.end(req.method === 'HEAD' ? undefined : `${JSON.stringify(value)}\n`);
+    };
+    try {
+      galleryModule ??= import('./cloudflare/gallery.ts');
+      const { handleGallery } = await galleryModule;
+      const carriesBody = req.method !== 'GET' && req.method !== 'HEAD';
+      const bytes = carriesBody ? await readBody(req, req.method === 'POST' ? 1024 * 1024 + 32 * 1024 : 24 * 1024 * 1024) : null;
+      if (carriesBody && bytes === null) return send(413, { error: 'The gallery body is too large.' });
+      const requestHeaders = new Headers();
+      for (const [name, value] of Object.entries(req.headers)) {
+        if (Array.isArray(value)) for (const entry of value) requestHeaders.append(name, entry);
+        else if (value !== undefined) requestHeaders.set(name, value);
+      }
+      const request = new Request(`http://gallery.local${req.url}`, { method: req.method, headers: requestHeaders,
+        ...(carriesBody ? { body: bytes } : {}) });
+      const response = await handleGallery(request, urlPath, { PROJECTS: galleryBucket,
+        ...(process.env.GALLERY_ADMIN_KEY === undefined ? {} : { GALLERY_ADMIN_KEY: process.env.GALLERY_ADMIN_KEY }) }, {});
+      // Fetch lowercases names; use the contract's spelling to replace its
+      // values rather than sending duplicate case-insensitive HTTP headers.
+      const contractNames = Object.keys(expectedHeaders(contract, urlPath, { status: response.status }));
+      const responseHeaders = Object.fromEntries([...response.headers].map(([name, value]) => [
+        contractNames.find((candidate) => candidate.toLowerCase() === name) ?? name, value,
+      ]));
+      head(req, res, response.status, urlPath, responseHeaders);
+      res.end(Buffer.from(await response.arrayBuffer()));
+    } catch { return send(502, { error: 'The gallery store is unavailable.' }); }
+  }
   async function handleProjects(req, res, urlPath, fault) {
     if (fault?.kind === 'http500' || fault?.kind === 'http503') return sendJson(req, res, fault.kind === 'http503' ? 503 : 500, urlPath, { error: 'The project store is unavailable.' });
     const sendBytes = (status, bytes, contentType) => {
@@ -625,13 +713,15 @@ function createServer(options, contract, firstSeq, tls) {
     const bad = (sentence) => reply(400, { error: sentence });
     const missing = () => reply(404, { error: 'The project was not found.' });
     if (urlPath !== '/api/projects' && (!PROJECT_ID.test(id ?? '') || extra !== undefined ||
-        (resource === 'masks' ? !MASK_ID.test(asset ?? '') : asset !== undefined) ||
-        (resource !== undefined && !['scene', 'photo', 'thumbnail', 'masks'].includes(resource)))) {
+        (['masks', 'assets'].includes(resource) ? !MASK_ID.test(asset ?? '') : asset !== undefined) ||
+        (resource !== undefined && !['scene', 'photo', 'thumbnail', 'masks', 'assets'].includes(resource)))) {
       return bad('The project path is invalid.');
     }
     // Retain a PUT before a slow response so late work is still revision/tombstone checked.
-    const limit = resource === 'scene' ? MAX_ROW_BYTES : resource === 'thumbnail' ? 59_999 : resource === 'masks' ? 16 * 1024 * 1024 : MAX_CAPTURE_BYTES;
-    const bytes = req.method === 'PUT' ? await readBody(req, limit) : null;
+    const limit = resource === 'scene' ? MAX_ROW_BYTES : resource === 'thumbnail' ? 59_999 : resource === 'masks' ? 16 * 1024 * 1024 : resource === 'assets' ? 20 * 1024 * 1024 : MAX_CAPTURE_BYTES;
+    const originalAsset = req.headers['x-project-asset'];
+    if (originalAsset !== undefined && (resource !== 'photo' || typeof originalAsset !== 'string' || !MASK_ID.test(originalAsset))) return bad('The original asset id is invalid.');
+    const bytes = req.method === 'PUT' ? await readBody(req, originalAsset === undefined ? limit : 24 * 1024 * 1024) : null;
     if (fault?.kind === 'slow') await wait(fault.ms);
     if (fault?.kind === 'stall') {
       head(req, res, 200, urlPath, {}, { contentType: 'application/json' }); res.flushHeaders(); return;
@@ -660,56 +750,82 @@ function createServer(options, contract, firstSeq, tls) {
         await rm(dir, { recursive: true });
         return reply(200, { ok: true });
       }
-      const file = path.join(dir, resource === 'scene' ? 'scene.json' : resource === 'masks' ? `masks/${asset}` : resource);
+      const file = path.join(dir, resource === 'scene' ? 'scene.json' : ['masks', 'assets'].includes(resource) ? `${resource}/${asset}` : resource);
       if (req.method === 'GET') {
         if (resource === 'scene') {
           const scene = await projectJson(file);
-          return scene === null ? missing() : reply(200, { document: scene.document, masks: scene.masks, revision: scene.revision ?? 0 });
+          return scene === null ? missing() : reply(200, scene.transportVersion === 2 ? { transportVersion: 2, document: scene.document, revision: scene.revision } : { document: scene.document, masks: scene.masks, revision: scene.revision ?? 0 });
         }
         let savedBytes;
         try { savedBytes = await readFile(file); }
         catch (error) { if (error.code === 'ENOENT') return missing(); throw error; }
-        const type = resource === 'thumbnail' ? 'image/jpeg' : resource === 'masks' ? 'application/octet-stream' : (await projectJson(path.join(dir, 'photo.json')))?.contentType ?? 'application/octet-stream';
+        const type = resource === 'thumbnail' ? 'image/jpeg' : ['masks', 'assets'].includes(resource) ? 'application/octet-stream' : (await projectJson(path.join(dir, 'photo.json')))?.contentType ?? 'application/octet-stream';
         return sendBytes(200, savedBytes, type);
       }
       if (req.method !== 'PUT') return sendText(req, res, 405, urlPath, 'method not allowed');
       if (projectTombstones.has(id)) return reply(410, { error: 'The project was deleted.' });
       const type = String(req.headers['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase();
-      if (bytes === null || bytes.length === 0) return bad('The project body is empty or too large.');
+      if (bytes === null) return reply(413, { error: 'The project body is too large.' });
+      if (bytes.length === 0) return bad('The project body is empty or too large.');
       if (resource === 'scene') {
         if (type !== 'application/json') return bad('The project scene must be JSON.');
         let scene;
         try {
           projectSerialization ??= import('../src/projects/serialize.ts');
-          const { deserializeScene, serializeDocument } = await projectSerialization;
-          const parsed = deserializeScene(JSON.parse(bytes.toString('utf8')));
-          if (parsed.document.id !== id) return bad('The project document id must match its path.');
-          scene = { document: serializeDocument(parsed.document), masks: parsed.masks, revision: parsed.revision, updatedAt: new Date().toISOString() };
+          const { deserializeProjectEnvelope } = await projectSerialization;
+          const parsed = deserializeProjectEnvelope(JSON.parse(bytes.toString('utf8')));
+          if (parsed.scene.document.id !== id) return bad('The project document id must match its path.');
+          scene = { ...parsed.scene, updatedAt: new Date().toISOString() };
         } catch { return bad('The project scene or its mask metadata is invalid.'); }
         const stored = await projectJson(file);
         if (stored !== null && scene.revision <= (stored.revision ?? 0)) return reply(409, { error: 'The project scene revision must increase.' });
+        if (scene.transportVersion === 2) {
+          const { validateCompositionAssets, compositionAssetPath, compositionAssetLimit } = await import('../src/projects/assets.ts');
+          try {
+            await validateCompositionAssets(scene.document, async (asset, refs) => {
+              const assetFile = path.join(dir, compositionAssetPath(asset, refs));
+              try {
+                const info = await stat(assetFile);
+                if (info.size > compositionAssetLimit(refs)) throw new Error('Asset exceeds its byte limit.');
+                return await readFile(assetFile);
+              } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+            });
+          } catch { return bad('The project assets are missing or invalid.'); }
+        }
         // If bytes already exist, reject a size mismatch; metadata may also arrive first.
-        for (const [asset, size] of Object.entries(scene.masks)) {
+        for (const [asset, size] of Object.entries(scene.masks ?? {})) {
           try {
             const info = await stat(path.join(dir, 'masks', asset));
             if (info.size !== size.width * size.height) return bad('The project mask size does not match its bytes.');
           } catch (error) { if (error.code !== 'ENOENT') throw error; }
         }
         await atomicFile(file, JSON.stringify(scene));
+      } else if (resource === 'assets') {
+        if (type !== 'application/octet-stream') return bad('The project asset must be raw bytes.');
+        try {
+          const { validateGenericAsset } = await import('../src/projects/assets.ts');
+          await validateGenericAsset(bytes, asset);
+        } catch { return bad('The project asset bytes are invalid.'); }
+        await atomicFile(file, bytes);
       } else if (resource === 'thumbnail') {
         if (type !== 'image/jpeg' || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes.at(-2) !== 0xff || bytes.at(-1) !== 0xd9) return bad('The project thumbnail must be a JPEG under 60 KB.');
         await atomicFile(file, bytes);
       } else if (resource === 'masks') {
         if (type !== 'application/octet-stream') return bad('The project mask must be raw bytes.');
         const scene = await projectJson(path.join(dir, 'scene.json'));
-        const size = scene?.masks[asset];
+        const size = scene?.masks?.[asset];
         if (size !== undefined && bytes.length !== size.width * size.height) return bad('The project mask size does not match its bytes.');
         if (createHash('sha256').update(bytes).digest('hex') !== asset) return bad('The project mask bytes do not match their asset id.');
         await atomicFile(file, bytes);
       } else {
         if (!/^(image\/[a-z0-9.+-]+|application\/octet-stream)$/.test(type)) return bad('The project photo must carry its original content type.');
-        await atomicFile(file, bytes);
-        await atomicFile(path.join(dir, 'photo.json'), JSON.stringify({ contentType: type }));
+        if (originalAsset !== undefined) {
+          if (createHash('sha256').update(bytes).digest('hex') !== originalAsset) return bad('The project asset bytes are invalid.');
+          await atomicFile(path.join(dir, 'assets', originalAsset), bytes);
+        } else {
+          await atomicFile(file, bytes);
+          await atomicFile(path.join(dir, 'photo.json'), JSON.stringify({ contentType: type }));
+        }
       }
       return reply(200, { ok: true });
     };
@@ -862,6 +978,10 @@ function createServer(options, contract, firstSeq, tls) {
       try {
         urlPath = decodeURIComponent(rawPath);
       } catch {
+        if (mode.dev && rawPath.startsWith('/api/gallery')) {
+          head(req, res, 400, rawPath, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+          return res.end(req.method === 'HEAD' ? undefined : `${JSON.stringify({ error: 'The gallery path is invalid.' })}\n`);
+        }
         return badPath(req, res, '/', 'bad path encoding');
       }
       if (!mode.dev && req.method === 'GET' && urlPath === '/api/projects') {
@@ -869,6 +989,7 @@ function createServer(options, contract, firstSeq, tls) {
         return res.end();
       }
       if (!mode.dev && namesDevOnly(urlPath)) return sendText(req, res, 404, urlPath, 'not found');
+      if (mode.dev && (urlPath === '/api/gallery' || urlPath.startsWith('/api/gallery/'))) return await handleGalleryApi(req, res, urlPath);
       if (mode.dev && urlPath.startsWith('/dev/gpu/')) {
         const fault = faults.take(urlPath, req.method);
         if (fault !== null) appliedFault.set(res, fault.spec);
@@ -884,6 +1005,9 @@ function createServer(options, contract, firstSeq, tls) {
         return await handleProjects(req, res, urlPath, fault);
       }
       if (Object.hasOwn(endpoints, urlPath)) return await endpoints[urlPath](req, res, urlPath, query);
+      if (urlPath === '/gallery' || urlPath === '/gallery/' || /^\/gallery\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(urlPath)) {
+        return await serveFile(req, res, '/gallery.html', { dir: options.root }, 'gallery.html', null);
+      }
       const mount = mounts.find((m) => urlPath.startsWith(m.prefix));
       const readable = req.method === 'GET' || req.method === 'HEAD';
       const fault = mount.faultable && readable ? faults.take(urlPath, req.method) : null;

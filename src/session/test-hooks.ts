@@ -7,11 +7,25 @@ import type { PerspectivePlate, RendererDebug } from '../render/types.ts';
 import type { SelectionDebug } from '../render/debug.ts';
 import { isObjectId, isSceneId } from '../core/ids.ts';
 import type { Oklch, Plane } from '../core/raster.ts';
-import { applyEdit } from '../core/reduce.ts';
 import type { Vec2 } from '../core/motion.ts';
 import { injectScreenAngle, type Orientation } from './tilt.ts';
 
 export type DemoTestSurface = {
+  authoringState: DemoSession['authoringState'];
+  historyState: DemoSession['historyState'];
+  previewDocument: DemoSession['previewDocument'];
+  setColor: DemoSession['setColor'];
+  setTarget: DemoSession['setTarget'];
+  setTool: DemoSession['setTool'];
+  beginGesture: DemoSession['beginGesture'];
+  updateGesture: DemoSession['updateGesture'];
+  commitGesture: DemoSession['commitGesture'];
+  cancelGesture: DemoSession['cancelGesture'];
+  setCompare: DemoSession['setCompare'];
+  setSampleMode: DemoSession['setSampleMode'];
+  sampleColor: DemoSession['sampleColor'];
+  setSurface: DemoSession['setSurface'];
+  readonly gallery: DemoSession['gallery'] & Pick<DemoSession, 'beginGesture' | 'updateGesture' | 'cancelGesture'>;
   importFile(file: File): Promise<void>;
   scene(): { status: string; master: { width: number; height: number } | null; clusters: number; path: 'resize' | 'fallback' | null };
   downloadPng(): Promise<Blob>;
@@ -65,6 +79,21 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
   let injectedDepth: Plane<'f32'> | null = null;
   let injectedPlates = new WeakMap<PerspectivePlate, PerspectivePlate>();
   return {
+    authoringState: session.authoringState,
+    historyState: session.historyState,
+    previewDocument: session.previewDocument,
+    setColor: session.setColor,
+    setTarget: session.setTarget,
+    setTool: session.setTool,
+    beginGesture: session.beginGesture,
+    updateGesture: session.updateGesture,
+    commitGesture: session.commitGesture,
+    cancelGesture: session.cancelGesture,
+    setCompare: session.setCompare,
+    setSampleMode: session.setSampleMode,
+    sampleColor: session.sampleColor,
+    setSurface: session.setSurface,
+    gallery: { ...session.gallery, beginGesture: session.beginGesture, updateGesture: session.updateGesture, cancelGesture: session.cancelGesture },
     importFile: (file) => session.importFile(file),
     scene() {
       const { status, scene } = session.snapshot();
@@ -140,12 +169,7 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
       return { generation: session.analysis.generation(), depth: session.products.depths.size, masks: session.products.masks.size, plates: session.products.plates.size, plateSize: scene?.plate?.size ?? null, guideSize: session.analysis.guide()?.size ?? null, plateNeeded: scene !== null && (state.parallaxEnabled ? session.analysis.livePlate().kind === 'preparing' : plateNeeded(scene.doc)) };
     },
     setStyle: (patch) => session.setStyle(patch),
-    setSymbols: (patch) => {
-      const scene = session.snapshot().scene;
-      if (scene === null) return;
-      const result = applyEdit(scene.doc, { kind: 'symbols', patch }, new Date().toISOString());
-      if (result.kind === 'applied') session.setDocument(result.doc);
-    },
+    setSymbols: (patch) => { session.setSymbols(patch); },
     setFry: (f) => session.setFry(f),
     injectFace: (center) => session.injectFace(center),
     injectCameraFrame: (frame, face) => session.injectCameraFrame(frame, face),

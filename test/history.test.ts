@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Edit } from '../src/core/edits.ts';
-import { COALESCE_WINDOW_MS, coalesceKey, EMPTY_HISTORY, HISTORY_LIMIT, push, redo, referencedAssets, undo, type History, type HistoryEntry } from '../src/core/history.ts';
+import { COALESCE_WINDOW_MS, coalesceKey, EMPTY_HISTORY, HISTORY_LIMIT, push, recordEdit, redo, referencedAssets, undo, type History, type HistoryEntry } from '../src/core/history.ts';
 import type { AssetId } from '../src/core/ids.ts';
 import { applyProduce } from '../src/core/produce.ts';
 import { applyEdit, applyEdits } from '../src/core/reduce.ts';
@@ -18,6 +18,32 @@ import { depthProduct } from './fixtures/products.ts';
 
 const [SUBJECT, BOX] = OBJECT_IDS;
 const [KEY_LIGHT] = LIGHT_IDS;
+
+test('the recorded mutation boundary defaults to distinct actions but preserves explicit legacy coalescing', () => {
+  for (const legacy of [false, true]) {
+    let doc = fiveClusterDocument(), history = EMPTY_HISTORY;
+    for (let at = 0; at < 3; at++) {
+      const change: Edit = { kind: 'symbols', patch: { amount: .1 * at } };
+      const result = recordEdit({ doc, history, edit: change, now: stamp(at), at,
+        ...(legacy ? { key: coalesceKey(change) } : {}) });
+      assert.equal(result.kind, 'applied'); doc = result.doc; history = result.history;
+    }
+    assert.equal(history.undo.length, legacy ? 1 : 3);
+    const unchanged = recordEdit({ doc, history, edit: { kind: 'symbols', patch: { amount: doc.symbols.amount } }, now: stamp(10), at: 10 });
+    assert.equal(unchanged.kind, 'unchanged'); assert.equal(unchanged.doc, doc); assert.equal(unchanged.history, history);
+    const refused = recordEdit({ doc, history, edit: { kind: 'fry', fry: NaN }, now: stamp(11), at: 11 });
+    assert.equal(refused.kind, 'refused'); assert.equal(refused.doc, doc); assert.equal(refused.history, history);
+  }
+});
+
+test('the recorded mutation boundary pins only the affected mask and preserves its byte identity', () => {
+  const doc = fiveClusterDocument(), object = doc.objects[0]; assert.ok(object);
+  const plane = { format: 'u8', size: { width: 1, height: 1 }, data: new Uint8Array([255]) } satisfies import('../src/core/raster.ts').Plane<'u8'>;
+  const masks = new Map([[object.produced.mask.asset, plane], [assetId(0x99), plane]]);
+  const result = recordEdit({ doc, history: EMPTY_HISTORY, edit: { kind: 'object.remove', id: object.id }, at: 0, now: stamp(0), masks });
+  const pinned = result.history.undo[0]?.masks;
+  assert.equal(pinned?.size, 1); assert.equal(pinned?.get(object.produced.mask.asset), plane);
+});
 
 function stamp(ms: number): string {
   return new Date(Date.UTC(2026, 9, 2, 18, 0, 0, ms)).toISOString();

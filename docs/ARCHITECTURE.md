@@ -1,10 +1,31 @@
 # Architecture
 
 > **Owns:** how the code in this repository is laid out and how it runs today: the source layout, the module map and the import-graph rules, the npm scripts, the three type-check projects and their rules, the tests, the build, the bundle guard, the vendored model runtime, the model lock, the fetch tool, and the model loader, the analysis workers' message protocol and its parsers, the analysis stages' math, the known-answer checks, the ONNX Runtime module, the sequence worker, and the decode worker, the analysis service, the store's schema, connection, and scene lock, the synth fixtures, the response-header contract, the server's dev and production modes with their routes and formats, the start command, the `core` primitives, `platform/`, the composition root and its boot, the dev pages, and the browser driver with its scenarios.
-> **Does not own:** why a tool or dependency was chosen ([DECISIONS.md](DECISIONS.md)), what changed when ([CHANGELOG.md](CHANGELOG.md)), or the v1 design and verification plan, which live outside version control under `.claude/work/noisy-v1/` (see the project `CLAUDE.md`).
+> **Does not own:** why a tool or dependency was chosen ([DECISIONS.md](DECISIONS.md)), what changed when ([CHANGELOG.md](CHANGELOG.md)), current product/demo requirements ([PRODUCT.md](../PRODUCT.md) and [the revision](../plan/revision.md)), or the historical full-product reference design under `plan/reference/`.
 
 This file describes only what exists.
 Parts that land later add their own sections.
+
+## Current application map
+
+The long layout inventory below began with the foundations and is not an exhaustive map of the later demo modules.
+The composed application also includes these delivered boundaries:
+
+| Boundary | Responsibility |
+| --- | --- |
+| `src/main.tsx`, `src/app/` | Composition, platform boot, local/hybrid analysis wiring, session creation. |
+| `src/ui/` | Preact shell, compact/tablet tools, layers, swatches, Projects, and status. |
+| `src/session/` | Photo lifecycle, analysis policy, object selection/refinement, history, render clock, live viewing, exports, and Projects coordination. |
+| `src/photo/` | One-still decode, orientation, size limits, canonical master and guide. |
+| `src/analysis/` | Local workers/model loading and remote depth/plate adapter/composition; resident device SAM decoder. |
+| `src/render/` | WebGL2 math treatment, photo/object composition, motion/live-view rendering and captures. |
+| `src/export/` | GIF encoding, browser movie capture, and stereo foundations. |
+| `src/projects/` | Shared-store transport, scene serialization and photo/mask validation. |
+| `src/core/`, `src/platform/`, `src/store/` | Pure document/edit/math primitives, browser utilities, and existing local-store foundations. |
+| `gpu/`, `tools/cloudflare/` | Standalone Radeon service and hosted application infrastructure. |
+
+Product and UI requirements are in [PRODUCT.md](../PRODUCT.md) and the [feature handoff](../plan/handoffs/ui-redesign.md).
+Proposed creative primitives belong to the plan until their implementation lands; this file does not claim them as delivered.
 
 ## Layout
 
@@ -1623,15 +1644,18 @@ The cluster bound on palette targets reads two subtrees, so it is a refinement o
 zod runs it only when no issue has stopped it at a field it parses on the way: a field missing, of the wrong type, or not an allowed value (a literal such as `format` or `version`, an enum member, a union's `kind`, or an id its check refuses), a fraction where a whole number is required, or an array shorter than its minimum skips it.
 `test/schema.test.ts` pins each case.
 The other refinements, the order, uniqueness, and weight sums above, each sit on their own array; the remaining invariants are bounds from the tables.
-Whether every `AssetId` the document names resolves is not checked here; the store and the scene file, which are not built yet, will check it.
+Whether every `AssetId` the document names resolves is not checked by the schema alone.
+The delivered shared Projects reader validates referenced photo/mask bytes and content hashes at its persistence boundary (see "Shared projects and the Projects API").
+A portable scene-file archive remains a separate unbuilt format.
 
 ### The version
 
-`core/migrate.ts` exports `Migration` (`(json: unknown) => unknown`, a total function from one version to the next), `MIGRATIONS`, an empty `as const` tuple, and `SCENE_VERSION = MIGRATIONS.length`.
-Because the table is a tuple, `SCENE_VERSION`'s type is the literal `0`, and so is `SceneDocument['version']`; a document at version 1 does not type-check as a `SceneDocument`, which `test/schema.test.ts` checks with a `@ts-expect-error` line.
-Appending a migration makes the version 1 in the same edit, so the version and the table cannot disagree.
+`core/migrate.ts` exports `Migration` (`(json: unknown) => unknown`, a total function from one version to the next), the `MIGRATIONS` tuple, and `SCENE_VERSION = MIGRATIONS.length`.
+The current four migrations add Surface, Parallax amount, layer visibility/names, and Drift while preserving legacy circular Orbit behavior.
+The tuple's literal length makes the current `SCENE_VERSION` and `SceneDocument['version']` literal `4`.
+Appending a migration advances the version in the same edit, so the version and table cannot disagree.
 A migration returns the document at the next version, its `version` field included, and the parse chain refuses one whose `version` is not the next (see "The parse chain").
-So a migration that changes nothing but the version, as the first one will when the scene format is frozen, is `(json) => ({ ...json, version: 1 })`, not the identity function, which the chain refuses.
+For example, a migration that changes only version 0 to 1 is `(json) => ({ ...json, version: 1 })`, not the identity function, which the chain refuses.
 A dev build may substitute another module for `migrate.ts` (`tools/build.mjs --migrations`, see "Build"); the substitute exports the same three names, and `test/fixtures/migrate-synthetic.ts` is the one the tests use (see "The synthetic migration chain").
 
 ### What a parse chain calls
@@ -1974,7 +1998,8 @@ Elsewhere the value read can differ from the exact bilinear value at the unround
 A point past the frame reads the clamped edge, and the point is clamped to the outer texel centers before its taps are taken, so a finite coordinate whose product with the mask's size overflows still reads the edge; a point with a non-finite coordinate is covered by no mask.
 
 `labelAt` returns the object of the last layer in `layers(doc)` whose mask covers the point, or null, the plate, when none does.
-The renderer's id buffer, the hit test, and label-aware simplification are to follow this rule, which none of them does yet; GPU filtering need not agree with it bit for bit within a texel of a 0.5 crossing.
+The renderer uses the shared layer ordering and CPU mask coverage when building labels, and session hit testing uses `labelAt`.
+GPU filtering need not agree with the CPU rule bit for bit within a texel of a 0.5 crossing.
 An object whose mask the map does not hold covers nothing, here and in `holeMask`.
 
 ### The hole mask
@@ -2120,27 +2145,34 @@ The file is `<title>-loop.mp4` or `<title>-loop.webm`.
 
 ### Live Parallax
 
-The viewer rail has Motion, Symbols and Parallax.
-`session/view-driver.ts` owns one render clock for Parallax, fed by `session/window.ts` (camera face tracking) and `session/tilt.ts` (device orientation).
-Both sources start in the enable gesture, so iOS's orientation permission call runs before any await.
-Each source owns its permission, timeout and cleanup; an unavailable source contributes the centered target without stopping the other.
-The status names the running sources: `Parallax: camera and tilt`, `Parallax: camera`, or `Parallax: tilt`.
-If both fail, Parallax turns off and reports their failure sentences.
+PX10 merged into the demo at `ab48fa1` on 2026-10-10.
+The live path reconstructs a bounded surface from the photo's inferred depth and uses off-axis perspective projection; it does not reconstruct unseen object sides.
+`src/core/perspective.ts` defines aperture/eye/geometry mappings, including the contained image rectangle inside the stage.
+`renderer.renderPerspective` prepares coverage-aware geometry and source-coordinate outputs used for picking.
+The procedural Motion loop remains a separate path and output behavior.
 
-The camera's front-facing pixels are unmirrored; the face target mirrors the detected x coordinate.
-Tilt captures a fresh physical rest pose on every enable and maps the difference through `screenTilt`.
-The pure mapping selects an orientation-type row and the effective angle, preserving PH3's quarter-turn signs until the real iPad readings justify changing the table.
-The angle comes from `screen.orientation.angle`, then `window.orientation`, then zero.
-Each source target clamps to 0 through 1, their offsets about 0.5 are summed and clamped again, and the fused target follows the existing 120 ms exponential smoothing and `parallaxClamp` gain.
-Parallax keeps the existing plate request and Motion frame rules.
-New documents start at `motion.parallax: 2`; loading saved documents preserves their amounts and the legacy migration retains amount 1.
+`session/view-driver.ts` owns one live render clock fed by `session/window.ts` camera observations and `session/tilt.ts` orientation observations.
+Both permission requests start in the enable gesture, before yielding.
+Sources own permission, calibration, observation timestamps/sequences, timeout, and cleanup.
+Auto prefers a fresh calibrated camera observation and uses tilt when the camera is unavailable or stale; it no longer adds the sources' offsets.
+The driver accepts ordered observations, retains a recent tracking sample during a short loss, blends source changes over 200ms, and applies 35ms exponential smoothing.
+Public states include `Parallax: calibrating`, `Parallax: hold still to calibrate`, `Parallax: tracking face`, `Parallax: tilt fallback`, and `Parallax: tracking lost`.
+If both sources fail, Parallax stops and reports their failure sentences.
+Disabling, replacement, or document visibility loss stops the active clock and releases owned resources.
 
-The Parallax node's Debug toggle shows a 200 px panel over the stage, with the matching tracked camera frame and square detection box, beta, gamma, screen type, native and legacy screen angles, mapped angle, both source targets and the rendered fused offset.
-The frame copy stays in the session after inference consumes the bitmap; the UI draws it and the accent box to a separate 2D canvas.
-Diagnostics refresh only while the panel is mounted, and the panel is never passed to the renderer or exporter.
-On the phone its bottom edge is 12 px above the collapsed status sheet, preserving readable status and diagnostics.
-The node switch and the rail's `parallax-enabled` button share the session state.
-`window.track`, `phone.tilt` and `phone.layout` exercise the real face worker, source fusion, failure isolation, stop paths, diagnostics and phone layout.
+The Parallax node exposes Strength in 0.5–3, step 0.1, default 2, sharing `motion.parallax` with Motion Depth.
+Recenter resets both sources' calibration and the handoff trajectory; compact mode exposes a quick Recenter action.
+Saved legacy documents retain their migrated amounts.
+Head/tilt calibration, portrait/landscape signs, permission behavior, and memory still need actual-iPad verification; desktop evidence does not establish device behavior.
+
+Live picking reads the current render's source UV and generation/view identity before applying a tap to the source photo.
+Generated revealed background cannot be selected as original content; its status asks the user to Recenter.
+Coverage/preparation limits are reported rather than exposing stale or unrepaired source content.
+`src/core/live-coverage.ts` gives live plate preparation its own coverage identity and hole mask.
+
+Debug exposes Auto/Camera/Tilt source override, camera frame/face box, sample state/age/quality, calibration and tilt basis/angles, raw/filtered targets, view offset, view id, preparation/coverage, stage/viewport/DPR, and numeric trace download.
+It stays outside renderer/export pixels and is not the default judge-facing surface.
+Current scenario/review results are in the PX10 Returns and `plan/log.tsv`; the [iPad checklist](../plan/phone.md) owns physical checks still owed.
 
 ### The loop crop
 
@@ -3104,7 +3136,7 @@ The last line gives the totals and the path of `summary.json`.
 
 After each scenario the driver records these checks, each row's `covers` naming its verification row:
 
-- `I6 every request is same-origin`: every request the page and its workers made went to the server's origin; `data:`, `blob:`, and `about:` URLs never leave the page and are allowed.
+- `I6 every request is same-origin`: the historical check label now covers the explicit request allowlist: app origin, configured HTTP(S) GPU origin, and admitted Cloudflare analytics origins (`static.cloudflareinsights.com`, `cloudflareinsights.com`). Local `data:`, `blob:`, and `about:` URLs are also allowed. Any other origin fails the check.
 - `I6 no CSP violation reported by the browser`: Chrome reported no Content Security Policy issue (the DevTools Protocol's `Audits.issueAdded`), enforced or report-only, for the page or any worker under it, during the scenario; this holds on every page, with or without the test surface and on any server mode, and catches a violation the page swallows, such as an `eval` inside a `try`, which neither logs a console error nor reaches the test surface of a production build.
 - `I6 no csp.violation in the page diagnostics`: before each `goto` and `reload` and at the end, the driver reads `window.__noisyTest.diagnostics()` from a page that has the test surface, and none of the events may be a `csp.violation`; `evidence.pagesWithTestSurface` counts the page loads read, so a production page or a dev page, which has no surface, shows as 0.
 - `I6 no CSP report at the server`: no report reached the server's `/dev/csp-report` during the scenario; recorded only when the server's mode has the dev surfaces.

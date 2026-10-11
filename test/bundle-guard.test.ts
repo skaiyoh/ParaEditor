@@ -25,8 +25,41 @@ test('a production build of src/ passes the bundle guard', async () => {
   const run = await runTool('tools/build.mjs', ['--mode', 'production', '--outdir', outdir]);
   assert.equal(run.code, 0, run.stderr);
   assert.deepEqual(await checkProductionBuild(outdir), []);
+  const meta = z.object({ gallery: z.string(), files: z.array(z.string()) }).parse(JSON.parse(await readFile(path.join(outdir, 'build.json'), 'utf8')));
+  const gallery = await readFile(path.join(outdir, meta.gallery), 'utf8');
+  assert.deepEqual(galleryViolations(gallery), [], 'the production gallery is isolated from inference and capture');
+  assert.ok(meta.files.includes('gallery.html'));
+  assert.equal(meta.files.some((file) => /gallery-fixture/.test(file)), false);
+  assert.doesNotMatch(await readFile(path.join(outdir, 'gallery.html'), 'utf8'), /fixture|%NOISY/);
   assert.deepEqual(await readFile(path.join(outdir, 'assets-static/sample.jpg')), await readFile(path.join(REPO, 'src/assets/sample.jpg')),
     'production carries the sample at its stable URL, byte for byte');
+});
+
+const galleryForbidden = [
+  /onnxruntime/i, /InferenceSession/, /\/models\//, /\/vendor\/ort\//,
+  /(?:analysis|sequence|decode|face)-worker[^\s"']*\.js/, /getUserMedia/,
+  /__noisyGallery/, /gallery-fixture/, /assets-static\/sample\.jpg/,
+];
+function galleryViolations(source: string): string[] {
+  return galleryForbidden.filter((pattern) => pattern.test(source)).map(String);
+}
+
+test('the gallery guard rejects each inference, worker, camera and fixture dependency', () => {
+  for (const forbidden of ['onnxruntime-web', 'InferenceSession', '/models/depth.onnx', '/vendor/ort/1.30.0/ort.wasm.min.mjs',
+    '/assets/analysis-worker-ABCDEFGH.js', '/assets/sequence-worker-ABCDEFGH.js', '/assets/decode-worker-ABCDEFGH.js', '/assets/face-worker-ABCDEFGH.js',
+    'navigator.mediaDevices.getUserMedia', '__noisyGalleryFixture', 'gallery-fixture', '/assets-static/sample.jpg']) {
+    assert.ok(galleryViolations(forbidden).length > 0, `guard must reject ${forbidden}`);
+  }
+});
+
+test('the gallery dependency graph contains no analysis, camera source or editor session', async () => {
+  const bundle = await esbuild.build({ entryPoints: [path.join(REPO, 'src/gallery.ts')], bundle: true, write: false,
+    format: 'esm', platform: 'browser', target: 'es2024', metafile: true, logLevel: 'silent',
+    define: { NOISY_DEV: 'false' } });
+  const inputs = Object.keys(bundle.metafile.inputs);
+  assert.ok(inputs.some((name) => name.endsWith('/session/viewer.ts')));
+  assert.ok(inputs.some((name) => name.endsWith('/session/tilt.ts')));
+  assert.deepEqual(inputs.filter((name) => /(?:\/analysis\/|onnxruntime|\/session\/(?:scene|window|driver)\.ts|\/dev\/)/.test(name)), []);
 });
 
 test('both build modes copy nested static assets unchanged at stable paths', async () => {
