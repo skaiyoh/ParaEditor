@@ -1,6 +1,23 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkPhotoSize, masterSize } from '../src/photo/limits.ts';
+import { checkPhotoSize, HEIC_MESSAGE, masterSize } from '../src/photo/limits.ts';
+import { decodePhoto, hasHeifBrand } from '../src/photo/decode.ts';
+
+test('raw HEIC/HEIF is refused by content with actionable recovery, even under a JPEG name', async () => {
+  assert.equal(HEIC_MESSAGE, "Export HEIC/HEIF as JPEG or PNG. For new photos: Settings > Camera > Formats > Most Compatible.");
+  for (const brand of ['heic', 'heix', 'mif1', 'msf1']) {
+    for (const offset of [8, 16]) {
+      const header = new Uint8Array(32);
+      new DataView(header.buffer).setUint32(0, header.length);
+      header.set(new TextEncoder().encode('ftyp'), 4);
+      header.set(new TextEncoder().encode(brand), offset);
+      assert.equal(hasHeifBrand(header), true);
+      await assert.rejects(decodePhoto(new File([header], 'photo.jpg', { type: 'image/jpeg' })), { message: HEIC_MESSAGE });
+    }
+  }
+  assert.equal(hasHeifBrand(new Uint8Array([0xff, 0xd8, 0xff, 0xe0])), false);
+  assert.equal(hasHeifBrand(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), false);
+});
 
 test('oriented sizes follow both even master rounding rules', () => {
   assert.deepEqual(masterSize({ width: 4032, height: 3024 }), { width: 2048, height: 1536 });

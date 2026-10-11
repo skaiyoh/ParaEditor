@@ -94,7 +94,145 @@ function visibleStatusMatches(statusLine: string | null, sceneStatus: string): b
     ['Fetching models', 'Waiting to analyze', 'Analyzing'].some((prefix) => statusLine?.startsWith(prefix) === true);
 }
 
+const Probe = z.object({ x: z.number(), y: z.number(), rgba: z.array(z.number()) });
+const Fixture = z.object({ bytes: z.string(), probes: z.array(Probe) });
+const Replacement = z.object({
+  id: z.string(), asset: z.string(), name: z.string(), generation: z.number(),
+  objects: z.number(), masks: z.number(), plates: z.number(), pixels: z.array(z.array(z.number())),
+});
+
+/** Same dimensions, different pixels and subject locations: size alone cannot prove replacement. */
+async function replacementFixture(kind: 'jpeg' | 'png' | 'sample'): Promise<unknown> {
+  let blob: Blob;
+  if (kind === 'sample') {
+    const response = await fetch('/assets-static/sample.jpg');
+    if (!response.ok) throw new Error(`Sample fixture failed: ${response.status}`);
+    blob = await response.blob();
+  } else {
+    const canvas = new OffscreenCanvas(2048, 1536), context = canvas.getContext('2d');
+    if (context === null) throw new Error('No replacement fixture context.');
+    context.fillStyle = '#808080'; context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = kind === 'jpeg' ? '#ed2637' : '#284af1';
+    context.beginPath(); context.arc(kind === 'jpeg' ? 600 : 1448, 768, 500, 0, Math.PI * 2); context.fill();
+    blob = await canvas.convertToBlob({ type: `image/${kind}` });
+  }
+  const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image', colorSpaceConversion: 'default' });
+  try {
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height), context = canvas.getContext('2d', { colorSpace: 'srgb', willReadFrequently: true });
+    if (context === null) throw new Error('No source comparison context.');
+    context.drawImage(bitmap, 0, 0);
+    const probes = [{ x: 600, y: 768 }, { x: 1448, y: 768 }, { x: 100, y: 100 }]
+      .map(({ x, y }) => ({ x, y, rgba: Array.from(context.getImageData(x, y, 1, 1).data) }));
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    return { bytes: btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join('')), probes };
+  } finally { bitmap.close(); }
+}
+
+function readReplacement(probes: readonly { x: number; y: number }[]): unknown {
+  const demo = window.__noisyTest?.demo, doc = demo?.document();
+  if (demo === undefined || doc == null || demo.render === null) throw new Error('No replacement scene.');
+  // With simplification off this render target must contain the new source pixels.
+  demo.setStyle({ simplify: 0 });
+  return { id: doc.id, asset: doc.frame.master.asset, name: doc.frame.original.name,
+    generation: demo.products().generation, objects: demo.objects().length,
+    masks: demo.products().masks, plates: demo.products().plates,
+    pixels: probes.map(({ x, y }) => Array.from(demo.render?.readSimplifiedPatch(x, y, 1, 1) ?? [])) };
+}
+
 export const scenarios: readonly Scenario[] = [
+  {
+    id: 'demo.import-three', title: 'JPEG, PNG and sample each replace the picture and masks, become ready and accept a subject tap',
+    target: 'dev', covers: [], timeoutMs: 600_000,
+    async run(t) {
+      await t.page.emulate({ width: 1180, height: 820, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+      await t.page.goto('/');
+      await t.page.waitFor('the demo to boot', View, view);
+      // Viewport emulation does not set touch capability in this driver.
+      await t.page.evaluate(z.literal(true), () => {
+        Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 });
+        return true;
+      });
+      await t.page.emulate({ width: 820, height: 1180, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+      await t.page.waitFor('portrait frame', z.literal(true), () => document.querySelector('.phone-editor') === null ? null : true);
+      await t.page.emulate({ width: 1180, height: 820, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+      await t.page.waitFor('landscape touch camera input', z.literal(true), () => document.querySelector('.editor .top-bar input[type=file][capture]') === null ? null : true);
+      const inputs = await t.page.evaluate(z.array(z.object({ accept: z.string(), capture: z.string().nullable() })), () =>
+        Array.from(document.querySelectorAll<HTMLInputElement>('input[type=file]'), (input) => ({ accept: input.accept, capture: input.getAttribute('capture') })));
+      t.equal('iPad landscape picker and camera explicitly request JPEG/PNG', inputs, [
+        { accept: 'image/jpeg,image/png', capture: null }, { accept: 'image/jpeg,image/png', capture: 'environment' },
+      ]);
+      let previous: z.infer<typeof Replacement> | null = null;
+      let previousMask: string | null = null;
+      let previousMaskHash: string | null = null;
+      for (const kind of ['jpeg', 'png', 'sample'] as const) {
+        const fixture = await t.page.evaluate(Fixture, replacementFixture, kind);
+        const name = kind === 'sample' ? 'sample.jpg' : `three.${kind}`;
+        if (kind === 'sample') await t.page.click('[data-testid=try-sample]');
+        else await t.page.setFiles('input[type=file]:not([capture])', [await t.file(name, Buffer.from(fixture.bytes, 'base64'))]);
+        await t.page.evaluate(z.literal(true), (expected: string) => { document.body.dataset['threeExpected'] = expected; return true; }, name);
+        await t.page.waitFor(`${kind}: new photo Ready to tap`, z.literal(true), () => {
+          const demo = window.__noisyTest?.demo, a = demo?.analysis();
+          return demo?.document()?.frame.original.name === document.body.dataset['threeExpected'] && a?.decoderReady &&
+            a.status === 'Ready to tap' && document.querySelector('[data-testid=status]')?.textContent?.startsWith('Ready to tap') ? true : null;
+        }, { timeoutMs: 180_000 });
+        const current = await t.page.evaluate(Replacement, readReplacement, fixture.probes);
+        t.equal(`${kind}: no previous objects, masks or plates`, [current.objects, current.masks, current.plates], [0, 0, 0]);
+        // This target stores detail in alpha; compare its source RGB only.
+        t.ok(`${kind}: rendered source pixels match this image`, current.pixels.every((pixel, i) =>
+          pixel.length === 4 && pixel.slice(0, 3).every((value, channel) => Math.abs(value - (fixture.probes[i]?.rgba[channel] ?? -1000)) <= 1)), { actual: current.pixels, expected: fixture.probes });
+        if (previous !== null) {
+          t.ok(`${kind}: new scene and master asset`, current.id !== previous.id && current.asset !== previous.asset, { previous, current });
+          t.equal(`${kind}: exactly one new analysis generation`, current.generation, previous.generation + 1);
+        }
+        await t.page.screenshot(`three-${kind}-ready`);
+        const point = kind === 'sample' ? { x: 0.38, y: 0.585 } : { x: (kind === 'jpeg' ? 600 : 1448) / 2048, y: 0.5 };
+        await t.page.evaluate(z.literal(true), (at: { x: number; y: number }) => {
+          const stage = document.querySelector<HTMLCanvasElement>('[data-testid=stage]');
+          if (stage === null) throw new Error('No stage for subject tap.');
+          const box = stage.getBoundingClientRect();
+          stage.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: box.left + at.x * box.width, clientY: box.top + at.y * box.height }));
+          return true;
+        }, point);
+        await t.page.waitFor(`${kind}: tap selects one object and shows swatches`, z.literal(true), () => {
+          const objects = window.__noisyTest?.demo.objects();
+          return objects?.length === 1 && objects[0]?.selected && document.querySelector('[data-testid=swatches]') !== null ? true : null;
+        }, { timeoutMs: 30_000 });
+        const mask = await t.page.evaluate(z.object({ asset: z.string(), hash: z.string(), nonempty: z.boolean(), containsTap: z.boolean(), masks: z.number() }), async (at: { x: number; y: number }) => {
+          const demo = window.__noisyTest?.demo, mask = demo?.projectMasks()[0], object = demo?.objects()[0], master = demo?.scene().master;
+          if (demo === undefined || mask === undefined || object === undefined || master == null) throw new Error('Missing tapped mask.');
+          const b = object.bounds, x = at.x * master.width, y = at.y * master.height;
+          return { asset: mask.asset, hash: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(mask.bytes)))).join(','),
+            nonempty: mask.bytes.some((value) => value > 0), containsTap: x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height,
+            masks: demo.products().masks };
+        }, point);
+        t.ok(`${kind}: fresh nonempty mask contains the tapped subject`, mask.nonempty && mask.containsTap && mask.masks === 1 &&
+          mask.asset !== previousMask && mask.hash !== previousMaskHash, mask);
+        await t.page.screenshot(`three-${kind}-selected`);
+        await t.file(`three-${kind}.json`, JSON.stringify({ current, probes: fixture.probes, point, mask }, null, 2));
+        previous = current; previousMask = mask.asset; previousMaskHash = mask.hash;
+      }
+      const header = new Uint8Array(32);
+      new DataView(header.buffer).setUint32(0, header.length);
+      header.set(new TextEncoder().encode('ftypheic'), 4);
+      await t.page.setFiles('input[type=file]:not([capture])', [await t.file('three.heic', header)]);
+      await t.page.waitFor('raw HEIC is refused', z.literal(true), () => window.__noisyTest?.demo.scene().status.includes('HEIC/HEIF') ? true : null);
+      const refused = await t.page.evaluate(View, view);
+      t.equal('raw HEIC shows the exact actionable recovery copy', [refused.status, refused.statusLine], [HEIC_MESSAGE, HEIC_MESSAGE]);
+      t.ok('the full recovery text fits inside the visible footer', await t.page.evaluate(z.boolean(), () => {
+        const status = document.querySelector('[data-testid=status]');
+        if (status === null) return false;
+        const range = document.createRange(); range.selectNodeContents(status);
+        const text = range.getBoundingClientRect(), box = status.getBoundingClientRect();
+        return text.top >= box.top && text.bottom <= Math.min(box.bottom, innerHeight) && text.left >= box.left && text.right <= box.right;
+      }));
+      await t.page.screenshot('three-heic-refused');
+      await t.page.emulate({ width: 820, height: 1180, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+      await t.page.waitFor('portrait camera input requests JPEG/PNG too', z.literal(true), () =>
+        document.querySelector<HTMLInputElement>('.phone-strip input[type=file]')?.accept === 'image/jpeg,image/png' ? true : null);
+      t.equal('portrait capture keeps rear camera hint', await t.page.evaluate(z.string().nullable(), () =>
+        document.querySelector('.phone-strip input[type=file]')?.getAttribute('capture') ?? null), 'environment');
+    },
+  },
   {
     id: 'demo.import', title: 'the demo imports oriented landscape and portrait masters and refuses small JPEG and HEIF files', target: 'dev', covers: [],
     async run(t) {

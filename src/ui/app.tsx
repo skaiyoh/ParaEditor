@@ -424,10 +424,10 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
           <button type="button" disabled={scene === null || busy} onClick={() => session.reset()}>Reset</button>
           <button class="primary-action" type="button" disabled={scene === null || busy} onClick={() => { void download(); }}>Download</button>
         </div>
-        <input ref={input} type="file" accept="image/*,.heic,.heif" hidden onChange={(event) => {
+        <input ref={input} type="file" accept="image/jpeg,image/png" hidden onChange={(event) => {
           open(event.currentTarget.files?.[0]); event.currentTarget.value = '';
         }} />
-        {touch && <input ref={cameraInput} type="file" accept="image/*" capture="environment" hidden onChange={(event) => {
+        {touch && <input ref={cameraInput} type="file" accept="image/jpeg,image/png" capture="environment" hidden onChange={(event) => {
           open(event.currentTarget.files?.[0]); event.currentTarget.value = '';
         }} />}
       </header>

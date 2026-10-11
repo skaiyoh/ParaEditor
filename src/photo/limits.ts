@@ -2,7 +2,7 @@ export type Size = { readonly width: number; readonly height: number };
 export const LONG_EDGE_MESSAGE = 'This photo is too small. noisy needs at least 512 pixels on its long side.';
 export const SHORT_SIDE_MESSAGE = 'This photo is too narrow. Fitted within 2048 pixels, its short side would be under the 64 pixels noisy needs.';
 export const TOO_LARGE_MESSAGE = 'This photo is too large. noisy opens photos of up to 64 megapixels.';
-export const HEIC_MESSAGE = "Chrome can't open HEIC photos. Open noisy in Safari, or export the photo as JPEG.";
+export const HEIC_MESSAGE = "Export HEIC/HEIF as JPEG or PNG. For new photos: Settings > Camera > Formats > Most Compatible.";
 
 export type PhotoLimit =
   | { readonly kind: 'accepted'; readonly size: Size }

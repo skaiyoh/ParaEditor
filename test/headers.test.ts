@@ -30,12 +30,17 @@ test('browser foreign-request guard admits only the configured GPU origin and an
   assert.deepEqual(foreignRequests(requests, origin, '/dev/gpu').map((r) => r.url), requests.slice(3).map((r) => r.url));
 });
 
-test('deployment workflow carries the public GPU Actions variable into both build and deploy', async () => {
+test('deployment workflow tests a GPU-free build and carries the public GPU Actions variable into the deployed build', async () => {
   const workflow = await readFile(new URL('../.github/workflows/deploy.yml', import.meta.url), 'utf8');
-  for (const step of ['Build development and production', 'Deploy and verify Cloudflare']) {
-    const body = workflow.split(`- name: ${step}\n`)[1]?.split('\n      - ')[0] ?? '';
-    assert.match(body, /NOISY_GPU_URL: \$\{\{ vars\.NOISY_GPU_URL \}\}/);
+  const step = (name: string): string => workflow.split(`- name: ${name}\n`)[1]?.split('\n      - ')[0] ?? '';
+  // The tests check the GPU-free header contract, so the tested builds carry no GPU URL.
+  assert.doesNotMatch(step('Build development and production'), /NOISY_GPU_URL/);
+  // The deployed production build and its preparation both carry the configured URL.
+  for (const name of ['Build production with the GPU URL', 'Deploy and verify Cloudflare']) {
+    assert.match(step(name), /NOISY_GPU_URL: \$\{\{ vars\.NOISY_GPU_URL \}\}/);
   }
+  assert.ok(workflow.indexOf('- name: Build production with the GPU URL') > workflow.indexOf('- name: Test without Chrome'), 'the GPU build follows the tests');
+  assert.ok(workflow.indexOf('- name: Build production with the GPU URL') < workflow.indexOf('- name: Deploy and verify Cloudflare'), 'the GPU build precedes the deploy');
   assert.doesNotMatch(workflow, /secrets\.NOISY_GPU_URL/);
 });
 

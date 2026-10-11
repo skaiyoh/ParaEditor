@@ -35,7 +35,7 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
         <button type="button" data-testid={touch ? 'take-photo' : 'open-photo'} onClick={takePhoto}>{touch ? 'Take a photo' : 'Open'}</button>
         {!projectsOpen && <button type="button" disabled={scene === null || busy} onClick={() => session.reset()}>Reset</button>}
       </div>
-      <input ref={cameraInput} type="file" accept="image/*" capture={touch ? 'environment' : undefined} hidden onChange={(event) => {
+      <input ref={cameraInput} type="file" accept="image/jpeg,image/png" capture={touch ? 'environment' : undefined} hidden onChange={(event) => {
         onOpen(event.currentTarget.files?.[0]); event.currentTarget.value = '';
       }} />
     </header>
