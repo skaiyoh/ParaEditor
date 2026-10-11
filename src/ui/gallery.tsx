@@ -73,7 +73,10 @@ function Grid({ context, ready }: { readonly context: GalleryUiContext; readonly
     {state.kind === 'failed' && <div class="gallery-message"><p data-testid="gallery-status" role="status">{state.sentence}</p><button type="button" onClick={() => setAttempt(attempt + 1)}>Retry</button></div>}
     {state.kind === 'listed' && (state.pieces.length === 0
       ? <div class="gallery-message" data-testid="gallery-empty"><p role="status">Nothing published yet</p><MakeOne href={context.editorUrl} /></div>
-      : <><ul ref={grid} class="gallery-grid" data-testid="gallery-grid" aria-label="Published pieces">{state.pieces.map((piece) =>
+      : <><a class="gallery-scene" data-testid="gallery-scene-highland" href="/scenes.html?scene=highland-field">
+        <img src="/assets-static/scenes/highland-field/highland-field.png" width={1920} height={1440} loading="lazy" decoding="async" alt="Highland Field, a 3D scene" />
+        <span>Highland Field · 3D scene</span></a>
+        <ul ref={grid} class="gallery-grid" data-testid="gallery-grid" aria-label="Published pieces">{state.pieces.map((piece) =>
         <li key={piece.id} style={{ gridRowEnd: `span ${Math.ceil(columnWidth * piece.height / piece.width + 34)}` }}>
           <a class="gallery-piece-link" data-testid="gallery-piece-link" href={`/gallery/${piece.id}`}>
             <img src={piece.posterUrl} width={piece.width} height={piece.height} loading="lazy" decoding="async" alt={`Published piece, ${timeLabel(piece.publishedAt)}`} />

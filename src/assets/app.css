@@ -736,3 +736,7 @@ html:has(.gallery-piece), body:has(.gallery-piece) { overflow: hidden; overscrol
 @media (orientation: portrait) and (max-width: 743px) {
   .phone-strip:has([data-testid="tool-brush"]) .primary-action { font-size: 0; gap: 0; padding-inline: 12px; }
 }
+
+.gallery-scene { display: block; position: relative; margin: 0 0 16px; border-radius: 12px; overflow: hidden; }
+.gallery-scene img { display: block; width: 100%; height: auto; max-height: 50vh; object-fit: cover; }
+.gallery-scene span { position: absolute; left: 12px; bottom: 12px; padding: 4px 10px; border-radius: 999px; background: var(--panel, rgba(30,30,30,.8)); color: var(--ink, #fff); font-size: 14px; }
