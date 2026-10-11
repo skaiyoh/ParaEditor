@@ -83,7 +83,7 @@ export function mountGalleryPage({ root, load, list, route, createViewer, status
       const content = await load(`/gallery/${route.id}`, controller.signal);
       if (disposed) return;
       if (content === null) { sharedStatus.set({ kind: 'unavailable', message: 'This piece is not available.' }); fallback('This piece is not available.'); return; }
-      document.title = `${content.title} · noisy`;
+      document.title = `${content.title} · ParaEditor`;
       poster.alt = content.title; canvas.setAttribute('aria-label', content.title);
       poster.src = content.posterUrl; poster.hidden = false;
       const piece = await content.loadPiece(controller.signal);

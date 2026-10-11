@@ -1,3 +1,6 @@
+import { scenarios as mathRemixProof } from './math-remix-proof.scenario.ts';
+import { scenarios as creativeC2Ui } from './creative-c2-ui.scenario.ts';
+import { scenarios as mathRemixPaint } from './math-remix-paint.scenario.ts';
 // Every scenario file, by file name, in run order. The driver refuses to run
 // when a *.scenario.ts file in this directory is missing here, so a new file
 // cannot be skipped silently. shell.isolated runs first and checks
@@ -23,7 +26,10 @@ import { scenarios as objects } from './objects.scenario.ts';
 import { scenarios as models } from './models.scenario.ts';
 import { scenarios as production } from './production.scenario.ts';
 import { scenarios as render } from './render.scenario.ts';
+import { scenarios as mathRemixGrain } from './math-remix-grain.scenario.ts';
+import { scenarios as mathRemix } from './math-remix.scenario.ts';
 import { scenarios as cameraStage } from './camera-stage.scenario.ts';
+import { scenarios as creativeC2 } from './creative-c2.scenario.ts';
 import { scenarios as motionEdges } from './motion-edges.scenario.ts';
 import { scenarios as loop } from './loop.scenario.ts';
 import { scenarios as view } from './view.scenario.ts';
@@ -43,9 +49,13 @@ import { scenarios as service } from './service.scenario.ts';
 import { scenarios as shell } from './shell.scenario.ts';
 import { scenarios as store } from './store.scenario.ts';
 import { scenarios as story } from './story.scenario.ts';
+import { scenarios as showcase } from './showcase.scenario.ts';
+import { scenarios as scenes } from './scenes.scenario.ts';
 import { scenarios as threads } from './threads.scenario.ts';
 
 export const SCENARIO_FILES = {
+  'math-remix-proof.scenario.ts': mathRemixProof,
+  'math-remix-paint.scenario.ts': mathRemixPaint,
   'shell.scenario.ts': shell,
   'boot.scenario.ts': boot,
   'demo.scenario.ts': demo,
@@ -67,7 +77,11 @@ export const SCENARIO_FILES = {
   'production.scenario.ts': production,
   'hosted.scenario.ts': hosted,
   'render.scenario.ts': render,
+  'math-remix-grain.scenario.ts': mathRemixGrain,
+  'math-remix.scenario.ts': mathRemix,
   'camera-stage.scenario.ts': cameraStage,
+  'creative-c2.scenario.ts': creativeC2,
+  'creative-c2-ui.scenario.ts': creativeC2Ui,
   'symbols.scenario.ts': symbols,
   'surface.scenario.ts': surface,
   'loop.scenario.ts': loop,
@@ -83,4 +97,6 @@ export const SCENARIO_FILES = {
   'creative-c1.scenario.ts': creativeC1,
   'projects.scenario.ts': projects,
   'stereo.scenario.ts': stereo,
+  'showcase.scenario.ts': showcase,
+  'scenes.scenario.ts': scenes,
 } as const satisfies Readonly<Record<string, readonly Scenario[]>>;

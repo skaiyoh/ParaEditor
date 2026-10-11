@@ -234,7 +234,13 @@ test('malformed, wrong-model and nonfinite disk tensors are cache misses', async
   ]);
   for (const [name, makeBytes] of cases) {
     await t.test(name, async () => {
-      storage.cache.response = () => new Response(makeBytes());
+      const bytes = makeBytes();
+      // These must reach semantic validation, not fail the checksum first.
+      if (['nonfinite tensor', 'wrong SAM dimensions with the same element count', 'wrong SAM tensor name', 'duplicate tensor names'].includes(name)) {
+        const payloadEnd = bytes.byteLength - 32;
+        bytes.set(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.subarray(0, payloadEnd))), payloadEnd);
+      }
+      storage.cache.response = () => new Response(bytes.slice());
       assert.equal(await createEmbeddingCache(storage).get(asset('1'), model('a')), null);
     });
   }

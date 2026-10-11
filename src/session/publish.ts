@@ -1,5 +1,8 @@
-import { sortedMasks } from '../core/produce.ts';
-import { GALLERY_LIMITS, galleryDraftSchema, isGalleryId, type GalleryAsset, type GalleryCreated, type GalleryId } from '../core/gallery.ts';
+import { GALLERY_LIMITS, galleryCompositionAssetSchema, galleryCompositionDraftSchema, galleryRemixDraftSchema, isGalleryId, type GalleryCompositionAsset, type GalleryCreated, type GalleryId } from '../core/gallery.ts';
+import { serializeDocument } from '../projects/serialize.ts';
+import { collectCompositionAssets } from '../core/asset-refs.ts';
+import { publicationPlateNeeded } from '../core/derive.ts';
+import { sameValue } from '../core/equal.ts';
 import type { SceneDocument } from '../core/types.ts';
 import type { Size } from '../core/raster.ts';
 import * as client from '../projects/gallery.ts';
@@ -12,7 +15,7 @@ export type PublishReadiness = { readonly kind: 'ready' } | {
   readonly sentence: string;
 };
 export type PublishProgress = {
-  readonly phase: 'snapshot' | 'creating' | 'uploading' | 'publishing' | 'published';
+  readonly phase: 'preparing' | 'snapshot' | 'creating' | 'uploading' | 'publishing' | 'published';
   readonly completed: number;
   readonly total: number;
   readonly sentence: string;
@@ -22,8 +25,7 @@ export type PublishResult = { readonly kind: 'published'; readonly id: GalleryId
 export type UnpublishResult = { readonly kind: 'unpublished'; readonly id: GalleryId } | { readonly kind: 'failed'; readonly sentence: string };
 export type PublishInput = {
   readonly document: SceneDocument | null;
-  readonly source: File | null;
-  readonly products: Pick<Products, 'masks' | 'depths' | 'plates'>;
+  readonly products: Pick<Products, 'assets' | 'masks' | 'depths' | 'plates'>;
   readonly gesture: boolean;
   readonly exporting: boolean;
 };
@@ -58,32 +60,37 @@ export async function encodeGalleryPoster(still: Promise<Blob>): Promise<Poster>
   } finally { bitmap.close(); }
 }
 
-export function createPublishSession({ read, renderStill, encodePoster = encodeGalleryPoster, tokens = galleryTokens }: {
+export function createPublishSession({ read, prepareBackground, renderStill, encodePoster = encodeGalleryPoster, tokens = galleryTokens, onReadinessChanged }: {
   readonly read: () => PublishInput;
+  readonly prepareBackground: (signal: AbortSignal) => Promise<void>;
   /** Must capture pixels synchronously using this document, never the displayed preview. */
   readonly renderStill: (document: SceneDocument) => Promise<Blob>;
   readonly encodePoster?: (still: Promise<Blob>) => Promise<Poster>;
   readonly tokens?: GalleryTokenStore;
+  readonly onReadinessChanged?: () => void;
 }) {
-  let publishing = false;
-  function readiness(input: PublishInput): PublishReadiness {
+  let publishing = false, capturePending = false;
+  const needsBackground = ({ document, products }: PublishInput): boolean => document !== null && document.objects.length > 0 &&
+    (publicationPlateNeeded(document, products.assets) || document.analysis.plate === null || !products.plates.has(document.analysis.plate.image.asset));
+  function readiness(input: PublishInput, ownPublication = false): PublishReadiness {
     const unavailable = (reason: Extract<PublishReadiness, { kind: 'unavailable' }>['reason'], sentence: string): PublishReadiness => ({ kind: 'unavailable', reason, sentence });
     const doc = input.document;
-    if (doc === null || input.source === null || doc.frame.source === null) return unavailable('no-photo', 'Open a photo before publishing.');
+    if (doc === null || doc.frame.source === null || !input.products.assets.has(doc.frame.source.asset)) return unavailable('no-photo', 'Open a photo before publishing.');
     if (input.gesture) return unavailable('gesture', 'Finish the current adjustment before publishing.');
     if (input.exporting) return unavailable('export', 'Wait for the export to finish before publishing.');
-    if (publishing) return unavailable('publishing', 'This photo is already being published.');
+    if ((!ownPublication && publishing) || capturePending) return unavailable('publishing', 'Wait for the current publication to finish.');
     if (doc.analysis.depth === null || !input.products.depths.has(doc.analysis.depth.map.asset)) return unavailable('depth', 'Depth is still preparing. Publish will be available when it is ready.');
     const plate = doc.analysis.plate;
     if (doc.objects.length === 0 && plate !== null) {
       return unavailable('plate', 'This photo retains a background plate from an earlier subject. Its saved plate cannot be omitted from a published piece.');
     }
-    if (doc.objects.length > 0 && (plate === null || !input.products.plates.has(plate.image.asset) || JSON.stringify(plate.forMasks) !== JSON.stringify(sortedMasks(doc)))) {
-      return unavailable('plate', doc.motion.enabled || doc.objects.some((object) => object.hidden)
-        ? 'The background plate is still preparing. Publish will be available when it is ready.'
-        : 'The background plate is not ready. Turn Motion on to prepare it.');
-    }
     if (doc.objects.some((object) => !input.products.masks.has(object.produced.mask.asset))) return unavailable('masks', 'The subject masks are not ready to publish.');
+    // An obsolete repair is replaced by preparation; its old assets need not be resident.
+    const inventory = collectCompositionAssets([{ kind: 'document', document: needsBackground(input)
+      ? { ...doc, analysis: { ...doc.analysis, plate: null } } : doc }]);
+    if (!inventory.ok || [...inventory.value.keys()].some((asset) => !input.products.assets.has(asset))) {
+      return unavailable('masks', 'The saved composition assets are not ready to publish.');
+    }
     return { kind: 'ready' };
   }
   function unwrap<T>(result: client.GalleryResult<T>): T {
@@ -91,7 +98,8 @@ export function createPublishSession({ read, renderStill, encodePoster = encodeG
     return result.value;
   }
   async function publish({ onProgress, signal }: { readonly onProgress?: (progress: PublishProgress) => void; readonly signal?: AbortSignal } = {}): Promise<PublishResult> {
-    const input = read(), state = readiness(input);
+    let input = read();
+    const state = readiness(input);
     if (state.kind === 'unavailable') return { kind: 'failed', sentence: state.sentence };
     publishing = true;
     let created: GalleryCreated | null = null, published = false;
@@ -100,52 +108,73 @@ export function createPublishSession({ read, renderStill, encodePoster = encodeG
     };
     try {
       signal?.throwIfAborted();
-      if (input.document === null || input.source === null || input.document.frame.source === null) throw new Error('Open a photo before publishing.');
-      // Clone before any await or callback. Copy planes while this import still owns them.
-      const document = structuredClone(input.document), source = input.source;
-      const ref = input.document.frame.source;
-      const mediaType = source.type || 'application/octet-stream';
+      if (input.document === null || input.document.frame.source === null) throw new Error('Open a photo before publishing.');
+      if (needsBackground(input)) {
+        const before = structuredClone(input.document);
+        const preparationSignal = signal ?? new AbortController().signal;
+        progress('preparing', 0, 1, 'Preparing the background.');
+        preparationSignal.throwIfAborted();
+        try { await untilAborted(prepareBackground(preparationSignal), preparationSignal); }
+        catch { throw new Error('The background could not be prepared. Please try publishing again.'); }
+        signal?.throwIfAborted();
+        input = read();
+        const ready = readiness(input, true), current = input.document;
+        if (ready.kind === 'unavailable') throw new Error(ready.sentence);
+        if (current === null || current.frame.source === null || !sameValue(before,
+          { ...current, updatedAt: before.updatedAt, analysis: { ...current.analysis, plate: before.analysis.plate } })) {
+          throw new Error('The photo changed while preparing the background. Please publish again.');
+        }
+        if (needsBackground(input)) throw new Error('The background could not be prepared. Please try publishing again.');
+      }
+      if (input.document === null || input.document.frame.source === null) throw new Error('Open a photo before publishing.');
+      // Freeze the complete encoded closure before any await or observer can edit/import.
+      const document = structuredClone(input.document), ref = input.document.frame.source;
+      const mediaType = ref.mediaType || 'application/octet-stream';
       const normalized = { ...document, frame: { ...document.frame, source: { ...ref, mediaType },
         original: { ...document.frame.original, mediaType } } };
-      const uploads: { asset: GalleryAsset; bytes: Blob | Uint8Array }[] = [];
-      const sourceAsset = { kind: 'source', id: ref.asset, mediaType, size: document.frame.original.size, byteLength: source.size };
-      // Parse the source MIME at the same boundary as the rest of the draft below.
-      const seen = new Set([ref.asset]);
-      for (const object of document.objects) {
-        const ref = object.produced.mask;
-        if (seen.has(ref.asset)) continue;
-        const plane = input.products.masks.get(ref.asset);
-        if (plane === undefined) throw new Error('A subject mask is unavailable.');
-        const bytes = plane.data.slice(); seen.add(ref.asset);
-        uploads.push({ asset: { kind: 'mask', id: ref.asset, format: 'u8', size: plane.size, byteLength: bytes.byteLength }, bytes });
+      const inventory = collectCompositionAssets([{ kind: 'document', document: normalized }]);
+      if (!inventory.ok) throw new Error(inventory.error.detail);
+      let byteLength = 0;
+      for (const asset of inventory.value.keys()) {
+        const bytes = input.products.assets.get(asset);
+        if (bytes === undefined) throw new Error('A saved composition asset is unavailable.');
+        byteLength += bytes.byteLength;
       }
-      const depth = document.analysis.depth, plate = document.analysis.plate;
-      if (depth === null) throw new Error('Depth is still preparing.');
-      const depthPlane = input.products.depths.get(depth.map.asset);
-      if (depthPlane === undefined) throw new Error('Depth is still preparing.');
-      const depthBytes = new Uint8Array(depthPlane.data.length * 4), view = new DataView(depthBytes.buffer);
-      depthPlane.data.forEach((value, index) => view.setFloat32(index * 4, value, true));
-      uploads.push({ asset: { kind: 'depth', id: depth.map.asset, format: 'f32', size: depthPlane.size, byteLength: depthBytes.byteLength }, bytes: depthBytes });
-      if (plate !== null) {
-        const plane = input.products.plates.get(plate.image.asset);
-        if (plane === undefined) throw new Error('The background plate is still preparing.');
-        const bytes = plane.data.slice();
-        uploads.push({ asset: { kind: 'plate', id: plate.image.asset, format: 'rgb8', size: plane.size, byteLength: bytes.byteLength }, bytes });
+      const serialized = serializeDocument(normalized);
+      const documentBytes = new TextEncoder().encode(JSON.stringify(serialized)).byteLength;
+      if (inventory.value.size > (normalized.version === 6 ? GALLERY_LIMITS.remixAssets : GALLERY_LIMITS.assets) || documentBytes > GALLERY_LIMITS.document || byteLength + documentBytes + GALLERY_LIMITS.poster > GALLERY_LIMITS.piece) {
+        throw new Error('This photo cannot fit the gallery snapshot requirements.');
+      }
+      const uploads: { asset: GalleryCompositionAsset; bytes: Blob }[] = [];
+      for (const [id, refs] of inventory.value) {
+        const bytes = input.products.assets.get(id);
+        if (bytes === undefined) throw new Error('A saved composition asset is unavailable.');
+        const original = refs.find((value) => value.kind === 'original'), image = refs.find((value) => value.kind === 'png'), raster = refs.find((value) => value.kind === 'raster');
+        const asset = galleryCompositionAssetSchema.parse(original !== undefined ? { kind: 'source', id, mediaType, size: normalized.frame.original.size, byteLength: bytes.byteLength }
+          : image !== undefined ? { kind: 'png', id, mediaType: 'image/png', size: image.size, byteLength: bytes.byteLength }
+          : raster !== undefined ? { kind: 'raster', id, format: raster.format, size: raster.size, byteLength: bytes.byteLength } : null);
+        const upload = { asset, bytes: new Blob([bytes]) };
+        if (asset.kind === 'source') uploads.unshift(upload); else uploads.push(upload);
       }
       const still = renderStill(normalized);
-      // Observe both promises immediately, including if an injected encoder fails early.
-      void still.catch(() => undefined);
-      const posterPromise = encodePoster(still);
-      progress('snapshot', 0, uploads.length + 2, 'Preparing the published still.');
+      let posterPromise: Promise<Poster>;
+      try { posterPromise = encodePoster(still); }
+      catch (error) { posterPromise = Promise.reject(error); }
+      // Native capture/encoding cannot abort. Retain one slot until both settle,
+      // even when cancellation returns before their pixels are released.
+      capturePending = true;
+      void Promise.allSettled([still, posterPromise]).then(() => {
+        capturePending = false;
+        try { onReadinessChanged?.(); } catch { /* Observers cannot retain or restart a capture. */ }
+      });
+      progress('snapshot', 0, uploads.length + 1, 'Preparing the published still.');
       const poster = await untilAborted(posterPromise, signal);
       signal?.throwIfAborted();
       const posterId = await productAsset(new Uint8Array(await poster.blob.arrayBuffer()));
-      const parsed = galleryDraftSchema.safeParse({ document: normalized, assets: [sourceAsset, ...uploads.map(({ asset }) => asset)],
+      const parsed = (normalized.version === 6 ? galleryRemixDraftSchema : galleryCompositionDraftSchema).safeParse({ version: normalized.version === 6 ? 3 : 2, document: serialized, assets: uploads.map(({ asset }) => asset),
         poster: { kind: 'poster', id: posterId, mediaType: poster.blob.type, size: poster.size, byteLength: poster.blob.size } });
-      if (!parsed.success) throw new Error('This photo cannot fit the gallery snapshot requirements.');
-      const draft = parsed.data, declaredSource = draft.assets.find((asset) => asset.kind === 'source');
-      if (declaredSource === undefined) throw new Error('The original photo is unavailable.');
-      uploads.unshift({ asset: declaredSource, bytes: source });
+      if (!parsed.success) throw new Error('This project could not be prepared for the gallery. Save it and try again.');
+      const draft = parsed.data;
       const total = uploads.length + 1;
       signal?.throwIfAborted(); progress('creating', 0, total, 'Creating a private gallery draft.'); signal?.throwIfAborted();
       created = unwrap(await client.createDraft({ draft, ...(signal === undefined ? {} : { signal }) }));
@@ -174,7 +203,13 @@ export function createPublishSession({ read, renderStill, encodePoster = encodeG
         else sentence += ' Cleanup could not be confirmed. Use Unpublish on this device to remove the piece.';
       }
       return { kind: 'failed', sentence };
-    } finally { publishing = false; }
+    } finally {
+      publishing = false;
+      // A cancelled native capture still owns the slot; its drain notifies readiness.
+      if (!capturePending) {
+        try { onReadinessChanged?.(); } catch { /* Observers cannot change publication. */ }
+      }
+    }
   }
   return {
     canPublish: (): PublishReadiness => readiness(read()), publish, publishedHere: tokens.publishedHere,

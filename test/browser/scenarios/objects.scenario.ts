@@ -154,7 +154,7 @@ async function tapChecks(): Promise<unknown> {
   const resetDepth = demo.analysis().depth;
   const resetBytesEqual = await hash(await demo.downloadPng()) === document.body.dataset['objectsBaseline'];
   return { elapsedMs, count, selected, subject, boundsWithinDiscMargin, actualBounds: b, expectedDiscBox, boundsMargin,
-    mean: produced.color.mean, edgeDifferences, insideScreenEqualsExport,
+    mean: (() => { if (produced.color === null) throw new Error('The accepted SAM region must contain color statistics.'); return produced.color.mean; })(), edgeDifferences, insideScreenEqualsExport,
     outsideBefore, outsideSelected: outside.color, outsideUndimmed: outside.undimmed, insideSelectionEqual,
     overlayRestored, deselectedExportEqual, swatchesVisible, swatchesHidden, changedPoints, backgroundUnchanged,
     keyboardFocus, nativeSwatch, escapeDeselects, retapCount, originalRestored, capCount, capStatus, resetCount, resetProducts, resetSelected, resetStatus, resetDepth, resetBytesEqual };
@@ -225,7 +225,8 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
   };
   const meter = () => {
     const node = document.querySelector('[data-testid="selection-meter"]');
-    const area = document.querySelector('.stage-area, .phone-stage');
+    // The phone picture starts below its readout band (C2uF), so the meter is measured from the visible picture.
+    const area = document.querySelector('.stage-area, .phone-picture');
     const track = node?.querySelector('.selection-meter-track');
     if (node === null || area === null || track === null || track === undefined) throw new Error('Missing selection meter.');
     const style = getComputedStyle(node), box = node.getBoundingClientRect(), stageBox = area.getBoundingClientRect();
@@ -345,7 +346,7 @@ async function refineChecks(action: 'baseline' | 'grow' | 'finish' | 'shrink' | 
   if (action !== 'grow') await pause(160);
   const mask = demo.projectMasks().find((entry) => entry.asset === updated?.produced.mask.asset);
   if (updated === undefined || mask === undefined) throw new Error('The committed object mask is missing.');
-  return { area: mask.bytes.filter((value) => value >= 128).length, asset: updated.produced.mask.asset, size: updated.produced.selection.size ?? 0.5,
+  return { area: mask.bytes.filter((value) => value >= 128).length, asset: updated.produced.mask.asset, size: (() => { const provenance = updated.produced.provenance; if (provenance.kind !== 'ai') throw new Error('Refined SAM coverage must keep AI provenance.'); return provenance.selection.size; })(),
     maskCount: demo.products().masks, count: doc?.objects.length ?? 0, selected: demo.objects()[0]?.selected ?? false,
     plateNeeded: demo.products().plateNeeded, document: JSON.stringify(doc), status: demo.scene().status,
     candidateAreas, originalRank, previewArea, previewAsset, refining: demo.refinement() !== null, cursor: getComputedStyle(stage).cursor,

@@ -1,0 +1,11 @@
+{
+  "origin": "Original Blender render from assets/scenes/lantern-court/lantern-court.blend",
+  "prompt": "Origin: original Blender render from assets/scenes/lantern-court/lantern-court.blend, prepared by assets/scenes/lantern-court/export_showcase.py. Lighting reference neutral for a fixed-glass geometry showcase. No AI-generated imagery or downloaded assets.",
+  "script": "assets/scenes/lantern-court/export_showcase.py",
+  "view": "neutral",
+  "eye": [
+    0,
+    0
+  ],
+  "sha256": "cdb84159a652f420cf79ca1726ed322fcef8993aa5a8a797d82d0ba4a384d6d7"
+}

@@ -1,10 +1,9 @@
 import type { GalleryContent, GalleryLoader } from '../app/gallery-page.ts';
-import { newDocument, newObject } from '../core/defaults.ts';
 import { isAssetId, isBuildId, isModelId, isObjectId, isSceneId } from '../core/ids.ts';
 import type { AssetId } from '../core/ids.ts';
 import type { Plane, Rgb8 } from '../core/raster.ts';
-import type { SceneDocument } from '../core/types.ts';
-import { currentDocumentSchema } from '../core/schema.ts';
+import type { LegacySceneDocument, LegacySceneObject } from '../core/types.ts';
+import { legacyV4DocumentSchema } from '../core/legacy-schema.ts';
 
 async function hash(bytes: Uint8Array): Promise<AssetId> {
   const buffer = new Uint8Array(bytes.length); buffer.set(bytes);
@@ -46,25 +45,36 @@ async function piece(signal: AbortSignal): Promise<Awaited<ReturnType<GalleryCon
   const id = '00000000-0000-4000-8000-000000000001', objectId = '00000000-0000-4000-8000-000000000002';
   const writer = 'nocommit-20261010', model = `fixture@${'a'.repeat(64)}`;
   if (!isSceneId(id) || !isObjectId(objectId) || !isBuildId(writer) || !isModelId(model)) throw new Error('Invalid fixture identity.');
-  const colors: SceneDocument['analysis']['colors'] = [
+  const colors: LegacySceneDocument['analysis']['colors'] = [
     { lab: { L: .7, a: -.02, b: -.1 }, weight: .4 }, { lab: { L: .5, a: -.08, b: .06 }, weight: .25 },
     { lab: { L: .3, a: .01, b: .02 }, weight: .15 }, { lab: { L: .62, a: .1, b: .12 }, weight: .12 },
     { lab: { L: .9, a: 0, b: .01 }, weight: .08 },
   ];
-  const doc = newDocument({ id, title: 'Gallery sample', seed: 410, writer, importedOn: 'deterministic gallery fixture', now: '2026-10-10T00:00:00.000Z',
+  // Frozen manifest-v1 fixture: editor constructors now write a different asset/document format.
+  const doc: LegacySceneDocument = { format: 'noisy-scene', version: 4, id, title: 'Gallery sample', seed: 410,
+    createdAt: '2026-10-10T00:00:00.000Z', updatedAt: '2026-10-10T00:00:00.000Z',
+    provenance: { writer, importedOn: 'deterministic gallery fixture' },
     frame: { source: { asset: sourceId, mediaType: 'image/png', byteLength: master.size }, master: { asset: sourceId, size }, original: { name: 'gallery-sample.png', mediaType: 'image/png', size } },
     analysis: { colors, tone: { p01: .08, p05: .15, p50: .52, p95: .88, p99: .95 }, autoSubject: 'done',
       depth: { model, map: { asset: depthId, format: 'f32', size }, stats: { p10: .18, median: .3, p90: .8 } },
       plate: { model, image: { asset: plateId, size }, forMasks: [maskId] } },
-  });
-  const object = newObject({ id: objectId, existing: [], produced: { model,
+    style: { fry: .6, colors: 7, saturation: .62, harmony: { kind: 'auto', strength: .5 }, paletteTargets: [],
+      bands: 4, simplify: .52, outline: .4, subjectClarity: .6, grain: .52, colorNoise: .32,
+      grainSize: 2, grainHold: 2, crunch: .42, clipping: .3 },
+    symbols: { enabled: false, cellSize: 12, amount: .3 },
+    surface: { enabled: false, pattern: 'bars', relief: .5, refraction: .5, shine: .5, scale: .5 },
+    motion: { enabled: false, drift: { direction: 'side', amount: .6 }, parallax: 2, loopSeconds: 3, focus: null },
+    lighting: { ambient: .7, relief: 1 }, objects: [], lights: [],
+  };
+  const object: LegacySceneObject = { id: objectId, name: 'Object 1', hidden: false, subject: false,
+    recolor: { kind: 'none' }, symbols: 'slider', motion: { kind: 'none' }, thickness: .3, produced: { model,
     mask: { asset: maskId, format: 'u8', size }, bounds: { x: 260, y: 150, width: 120, height: 180 },
     depth: { p10: .8, median: .8, p90: .8 }, color: { mean: { L: .5, a: 0, b: 0 },
       clusters: [{ lab: { L: .65, a: .03, b: .04 }, weight: .6 }, { lab: { L: .3, a: -.03, b: -.04 }, weight: .4 }] },
     selection: { kind: 'auto-subject', seed: { at: { x: .5, y: .5 }, label: 'include' }, candidate: 0, size: .5 },
-  } });
+  } };
   const params = new URLSearchParams(location.search);
-  const document = currentDocumentSchema.parse({ ...doc, objects: [object], style: { ...doc.style, crunch: 0 }, motion: { ...doc.motion, enabled: params.get('motion') !== 'off' } });
+  const document = legacyV4DocumentSchema.parse({ ...doc, objects: [object], style: { ...doc.style, crunch: 0 }, motion: { ...doc.motion, enabled: params.get('motion') !== 'off' } });
   const planes = new Map<AssetId, Plane<'u8'> | Plane<'f32'> | Rgb8>([[maskId, mask], [depthId, depth], [plateId, plate]]);
   if (params.get('asset') === 'missing') planes.delete(maskId);
   return { document, source: params.get('source') === 'broken' ? new Blob(['broken'], { type: 'image/png' }) : master, planes };

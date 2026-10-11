@@ -87,7 +87,8 @@ export function objectProduced(input: {
   const bounds = maskBounds(input.mask, input.master);
   if (bounds === null) return null;
   return {
-    model: input.model, selection: input.selection ?? { kind: 'taps', points: [{ at: input.at, label: 'include' }], candidate: 0, size: 0.5 },
+    sampling: 'legacy-threshold', provenance: { kind: 'ai', model: input.model,
+      selection: { ...(input.selection ?? { kind: 'taps', points: [{ at: input.at, label: 'include' }], candidate: 0 }), size: input.selection?.size ?? .5 } },
     mask: { asset: input.asset, size: input.mask.size, format: 'u8' }, bounds,
     depth: input.depth === null ? null : maskedDepth(input.mask, input.depth),
     color: maskedColor(input.mask, input.thumbnail, input.seed),

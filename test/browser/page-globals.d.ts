@@ -32,9 +32,73 @@ declare global {
   const NOISY_ORT_DIR: string;
   const NOISY_WORKER_URLS: { readonly sequence: string; readonly decode: string; readonly face: string };
   interface Window {
+    ImageDecoder?: new (input: { data: Uint8Array; type: string }) => {
+      tracks: { ready: Promise<void>; selectedTrack: { frameCount: number } | null };
+      decode(input: { frameIndex: number }): Promise<{ image: VideoFrame }>;
+      close(): void;
+    };
+    __paintProof?: import('./scenarios/math-remix-proof.scenario.ts').PaintProofHarness;
     readonly __noisyTest?: {
       readonly session?: { renderer(): (Renderer & { exportStill(capture: { frame: number; canvas: HTMLCanvasElement }): void }) | null };
       readonly demo: {
+        readonly remix: import('../../src/session/math-remix.ts').MathRemixSession;
+        readonly paint: {
+          planes(): readonly import('../../src/render/types.ts').PaintPlane[];
+          renderPerspective(geometry: import('../../src/core/perspective.ts').PerspectiveGeometry, eye: import('../../src/core/perspective.ts').PerspectiveEye): PerspectiveRenderResult;
+          setBrush(brush: import('../../src/core/paint.ts').PaintBrush): Promise<CommandResult>;
+          attachBrushPreview(canvas: HTMLCanvasElement | null): void;
+          replayBrushPreview(): Promise<CommandResult>; resetBrushPreview(): void;
+          drawingAvailability(input?: import('../../src/session/paint.ts').StrokeStart): import('../../src/session/paint.ts').DrawingAvailability;
+          setFingerDraw(on: boolean): void; interrupt(reason: import('../../src/session/paint.ts').PaintInterruption): void;
+          selectPaintLayer(id: string | null): CommandResult;
+          beginStroke(input: import('../../src/session/paint.ts').StrokeStart): { kind: 'began'; token: string } | { kind: 'refused'; reason: string };
+          extendStroke(token: string, samples: readonly import('../../src/session/paint.ts').PointerSample[]): CommandResult;
+          endStroke(token: string): Promise<CommandResult>; cancelStroke(token: string): void;
+          state(): { brush: import('../../src/core/paint.ts').PaintBrush; fingerDraw: boolean; tool: Tool; activeLayer: string | null };
+          flush(): Promise<{ kind: 'saved' | 'preparing' }>;
+        };
+        readonly mathGrain: {
+          createRenderer(canvas: HTMLCanvasElement): Renderer;
+          compilePhotoRack: typeof import('../../src/render/math-program.ts').compilePhotoRack;
+          createMathPresets: typeof import('../../src/core/math-graph.ts').createMathPresets;
+          replaceMathNode: typeof import('../../src/core/math-graph.ts').replaceMathNode;
+          createMathBlock: typeof import('../../src/core/math-graph.ts').createMathBlock;
+          createMathLibrary: typeof import('../../src/core/math-definition.ts').createMathLibrary;
+          parseScene(input: unknown): SceneDocument;
+        };
+        readonly paintProof: import('./scenarios/math-remix-proof.scenario.ts').PaintProofTools;
+        // C2 manual-region surface, additive beside C1's authoring hooks.
+        beginSelection(input: import('../../src/session/selection.ts').SelectionGestureStart): { kind: 'began'; token: string } | { kind: 'refused'; reason: string };
+        extendSelection(input: ({kind:'shape';at:{x:number;y:number}}|{kind:'feather';radius:number}) & { token:string;pointerId:number }): import('../../src/session/authoring.ts').CommandResult;
+        endSelection(input: {token:string;pointerId:number}): Promise<import('../../src/session/authoring.ts').CommandResult>;
+        cancelSelection(token?:string): import('../../src/session/authoring.ts').CommandResult;
+        invertSelection(): Promise<import('../../src/session/authoring.ts').CommandResult>;
+        featherSelection(radius:number): Promise<import('../../src/session/authoring.ts').CommandResult>;
+        clearSelection(): Promise<import('../../src/session/authoring.ts').CommandResult>;
+        deselect(): Promise<import('../../src/session/authoring.ts').CommandResult>;
+        initializeSelection(space: import('../../src/core/types.ts').SelectionSpace): Promise<import('../../src/session/authoring.ts').CommandResult>;
+        selectionState(): { selection: import('../../src/core/types.ts').ActiveSelection; preview: {space:import('../../src/core/types.ts').SelectionSpace;size:{width:number;height:number};bytes:readonly number[]}|null;
+          view:import('../../src/core/authoring-view.ts').AuthoringView;neutral:boolean;pending:boolean;target:import('../../src/core/types.ts').OperationTarget;tool:import('../../src/session/authoring.ts').Tool };
+        setOperationTarget(target:import('../../src/core/types.ts').OperationTarget): import('../../src/session/authoring.ts').CommandResult;
+        setSelectionTool(tool:import('../../src/session/authoring.ts').Tool): import('../../src/session/authoring.ts').CommandResult;
+        localOperation(input:{target:OperationTarget;operation:{kind:'recolor'|'fill';color:Oklch|null}|{kind:'clipping';amount:number}}):CommandResult;
+        c2SetSurface(patch:Partial<SceneDocument['surface']>):void;
+        c2SetParallax(enabled:boolean):Promise<void>;
+        overlapPolicy(): import('../../src/core/types.ts').CompositingPolicy|null;
+        projectSwitchState(): {readonly kind:'idle'}|{readonly kind:'finishing';readonly project:import('../../src/core/ids.ts').SceneId};
+        cancelProjectSwitch(): boolean;
+        panAuthoring(delta:{x:number;y:number}):import('../../src/session/authoring.ts').CommandResult;
+        zoomAuthoring(input:{zoom:number;anchor:import('../../src/core/authoring-view.ts').ViewPoint}):import('../../src/session/authoring.ts').CommandResult;
+        pinchAuthoring(input:{from:import('../../src/core/authoring-view.ts').ViewPoint;to:import('../../src/core/authoring-view.ts').ViewPoint;factor:number}):import('../../src/session/authoring.ts').CommandResult;
+        fitAuthoring():import('../../src/session/authoring.ts').CommandResult;
+        setAuthoringLayout(layout:import('../../src/core/authoring-view.ts').AuthoringLayout):void;
+        selectionToSource(point:import('../../src/core/authoring-view.ts').ViewPoint):{x:number;y:number};
+        selectionToView(point:{x:number;y:number},kind?:'css'|'device'):import('../../src/core/authoring-view.ts').ViewPoint;
+        c2Undo():void;
+        c2Redo():void;
+        c2DeleteObject(id:string):void;
+        assetRetention():{activeBytes:number;historyBytes:number;assets:number;dirtyBytes:number;saves:readonly {id:string;revision:number;kind:'active'|'pending';assets:readonly string[];bytes:number;complete:boolean}[]}|null;
+        projectAssets():readonly {asset:string;bytes:readonly number[];path:string;mediaType:string;original:boolean}[];
         authoringState(): AuthoringState;
         historyState(): { canUndo: boolean; canRedo: boolean; undoDepth: number; redoDepth: number };
         previewDocument(): SceneDocument | null;

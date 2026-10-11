@@ -41,6 +41,8 @@ export function Projects({ session, onOpened, onImport, onSample, importLabel = 
     : state.projects.length === 0 ? 'No projects yet' : 'Choose a project to open.';
   return <section class="projects-panel" data-testid="projects-panel" aria-label="Projects" aria-busy={working !== null}>
     <div class="projects-heading"><h2 class="scope-heading">Projects</h2>
+      <button type="button" data-testid="scenes-open" title="Open prepared 3D scenes in a new tab"
+        onClick={() => { window.open('/scenes.html', '_blank', 'noopener'); }}>3D scenes</button>
       <button type="button" data-testid="projects-return" onClick={onOpened}>Return to editor</button>
     </div>
     <p class="projects-state" data-testid="projects-state" role="status">

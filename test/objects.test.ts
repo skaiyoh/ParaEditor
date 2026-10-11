@@ -5,7 +5,7 @@ import { srgbToOklab } from '../src/core/color.ts';
 import type { Plane } from '../src/core/raster.ts';
 import { newObject } from '../src/core/defaults.ts';
 import { applyEdit } from '../src/core/reduce.ts';
-import { sceneDocumentSchema } from '../src/core/schema.ts';
+import { currentDocumentSchema } from '../src/core/schema.ts';
 import { assetId, minimalDocument, OBJECT_IDS, SAM_MODEL } from './fixtures/documents.ts';
 
 const full: Plane<'u8'> = { format: 'u8', size: { width: 2, height: 2 }, data: new Uint8Array(4).fill(255) };
@@ -75,7 +75,7 @@ test('assembled products, flat-color duplicate clusters and nullable depth parse
     const object = { ...newObject({ id: OBJECT_IDS[0], produced, existing: doc.objects }), subject: true };
     const result = applyEdit(doc, { kind: 'object.add', object }, '2026-10-09T14:00:00.000Z');
     assert.equal(result.kind, 'applied');
-    const parsed = sceneDocumentSchema(doc.version).parse(result.doc);
+    const parsed = currentDocumentSchema.parse(result.doc);
     assert.deepEqual(parsed.objects[0]?.produced, produced);
     assert.equal(parsed.objects[0]?.subject, true);
   }

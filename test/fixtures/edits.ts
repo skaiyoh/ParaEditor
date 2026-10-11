@@ -5,11 +5,12 @@
 // written under @ts-expect-error, so a type change that allows one fails the
 // type check.
 
+import { localEffect, liftRemoval, rasterSource } from './composition.ts';
 import type { Edit, RefusalReason } from '../../src/core/edits.ts';
 import type { LightId, ObjectId } from '../../src/core/ids.ts';
 import { isLightId, isObjectId } from '../../src/core/ids.ts';
 import type { Light, ObjectProduced, SceneDocument, SceneObject } from '../../src/core/types.ts';
-import { fiveClusterDocument, LIGHT_IDS, minimalDocument, OBJECT_IDS, uuid } from './documents.ts';
+import { fiveClusterDocument, LIGHT_IDS, minimalDocument, OBJECT_IDS, SAM_MODEL, uuid } from './documents.ts';
 
 export type EditCase = {
   readonly name: string;
@@ -45,7 +46,10 @@ function firstLight(doc: SceneDocument): Light {
 
 /** A new object over the five-cluster document's subject's products: not the subject, no motion. */
 export function tappedObject(id: ObjectId): SceneObject {
-  return { ...subjectOf(fiveClusterDocument()), id, name: 'Tapped', subject: false, motion: { kind: 'none' }, recolor: { kind: 'none' } };
+  const base = subjectOf(fiveClusterDocument());
+  const placement = { translate: { x: 0, y: 0 }, pivot: { x: 1, y: 1 }, scale: 1, rotation: 0 };
+  return { ...base, id, name: 'Tapped', subject: false, motion: { kind: 'none' }, recolor: { kind: 'none' },
+    produced: { ...base.produced, bounds: { x: 0, y: 0, width: 2, height: 2 } }, placement, home: placement };
 }
 
 export function newLightAt(id: LightId, x: number, y: number): Light {
@@ -56,7 +60,7 @@ export function newLightAt(id: LightId, x: number, y: number): Light {
 export function withObjects(count: number): SceneDocument {
   const doc = fiveClusterDocument();
   const objects = Array.from({ length: count }, (_, i) => ({ ...tappedObject(objectId(i)), subject: i === 0 }));
-  return { ...doc, objects };
+  return { ...doc, objects, removals: [] };
 }
 
 /** The five-cluster document with `count` lights. */
@@ -70,7 +74,8 @@ export function minimalWithObject(): SceneDocument {
 }
 
 function withCandidate(produced: ObjectProduced, candidate: number): ObjectProduced {
-  return { ...produced, selection: { ...produced.selection, candidate } };
+  if (produced.provenance.kind !== 'ai') throw new Error('Expected AI fixture provenance.');
+  return { ...produced, provenance: { ...produced.provenance, selection: { ...produced.provenance.selection, candidate } } };
 }
 
 const SUBJECT = OBJECT_IDS[0];
@@ -82,9 +87,25 @@ export function editCases(): readonly EditCase[] {
   const minimal = minimalDocument;
   const refinedProduced: ObjectProduced = {
     ...subjectOf(five()).produced,
-    selection: { kind: 'taps', points: [{ at: { x: 0.4, y: 0.6 }, label: 'include' }], candidate: 2 },
+    provenance: { kind: 'ai', model: SAM_MODEL,
+      selection: { kind: 'taps', points: [{ at: { x: 0.4, y: 0.6 }, label: 'include' }], candidate: 2, size: .5 } },
   };
+  const region = tappedObject(objectId(90));
+  const source = rasterSource();
+  const effect = localEffect();
+  const removal = liftRemoval();
   return [
+    { name: 'layer add', doc: minimal, edit: { kind: 'layer.add', layer: region, index: 0 }, outcome: 'applied' },
+    { name: 'layer remove', doc: minimalWithObject, edit: { kind: 'layer.remove', id: objectId(0) }, outcome: 'applied' },
+    { name: 'layer placement', doc: minimalWithObject, edit: { kind: 'layer.placement', id: objectId(0), value: { translate: { x: 1, y: 0 }, pivot: { x: 1, y: 1 }, scale: 1, rotation: 0 } }, outcome: 'applied' },
+    { name: 'layer opacity', doc: minimalWithObject, edit: { kind: 'layer.opacity', id: objectId(0), opacity: .6 }, outcome: 'applied' },
+    { name: 'layer coverage', doc: minimalWithObject, edit: { kind: 'layer.coverage', id: objectId(0), value: { ...region.produced, depth: { p10: .1, median: .2, p90: .3 } } }, outcome: 'applied' },
+    { name: 'layer depth', doc: minimalWithObject, edit: { kind: 'layer.depth', id: objectId(0), value: { kind: 'plane', disparity: .3 } }, outcome: 'applied' },
+    { name: 'source add', doc: minimal, edit: { kind: 'source.add', source, index: 0 }, outcome: 'applied' },
+    { name: 'source remove', doc: () => ({ ...minimal(), sources: [source] }), edit: { kind: 'source.remove', id: source.id }, outcome: 'applied' },
+    { name: 'removal set', doc: minimal, edit: { kind: 'removal.set', id: removal.id, value: removal, index: 0 }, outcome: 'applied' },
+    { name: 'effect set', doc: minimal, edit: { kind: 'effect.set', id: effect.id, value: effect, index: 0 }, outcome: 'applied' },
+    { name: 'compositing', doc: minimal, edit: { kind: 'compositing', value: 'scene-depth' }, outcome: 'applied' },
     { name: 'title', doc: minimal, edit: { kind: 'title', title: 'Renamed' }, outcome: 'applied' },
     { name: 'title of 80 code points', doc: minimal, edit: { kind: 'title', title: '\u{1F600}'.repeat(80) }, outcome: 'applied' },
     { name: 'title of 81 code points', doc: minimal, edit: { kind: 'title', title: 'x'.repeat(81) }, outcome: 'invalid' },

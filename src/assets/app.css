@@ -16,6 +16,7 @@
   --type-meta: 11px;
   --radius: 8px;
   --r-float: 12px;
+  --font-code: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   font-family: var(--font-ui);
   font-size: var(--type-ui);
   color: var(--text);
@@ -307,6 +308,7 @@ button.layer-row.is-selected:focus-visible,
 .mode-pill > .icon-button { flex: 0 0 44px; padding: 0; }
 .mode-pill > button { border-radius: 999px; }
 .full-status { position: absolute; z-index: 3; left: max(16px, env(safe-area-inset-left)); bottom: calc(30px + env(safe-area-inset-bottom)); max-width: calc((100% - var(--pill-width)) / 2 - 32px); padding: 0; }
+.editor.is-zoomed .full-status { padding: 6px 8px; background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-float); }
 .notice-slot { position: absolute; z-index: 5; top: 8px; left: 50%; transform: translateX(-50%); width: min(320px, calc(100% - 32px)); display: grid; justify-items: center; pointer-events: none; }
 .notice-slot .preparing { grid-area: 1 / 1; align-self: start; position: static; max-width: 100%; border: 1px solid var(--hairline); border-radius: var(--r-float); text-align: center; pointer-events: auto; }
 .notice-slot .selection-meter { grid-area: 1 / 1; position: relative; top: 0; left: auto; transform: none; }
@@ -369,7 +371,7 @@ button.layer-row.is-selected:focus-visible,
 .notice-slot > .sample-notice { grid-row: 3; margin-top: 4px; }
 [data-testid="compare-hold"] { -webkit-user-select: none; -webkit-touch-callout: none; }
 .full-editor:has(.panel-color:not([hidden])) .notice-slot { left: calc((100% - 280px) / 2); width: min(320px, calc(100% - 456px)); }
-.phone-stage > .notice-slot { z-index: 5; top: 12px; }
+.phone-picture > .notice-slot { z-index: 5; top: 12px; }
 .phone-tools .color-picker .panel-title { justify-content: flex-end; }
 .phone-tools .color-picker .panel-title h2 { display: none; }
 .phone-tools .color-controls { padding-top: 8px; }
@@ -479,7 +481,7 @@ html:has(.gallery-piece), body:has(.gallery-piece) { overflow: hidden; overscrol
   .phone-editor .context-bar .swatch-grid { gap: 4px; }
   .phone-stage .parallax-debug-area { bottom: 0; }
   /* Centered over the stage and narrow enough to clear the Fry rail on both sides. */
-  .phone-editor:has(.context-bar) .phone-stage > .notice-slot { width: min(320px, calc(100% - 144px - 2 * env(safe-area-inset-left))); }
+  .phone-editor:has(.context-bar) .phone-picture > .notice-slot { width: min(320px, calc(100% - 144px - 2 * env(safe-area-inset-left))); }
 }
 @media (orientation: landscape) and (max-height: 500px) {
   .phone-editor .context-bar { left: calc(76px + env(safe-area-inset-left)); bottom: calc(var(--phone-sheet-height) + 4px); grid-template-columns: minmax(44px, 1fr) minmax(0, auto) 88px 44px; gap: 4px; }
@@ -488,6 +490,8 @@ html:has(.gallery-piece), body:has(.gallery-piece) { overflow: hidden; overscrol
   .phone-editor .context-bar > .icon-button { grid-column: 4; }
   /* Five 44 px tools on the left, the Download key on the right. */
   .phone-editor .mode-pill { top: calc(env(safe-area-inset-top) + 3px); bottom: auto; left: calc(236px + env(safe-area-inset-left)); right: calc(120px + env(safe-area-inset-right)); }
+  /* Brush and Eraser make seven strip tools; the pill starts after them. */
+  .phone-editor:has([data-testid="tool-brush"]) .mode-pill { left: calc(324px + env(safe-area-inset-left)); }
 }
 @media (orientation: landscape) and (max-height: 500px) and (max-width: 700px) {
   .phone-editor .mode-pill { top: auto; bottom: calc(var(--phone-sheet-height) + 4px); left: calc(76px + env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right)); }
@@ -500,4 +504,234 @@ html:has(.gallery-piece), body:has(.gallery-piece) { overflow: hidden; overscrol
   .phone-sheet[data-expanded="true"] .phone-sheet-content { display: contents; }
   .phone-sheet[data-expanded="true"] .phone-tabs { grid-column: 2; grid-row: 1; }
   .phone-sheet[data-expanded="true"] .phone-tools { grid-column: 1 / -1; grid-row: 2; }
+  /* Remix needs reading room on a landscape phone: the sheet takes most of the height, leaving a strip of the
+     picture, and the Remix head scrolls away with its level instead of staying pinned. */
+  .phone-sheet[data-expanded="true"]:has(.phone-tools.panel-remix:not([hidden])) { height: calc(100dvh - var(--phone-top) - 120px); }
+  .phone-tools.panel-remix .remix-head { position: static; }
+}
+
+/* Selection */
+.full-editor .viewer { overflow: hidden; }
+.phone-editor .phone-stage { overflow: hidden; }
+.tool-cluster > button[aria-pressed="true"] { background: var(--raised); outline: 1px solid var(--text); outline-offset: -1px; }
+.fit-readout { display: inline-flex; align-items: center; gap: 4px; min-height: 44px; padding: 0 8px; font-size: var(--type-label); }
+.selection-bar { flex-wrap: wrap; justify-content: center; width: max-content; max-width: calc(100% - 176px); }
+.selection-choices { display: flex; gap: 4px; }
+.selection-segment { display: flex; align-items: center; padding: 4px; border-radius: var(--radius); background: var(--ground); }
+.selection-segment button { padding-inline: 10px; white-space: nowrap; }
+.selection-segment button[aria-pressed="true"] { background: var(--raised); outline: 1px solid var(--text); outline-offset: -1px; }
+.selection-options { display: flex; align-items: center; gap: 4px; }
+.selection-range { display: grid; width: 112px; gap: 0; padding-inline: 6px; }
+.selection-range > span { display: flex; align-items: center; gap: 4px; height: 20px; color: var(--secondary); font-size: var(--type-label); }
+.selection-range output { margin-left: auto; font-variant-numeric: tabular-nums; }
+.selection-range input { width: 100%; height: 44px; min-width: 44px; margin: 0; }
+.selection-clip { width: 88px; }
+.selection-space { max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 8px; color: var(--secondary); font-size: var(--type-meta); background: var(--panel); border: 1px solid var(--hairline); border-radius: 999px; }
+/* On phones (the compact tier, in either orientation) the chip keeps the space's whole name; its title still says what it is. */
+.phone-editor .selection-space-prefix { display: none; }
+.selection-done { flex-shrink: 0; }
+.selection-treatment { margin: 12px 16px 0; }
+.layer-overlap { color: var(--secondary); font-size: var(--type-label); padding: 12px 16px; margin: 0; }
+.selection-outline { position: fixed; z-index: 1; pointer-events: none; overflow: hidden; clip-path: inset(max(0px, calc(52px - var(--selection-y))) 0 0); }
+.selection-outline path { stroke: var(--ground); stroke-width: 1.5px; stroke-dasharray: 4 4; animation: selection-march 1s linear infinite; }
+.selection-outline .selection-outline-base { stroke: var(--text); stroke-dasharray: none; animation: none; }
+@keyframes selection-march { to { stroke-dashoffset: -8; } }
+@media (prefers-reduced-motion: reduce) { .selection-outline path { animation: none; } }
+@media (min-width: 744px) and (max-width: 1100px) and (min-height: 501px) {
+  .selection-bar { max-width: calc(100% - 176px); }
+  .selection-options { order: 3; }
+}
+@media (width < 744px), (max-height: 500px) {
+  .phone-download { display: inline-flex; align-items: center; gap: 4px; padding-inline: 8px; }
+  .phone-projects-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; }
+  /* Reserve a readout band; clip zoomed pixels and the fixed selection outline below it. */
+  .phone-picture { position: absolute; inset: 0; overflow: hidden; clip-path: inset(0); }
+  .phone-stage:has(> .photo-name) > .phone-picture { top: 52px; }
+  .phone-stage > .photo-name { position: absolute; top: 2px; left: max(72px, calc(64px + env(safe-area-inset-left))); right: max(8px, env(safe-area-inset-right)); z-index: 3; display: flex; justify-content: center; align-items: center; gap: 8px; width: max-content; max-width: calc(100% - 80px - env(safe-area-inset-left) - env(safe-area-inset-right)); margin-inline: auto; padding: 0 4px 0 8px; font-size: var(--type-label); background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-float); }
+  .phone-stage > .photo-name > span { overflow: hidden; text-overflow: ellipsis; }
+  .phone-editor .selection-bar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 4px; width: auto; max-width: none; }
+  .phone-editor .selection-choices { justify-content: center; min-width: 0; }
+  .phone-editor .selection-segment { flex-shrink: 0; padding: 2px; }
+  .phone-editor .selection-segment button { min-width: 44px; padding-inline: 6px; font-size: var(--type-label); }
+  .phone-editor .selection-options { min-width: 0; }
+  .phone-editor .selection-bar .selection-options > button { min-width: 44px; padding-inline: 6px; flex-shrink: 0; }
+  .phone-editor .selection-range { width: 80px; flex-shrink: 0; padding-inline: 4px; }
+  .phone-editor .selection-range > span { font-size: var(--type-meta); }
+  .phone-editor .selection-clip { width: 56px; }
+  .phone-editor .selection-space { flex: 1; min-width: 0; padding-inline: 4px; }
+  .phone-editor .selection-done { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
+}
+@media (orientation: landscape) and (max-height: 500px) {
+  .phone-editor .selection-bar { display: flex; flex-wrap: nowrap; }
+  .phone-editor .selection-choices { flex-shrink: 0; }
+  .phone-editor .selection-options { flex: 0 1 auto; }
+  .phone-editor .selection-space { flex: 0 1 auto; }
+}
+
+/* Remix (MRX5u): one panel for the photo and brush recipes; input at the top, output at the bottom, at every level.
+   Three blocks, one per lane: levels (shell, blocks, functions, choosers), source, and brush. Each lane edits only its own block. */
+/* remix: levels */
+.floating-panel.panel-remix { width: 400px; }
+.panel-remix .floating-panel-body { display: flex; flex-direction: column; }
+.full-editor:has(.panel-remix:not([hidden])) .notice-slot { left: calc(488px + (100% - 488px) / 2); width: min(320px, calc(100% - 520px)); }
+
+/* The head stays put while a level scrolls: title, target, path and, for the brush, its pad. */
+.remix-head { position: sticky; top: 0; z-index: 3; flex-shrink: 0; background: var(--panel); border-bottom: 1px solid var(--hairline); }
+.remix-head .panel-title { gap: 8px; }
+.remix-state { display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--secondary); font-size: var(--type-label); white-space: nowrap; }
+.remix-state[data-state="save-failed"] { color: var(--text); font-weight: 600; }
+.remix-state button { min-height: 44px; margin-block: -12px; padding: 0 8px; font-weight: 400; }
+.remix-target { margin: 8px 16px 0; }
+.remix-path { display: flex; align-items: center; min-height: 44px; padding-inline: 4px 8px; }
+.remix-path > .icon-button { flex: 0 0 44px; }
+.remix-crumbs { flex: 1; display: flex; align-items: center; min-width: 0; margin: 0; padding: 0 0 0 12px; list-style: none; font-size: var(--type-label); }
+.remix-path > .icon-button + .remix-crumbs { padding-left: 0; }
+.remix-crumbs li { display: flex; align-items: center; min-width: 0; flex-shrink: 1; }
+.remix-crumbs li:last-child { flex-shrink: 0; max-width: 60%; }
+.remix-crumbs li + li::before { content: '/'; padding-inline: 2px; color: var(--secondary); }
+.remix-crumbs button, .remix-crumbs [aria-current] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remix-crumbs button { min-height: 44px; padding: 0 6px; color: var(--secondary); font-size: var(--type-label); }
+.remix-crumbs [aria-current] { padding: 0 6px; font-weight: 600; }
+
+.remix-level { flex-shrink: 0; padding-block: 4px 12px; animation: panel-open 140ms ease-out; }
+/* The level takes focus so a screen reader and the keyboard start there; its rows carry the visible focus. */
+.remix-level:focus { outline: none; }
+.remix-level .layer-name-input { min-height: 44px; }
+.remix-insertion { height: 2px; background: var(--text); list-style: none; }
+@media (prefers-reduced-motion: reduce) { .remix-level { animation: none; } }
+.remix-marker { display: flex; align-items: center; min-height: 32px; padding: 0 16px; color: var(--secondary); font-size: var(--type-meta); }
+.remix-note { padding: 4px 16px 8px; color: var(--secondary); font-size: var(--type-label); line-height: 1.5; }
+
+/* Level 1: the block stack. */
+.remix-list, .remix-chain { margin: 0; padding: 0 8px; list-style: none; }
+.remix-block, .remix-fn { border-radius: var(--radius); }
+.remix-block + .remix-block { margin-top: 4px; }
+.remix-block.is-selected, .remix-fn.is-selected { background: var(--raised); outline: 1px solid var(--text); outline-offset: -1px; }
+.remix-block.is-selected button:hover:not(:disabled), .remix-fn.is-selected button:hover:not(:disabled) { background: var(--hairline); }
+.remix-block-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) 52px 44px; align-items: center; min-height: 56px; }
+.remix-handle { width: 44px; height: 56px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--secondary); cursor: grab; touch-action: none; }
+.remix-main { display: grid; gap: 2px; align-content: center; min-width: 0; min-height: 56px; padding: 8px 4px; text-align: left; border-radius: 0; }
+.remix-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-weight: 600; }
+.remix-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remix-tag { flex-shrink: 0; color: var(--secondary); font-size: var(--type-meta); font-weight: 400; }
+.remix-summary, .remix-flow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--secondary); font-size: var(--type-label); font-weight: 400; }
+.remix-fn .remix-flow { white-space: normal; overflow-wrap: anywhere; }
+.remix-block.is-bypassed .remix-name { color: var(--secondary); }
+.remix-open { width: 44px; height: 56px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--secondary); }
+.remix-detail { padding-bottom: 4px; }
+.remix-detail .range-row { padding-inline: 12px 8px; }
+.remix-actions { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; }
+.remix-actions button { display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; font-size: var(--type-label); }
+.remix-actions button[aria-disabled="true"] { color: var(--secondary); }
+.remix-footer > button[aria-disabled="true"] { color: var(--secondary); }
+.remix-actions .remix-forward { margin-left: auto; }
+.remix-reason { margin: 0 8px 8px; padding: 8px 12px; border-radius: var(--radius); background: var(--ground); font-size: var(--type-label); line-height: 1.5; }
+.remix-add { display: flex; align-items: center; gap: 8px; width: calc(100% - 16px); margin: 4px 8px 0; padding: 0 10px; color: var(--secondary); text-align: left; }
+
+/* Level 2: the function chain, one spine with a dot per function. */
+.remix-chain { position: relative; }
+.remix-chain::before { content: ''; position: absolute; top: 0; bottom: 0; left: 30px; width: 1px; background: var(--hairline); }
+.remix-fn + .remix-fn, .remix-fn + .remix-slot, .remix-slot + .remix-fn { margin-top: 4px; }
+.remix-fn-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center; min-height: 56px; }
+.remix-dot { position: relative; z-index: 1; justify-self: center; width: 9px; height: 9px; border: 1px solid var(--secondary); border-radius: 50%; background: var(--panel); }
+.remix-fn.is-selected .remix-dot { border-color: var(--text); background: var(--text); }
+.remix-fn.is-branch .remix-fn-row { grid-template-columns: 44px 20px minmax(0, 1fr) 44px; }
+.remix-fn.is-branch .remix-dot { grid-column: 2; }
+.remix-fn.is-branch .remix-fn-row::before { content: ''; grid-column: 1; grid-row: 1; justify-self: end; width: 18px; height: 1px; margin-right: -5px; background: var(--hairline); }
+.remix-slot { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; width: 100%; min-height: 44px; padding: 0; color: var(--secondary); font-size: var(--type-label); text-align: left; }
+.remix-slot > svg { position: relative; z-index: 1; justify-self: center; border-radius: 50%; background: var(--panel); }
+.remix-footer { display: flex; flex-direction: column; margin-top: 8px; border-top: 1px solid var(--hairline); padding-top: 4px; }
+.remix-footer > button { display: flex; align-items: center; gap: 12px; padding-inline: 16px; text-align: left; border-radius: 0; }
+
+/* Choosers: compatible first, then what needs a different input. */
+.remix-choice { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-height: 56px; padding: 8px 16px; text-align: left; border-radius: 0; }
+.remix-choice[aria-disabled="true"] .remix-name { color: var(--secondary); }
+.remix-choice[aria-expanded="true"] { background: var(--raised); }
+/* A control a remix took over reads as off, with its reason below it. */
+.range-row:has(input[type="range"]:disabled) { color: var(--secondary); }
+.range-row input[type="range"]:disabled { opacity: .5; cursor: default; }
+/* On phones the Remix tab already names the panel; its title row keeps only the state. */
+.phone-tools .remix-head .panel-title { justify-content: flex-end; }
+.phone-tools .remix-head .panel-title h2 { display: none; }
+/* remix: levels end */
+
+/* remix: source */
+/* Level 3: the actual source. */
+.remix-fn-head { display: grid; gap: 4px; padding: 12px 16px 8px; }
+.remix-fn-head > strong { font-weight: 600; }
+.remix-signature { color: var(--secondary); font: 12px/16px var(--font-code); overflow-wrap: anywhere; }
+.remix-code { display: grid; grid-template-columns: auto minmax(0, 1fr); margin: 4px 16px 0; max-height: 300px; overflow: auto; overscroll-behavior: auto; border: 1px solid var(--hairline); border-radius: var(--radius); background: var(--ground); font: 13px/20px var(--font-code); font-variant-numeric: normal; tab-size: 2; }
+.remix-code.is-editing { border-color: var(--text); overscroll-behavior: contain; }
+.remix-code.is-invalid { border-color: var(--error); }
+.remix-gutter { position: sticky; left: 0; z-index: 1; margin: 0; padding: 10px 6px 10px 10px; background: var(--ground); color: var(--secondary); font: inherit; text-align: right; user-select: none; -webkit-user-select: none; }
+.remix-gutter .is-error, .remix-source-number.is-error { color: var(--text); font-weight: 600; }
+.remix-gutter .is-error::before, .remix-source-number.is-error::before { content: '! '; }
+.remix-source { grid-column: 1 / -1; min-width: 0; padding: 10px 0; color: var(--text); }
+.remix-source-row { display: grid; grid-template-columns: calc(var(--remix-number-width) + 16px) minmax(0, 1fr); align-items: start; }
+.remix-source-number { padding: 0 6px 0 10px; color: var(--secondary); text-align: right; user-select: none; -webkit-user-select: none; }
+.remix-source-line { min-width: 0; min-height: 20px; margin: 0; padding: 0 12px 0 calc(6px + 2ch); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; text-indent: -2ch; }
+.remix-editor { margin: 0; padding: 10px 12px 10px 6px; color: var(--text); font: inherit; white-space: pre; }
+.remix-editor { display: block; width: 100%; min-width: max-content; border: 0; background: transparent; resize: none; overflow: hidden; outline: none; caret-color: var(--text); }
+.remix-source .k, .remix-source .p { color: var(--secondary); }
+.remix-error { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 8px 16px 0; font-size: var(--type-label); line-height: 1.5; }
+.remix-error button { padding: 0 10px; font-size: var(--type-label); }
+.remix-code-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px 4px; }
+.remix-code-actions button { display: inline-flex; align-items: center; gap: 8px; background: var(--raised); }
+.remix-code-actions button:hover:not(:disabled) { background: var(--hairline); }
+.remix-kept-draft { padding: 8px 16px 0; }
+.remix-help { margin: 8px 16px 0; border-top: 1px solid var(--hairline); }
+.remix-help > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; color: var(--secondary); font-size: var(--type-label); cursor: pointer; list-style: none; }
+.remix-help > summary::-webkit-details-marker { display: none; }
+.remix-help > summary .disclosure-icon { display: inline-flex; transition: transform 140ms ease-out; }
+.remix-help[open] > summary .disclosure-icon { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .remix-help > summary .disclosure-icon { transition: none; } }
+.remix-help p { color: var(--secondary); font-size: var(--type-label); line-height: 1.5; }
+.remix-help .remix-code { margin: 8px 0; }
+.remix-builtins { margin: 8px 0 12px; color: var(--secondary); font: 12px/18px var(--font-code); overflow-wrap: anywhere; }
+/* remix: source end */
+
+/* remix: brush */
+/* Brush: the canonical stroke pad stays visible while the controls scroll. */
+.remix-pad { margin: 8px 16px 0; overflow: hidden; border: 1px solid var(--hairline); border-radius: var(--radius); background: var(--ground); }
+.remix-pad[data-backdrop="light"] { background: var(--text); }
+.remix-pad canvas, .remix-pad svg { display: block; width: 100%; height: 120px; touch-action: none; }
+.remix-pad-bar { display: flex; align-items: center; justify-content: space-between; padding: 0 4px 0 16px; border-top: 1px solid var(--hairline); background: var(--panel); }
+.remix-pad-bar > span { color: var(--secondary); font-size: var(--type-label); }
+.remix-pad-bar > div { display: flex; gap: 4px; }
+.remix-pad-bar button { font-size: var(--type-label); padding: 0 12px; }
+.remix-pad-bar button[aria-pressed="true"] { background: var(--raised); outline: 1px solid var(--text); outline-offset: -1px; }
+.remix-pad-help { padding: 8px 16px 12px; color: var(--secondary); font-size: var(--type-label); line-height: 1.5; }
+.remix-basics { padding-bottom: 4px; border-bottom: 1px solid var(--hairline); }
+.remix-basics .remix-color-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 44px; padding-inline: 16px; font-size: var(--type-label); }
+.remix-basics .remix-color-row button { display: inline-flex; align-items: center; gap: 8px; justify-self: start; padding: 0 8px; }
+.remix-basics .enable-switch { justify-self: end; }
+.remix-switch-row { display: grid; grid-template-columns: minmax(0, 1fr) 52px; align-items: center; padding-left: 16px; font-size: var(--type-label); }
+/* remix: brush end */
+
+/* paint */
+.full-editor .fry-rail #paint-size, .phone-editor .fry-rail #paint-size { height: 96px; }
+.paint-bar { flex-direction: column; align-items: stretch; width: max-content; max-width: calc(100% - 176px); }
+.paint-heading, .paint-options { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.paint-heading { flex-wrap: wrap; }
+.paint-heading strong { padding-inline: 8px; font-size: var(--type-ui); font-weight: 600; line-height: 16px; }
+.paint-reason { flex: 1; padding: 8px; color: var(--secondary); font-size: var(--type-label); }
+.paint-done { margin-left: auto; }
+.paint-options { overflow-x: auto; }
+.paint-options > button { flex-shrink: 0; white-space: nowrap; }
+.paint-options > button[aria-pressed="true"] { background: var(--raised); outline: 1px solid var(--text); outline-offset: -1px; }
+.paint-options > button[aria-pressed="true"]:focus-visible { outline-width: 2px; outline-offset: -2px; }
+.paint-opacity { display: grid; flex: 0 0 120px; gap: 0; margin-inline: 6px; }
+.paint-opacity > span { display: flex; align-items: center; height: 20px; color: var(--secondary); font-size: var(--type-label); }
+.paint-opacity output { margin-left: auto; }
+.paint-opacity input { width: 120px; height: 44px; margin: 0; }
+@media (width < 744px), (max-height: 500px) {
+  .phone-editor .paint-bar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 4px; width: auto; max-width: none; }
+  .phone-editor .paint-options > button { min-width: 44px; padding-inline: 8px; }
+  .phone-strip .tool-cluster:has([data-testid="tool-brush"]) { min-width: 0; overflow-x: auto; }
+  .phone-strip .tool-cluster:has([data-testid="tool-brush"]) > button { flex-shrink: 0; }
+}
+/* paint end */
+/* Portrait phones: with Brush and Eraser in the strip, the crunched key keeps its icon and its accessible name, not its visible label. */
+@media (orientation: portrait) and (max-width: 743px) {
+  .phone-strip:has([data-testid="tool-brush"]) .primary-action { font-size: 0; gap: 0; padding-inline: 12px; }
 }

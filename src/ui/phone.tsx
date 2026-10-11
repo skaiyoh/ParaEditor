@@ -7,17 +7,22 @@ import type { DemoSession } from '../session/scene.ts';
 import { GestureRange, Node, RangeControl } from './controls.tsx';
 import { Icon } from './icons.tsx';
 import { ContextBar, Layers } from './layers.tsx';
-import { CompareControls } from './target.tsx';
+import { TargetReadout, CompareControls } from './target.tsx';
+import type { RemixModel } from './remix-model.ts';
+import type { PaintModel } from './paint-model.ts';
+import { PaintSize, PaintTools } from './paint-tools.tsx';
 
-type PhoneTab = 'adjust' | 'layers' | 'color' | 'actions';
-const tabs = [
+type PhoneTab = 'adjust' | 'layers' | 'color' | 'actions' | 'remix';
+const baseTabs = [
   { id: 'adjust', label: 'Adjust', name: 'Adjustments' },
   { id: 'layers', label: 'Layers', name: 'Layers' },
   { id: 'color', label: 'Color', name: 'Color' },
   { id: 'actions', label: 'Actions', name: 'Actions' },
 ] satisfies readonly { id: PhoneTab; label: string; name: string }[];
 
-export function PhoneFrame({ state, session, status, preparing, busy, touch, modelsReady, projectsOpen, projects, inspector, color, colorDot, share, facts, onColorApplied, onProjects, onOpen, onSample, onDownload, onMotion, onSymbols, onParallax, children }: {
+export function PhoneFrame({ paint = null, paintBar, selectionBar, selectionActive, onSelection, fit, state, session, status, preparing, busy, touch, modelsReady, projectsOpen, projects, inspector, color, colorDot, remix, remixRequest, colorRequest, fry, share, facts, onColorApplied, onProjects, onOpen, onSample, onDownload, onMotion, onSymbols, onParallax, children }: {
+  readonly paint?: PaintModel | null; readonly paintBar?: ComponentChildren;
+  readonly selectionBar: ComponentChildren; readonly selectionActive: boolean; readonly onSelection: () => void; readonly fit: number;
   readonly state: ReturnType<DemoSession['snapshot']>; readonly session: DemoSession;
   readonly status: string; readonly busy: boolean; readonly touch: boolean; readonly modelsReady: boolean;
   readonly preparing: string | null;
@@ -25,6 +30,8 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
   readonly onDownload: () => void; readonly onMotion: () => void; readonly onSymbols: () => void;
   readonly onParallax: () => void; readonly children: (onTap: DemoSession['tap']) => ComponentChildren; readonly inspector: ComponentChildren;
   readonly color: (active: boolean) => ComponentChildren; readonly colorDot: ComponentChildren;
+  readonly remix?: ComponentChildren; readonly remixRequest?: number; readonly colorRequest?: number;
+  readonly fry?: RemixModel['fry'];
   readonly share: ComponentChildren; readonly facts: ComponentChildren;
   readonly onColorApplied: (color: Oklch | null) => void;
   readonly projectsOpen: boolean; readonly projects: (onImport: () => void) => ComponentChildren; readonly onProjects: () => void;
@@ -36,10 +43,32 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
   const opener = useRef<HTMLButtonElement | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState<PhoneTab>('adjust');
+  const hasRemix = remix !== undefined && remix !== null;
+  const tabs: readonly { id: PhoneTab; label: string; name: string }[] = hasRemix
+    ? [...baseTabs, { id: 'remix', label: 'Remix', name: 'Remix' }] : baseTabs;
+  const fryReason = fry?.kind === 'unavailable' ? fry.reason : undefined;
+  const previousRemixRequest = useRef(remixRequest);
+  const previousColorRequest = useRef(colorRequest);
   const sceneId = scene?.doc.id;
   const selected = scene?.doc.objects.find((object) => object.id === scene.selected);
   const history = session.historyState();
   useLayoutEffect(() => { setExpanded(sceneId !== undefined); setTab('adjust'); }, [sceneId]);
+  useLayoutEffect(() => {
+    if (hasRemix && remixRequest !== undefined && remixRequest !== previousRemixRequest.current) {
+      setTab('remix'); setExpanded(true);
+      const button = document.getElementById('phone-tab-remix');
+      if (button instanceof HTMLButtonElement) opener.current = button;
+    }
+    previousRemixRequest.current = remixRequest;
+  }, [hasRemix, remixRequest]);
+  useLayoutEffect(() => {
+    if ((hasRemix || paint !== null) && colorRequest !== undefined && colorRequest !== previousColorRequest.current) {
+      setTab('color'); setExpanded(true);
+      const button = document.getElementById('phone-tab-color');
+      if (button instanceof HTMLButtonElement) opener.current = button;
+    }
+    previousColorRequest.current = colorRequest;
+  }, [hasRemix, paint !== null, colorRequest]);
   const motionEnabled = scene?.doc.motion.enabled ?? false;
   const previousMotion = useRef(motionEnabled);
   useLayoutEffect(() => {
@@ -80,7 +109,8 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
   }, [expanded, projectsOpen, status]);
   useLayoutEffect(() => {
     const escape = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' || event.defaultPrevented || !expanded || projectsOpen || document.querySelector('dialog[open]') !== null || session.authoringState().gesture !== null) return;
+      if (event.key !== 'Escape' || event.defaultPrevented || !expanded || projectsOpen || document.querySelector('dialog[open]') !== null || session.authoringState().gesture !== null || ['rectangle', 'freehand'].includes(session.authoringState().tool)) return;
+      if (event.target instanceof HTMLTextAreaElement && event.target.closest('.panel-remix') !== null) return;
       event.preventDefault();
       if (event.target instanceof HTMLInputElement) event.target.dispatchEvent(new Event('cancel'));
       setExpanded(false);
@@ -106,16 +136,19 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
     <header class="top-bar phone-strip">
       <span class="photo-name visually-hidden">{scene?.doc.frame.original.name ?? 'No photo open'}</span>
       <div class="tool-cluster" aria-label="Photo tools">
-        <button class="icon-button" type="button" data-testid="projects-toggle" aria-label="Projects" title="Projects" aria-pressed={projectsOpen} aria-expanded={projectsOpen} aria-controls="phone-projects" onClick={onProjects}><Icon name="projects" /></button>
-        {(['actions', 'adjust', 'layers'] satisfies readonly PhoneTab[]).map((name) => <button key={name} class="icon-button" type="button" data-testid={`tool-${name}`} aria-label={name === 'adjust' ? 'Adjustments' : name === 'actions' ? 'Actions' : 'Layers'} title={name === 'adjust' ? 'Adjustments' : name === 'actions' ? 'Actions' : 'Layers'} aria-expanded={!projectsOpen && expanded && tab === name} aria-controls={`panel-${name}`} onClick={(event) => openTab(name, event.currentTarget)}><Icon name={name} /></button>)}
+        {(['actions', 'adjust'] satisfies readonly PhoneTab[]).map((name) => <button key={name} class="icon-button" type="button" data-testid={`tool-${name}`} aria-label={name === 'adjust' ? 'Adjustments' : name === 'actions' ? 'Actions' : 'Layers'} title={name === 'adjust' ? 'Adjustments' : name === 'actions' ? 'Actions' : 'Layers'} aria-expanded={!projectsOpen && expanded && tab === name} aria-controls={`panel-${name}`} onClick={(event) => openTab(name, event.currentTarget)}><Icon name={name} /></button>)}
+        <button class="icon-button" type="button" data-testid="tool-selection" aria-label="Selection" title="Selection" aria-pressed={selectionActive} disabled={scene === null} onClick={() => { setExpanded(false); if (projectsOpen) onProjects(); onSelection(); }}><Icon name="selection" /></button>
+        {paint !== null && <PaintTools paint={paint} disabled={scene === null} />}
+        <button class="icon-button" type="button" data-testid="tool-layers" aria-label="Layers" title="Layers" aria-expanded={!projectsOpen && expanded && tab === 'layers'} aria-controls="panel-layers" onClick={(event) => openTab('layers', event.currentTarget)}><Icon name="layers" /></button>
         <button class="icon-button" type="button" data-testid="tool-color" aria-label="Color" title="Color" aria-expanded={!projectsOpen && expanded && tab === 'color'} aria-controls="panel-color" onClick={(event) => openTab('color', event.currentTarget)}>{colorDot}</button>
       </div>
-      <button class="primary-action" type="button" disabled={scene === null || busy || projectsOpen} onClick={onDownload}><Icon name="download" />Download</button>
+      <button class={selectionActive ? "phone-download" : "primary-action"} type="button" disabled={scene === null || busy || projectsOpen} onClick={onDownload}><Icon name="download" />Download</button>
       <input ref={fileInput} type="file" accept="image/jpeg,image/png" hidden onChange={(event) => { onOpen(event.currentTarget.files?.[0]); event.currentTarget.value = ''; }} />
       {touch && <input ref={cameraInput} type="file" accept="image/jpeg,image/png" capture="environment" hidden onChange={(event) => { onOpen(event.currentTarget.files?.[0]); event.currentTarget.value = ''; }} />}
     </header>
     <section class="phone-stage" aria-label="Photo viewer" aria-busy={busy}>
-      {children(selectAt)}
+      <div class="phone-picture" hidden={scene === null || projectsOpen}>{children(selectAt)}</div>
+      {scene !== null && !projectsOpen && <TargetReadout session={session} fit={fit} />}
       {!projectsOpen && preparing !== null && <p class="preparing" data-testid="preparing">{preparing}</p>}
       {projectsOpen && <div id="phone-projects">{projects(takePhoto)}</div>}
       {scene === null && !projectsOpen && <div class="empty-stage"><div class="empty-actions">
@@ -123,11 +156,14 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
         <button type="button" onClick={onSample}>Try a sample</button>
       </div></div>}
     </section>
-    {!projectsOpen && <aside class="fry-rail" data-testid="fry-rail" aria-label="Fry">
+    {!projectsOpen && <aside class="fry-rail" data-testid="fry-rail" aria-label="Fry" title={fryReason}>
       <label for="style-fry">Fry</label>
-      <GestureRange session={session} valueFor={(fry) => ({ kind: 'fry', fry })} id="style-fry" data-testid="style-fry" min="0" max="1" step="0.01" value={scene?.doc.style.fry ?? 0.6} disabled={scene === null}
+      <GestureRange session={session} valueFor={(fry) => ({ kind: 'fry', fry })} id="style-fry" data-testid="style-fry" min="0" max="1" step="0.01" value={scene?.doc.style.fry ?? 0.6} disabled={scene === null || fryReason !== undefined}
+        aria-describedby={fryReason === undefined ? undefined : 'style-fry-reason'}
         style={{ '--fill': `${(scene?.doc.style.fry ?? 0.6) * 100}%` }} />
       <output for="style-fry" data-testid="value-fry">{(scene?.doc.style.fry ?? 0.6).toFixed(2)}</output>
+      {fryReason !== undefined && <span class="visually-hidden" id="style-fry-reason">{fryReason}</span>}
+      {paint !== null && paint.tool !== null && <PaintSize paint={paint} />}
     </aside>}
     <section ref={sheet} class="phone-sheet" aria-label="Photo controls" hidden={projectsOpen} data-expanded={expanded}>
       <div class="phone-sheet-heading">
@@ -144,7 +180,9 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
           {id === 'adjust' && inspector}
           {id === 'layers' && <Layers scene={scene} session={session} full />}
           {id === 'color' && color(expanded && !projectsOpen && tab === 'color')}
+          {id === 'remix' && remix}
           {id === 'actions' && <>
+            <button class="phone-projects-row" type="button" data-testid="projects-toggle" aria-pressed={projectsOpen} aria-expanded={projectsOpen} aria-controls="phone-projects" onClick={onProjects}><Icon name="projects" />Projects</button>
             <h3 class="panel-heading">Photo</h3><div class="photo-actions">
               <button type="button" data-testid="open-photo" onClick={() => fileInput.current?.click()}><Icon name="open" />Open</button>
               <button type="button" data-testid="try-sample" onClick={onSample}><Icon name="sample" />Try a sample</button>
@@ -156,7 +194,7 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
       </div>
     </section>
     {scene !== null && !projectsOpen && <>
-      {selected !== undefined && <ContextBar key={selected.id} scene={scene} object={selected} session={session} onColorApplied={onColorApplied} />}
+      {selectionBar ?? (paint !== null && paint.tool !== null ? paintBar : null) ?? (selected !== undefined && <ContextBar key={selected.id} scene={scene} object={selected} session={session} onColorApplied={onColorApplied} />)}
       <div class="mode-rail mode-pill phone-toolbar" data-testid="mode-pill" role="group" aria-label="Viewer modes">
         <button type="button" data-testid="motion-enabled" aria-pressed={scene.doc.motion.enabled} onClick={onMotion}><Icon name="motion" />Motion</button>
         <button type="button" data-testid="symbols-enabled" aria-pressed={scene.doc.symbols.enabled} onClick={onSymbols}><Icon name="symbols" />Symbols</button>

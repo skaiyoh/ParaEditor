@@ -11,7 +11,7 @@ import type { Migration } from '../src/core/migrate.ts';
 import type { Result } from '../src/core/result.ts';
 import { parseDocument, parseDocumentWith, peekVersion, type ParseError } from '../src/core/schema.ts';
 import type { SceneDocument, SceneDocumentAt } from '../src/core/types.ts';
-import { assetId, fiveClusterDocument, invalidVariants, minimalDocument, setAt, validDocuments, WRITER, type Key } from './fixtures/documents.ts';
+import { assetId, fiveClusterDocument, invalidVariants, legacyMinimalDocument, minimalDocument, setAt, validDocuments, WRITER, type Key } from './fixtures/documents.ts';
 import * as synthetic from './fixtures/migrate-synthetic.ts';
 import { MIGRATIONS as SYNTHETIC, type Migration as SyntheticMigration } from './fixtures/migrate-synthetic.ts';
 
@@ -129,13 +129,20 @@ test('an unknown key at the current version fails invalid with its key path, at 
 test("a palette target's cluster at or above the document's own analysis.colors.length fails invalid at its path", () => {
   const targeting = (doc: SceneDocument, cluster: number) => setAt(doc, ['style', 'paletteTargets'], [{ cluster, color: { l: 0.5, c: 0.1, h: 10 } }]);
   assert.ok(parseDocument(targeting(fiveClusterDocument(), 4)).ok);
-  assert.match(invalidDetail(parseDocument(targeting(fiveClusterDocument(), 5))), /^style\.paletteTargets\[0\]\.cluster: /);
+  assert.match(invalidDetail(parseDocument(targeting(fiveClusterDocument(), 5))), /^style\.paletteTargets\[0\]\.cluster: .*\(5\)/);
   assert.ok(parseDocument(targeting(minimalDocument(), 0)).ok);
   assert.match(invalidDetail(parseDocument(targeting(minimalDocument(), 1))), /^style\.paletteTargets\[0\]\.cluster: .*\(1\)/);
 });
 
 test('an odd master side fails parseDocument as invalid at that side', () => {
-  const sized = (width: number, height: number) => setAt(fiveClusterDocument(), ['frame', 'master', 'size'], { width, height });
+  const sized = (width: number, height: number) => {
+    const doc = fiveClusterDocument(), plate = doc.analysis.plate;
+    assert.ok(plate);
+    return { ...doc, frame: { ...doc.frame, master: { ...doc.frame.master, size: { width, height } } },
+      objects: doc.objects.map((layer) => ({ ...layer, produced: { ...layer.produced, bounds: { ...layer.produced.bounds,
+        height: Math.min(layer.produced.bounds.height, height - layer.produced.bounds.y) } } })),
+      analysis: { ...doc.analysis, plate: { ...plate, key: { ...plate.key, size: { width, height } }, image: { ...plate.image, size: { width, height } } } } };
+  };
   assert.match(invalidDetail(parseDocument(sized(2047, 1536))), /^frame\.master\.size\.width: /);
   assert.match(invalidDetail(parseDocument(sized(2048, 1535))), /^frame\.master\.size\.height: /);
   const both = invalidDetail(parseDocument(sized(2047, 1535)));
@@ -149,7 +156,7 @@ test('every invalid fixture variant fails parseDocument as invalid with its path
   // The schema alone refuses a newer version at `version`; the chain peeks first, and a version above its own is newer, not invalid.
   const newer = variants.filter((v) => v.path === 'version');
   assert.deepEqual(newer.map((v) => v.name), ['a version other than the current one']);
-  for (const { json } of newer) assert.deepEqual(failure(parseDocument(json)), { kind: 'newer-version', version: real.SCENE_VERSION + 1, writer: WRITER });
+  for (const { json } of newer) assert.deepEqual(failure(parseDocument(setAt(json, ['version'], real.SCENE_VERSION + 1))), { kind: 'newer-version', version: real.SCENE_VERSION + 1, writer: WRITER });
   for (const { name, path, json } of variants.filter((v) => v.path !== 'version')) {
     assert.ok(invalidDetail(parseDocument(json)).includes(`${path}: `), name);
   }
@@ -169,7 +176,7 @@ test('parseDocument answers a document at a version above its own newer-version,
 
 /** A version-zero fixture for synthetic migration failure tests; its shape follows the current test schema. */
 function versionZeroDocument(): SceneDocumentAt<0> {
-  return { ...minimalDocument(), version: 0 };
+  return { ...legacyMinimalDocument(), version: 0 };
 }
 
 
@@ -196,7 +203,7 @@ test('parseDocumentWith(SYNTHETIC) walks a version-0 and a version-1 document to
 });
 
 test('the bound parseDocument refuses the synthetic legacy field at the current version', () => {
-  assert.equal(invalidDetail(parseDocument(versionOneDocument())), 'analysis.legacyPlate: unknown key');
+  assert.equal(invalidDetail(parseDocument({ ...minimalDocument(), analysis: { ...minimalDocument().analysis, legacyPlate: { asset: assetId(0x99), size: { width: 2, height: 2 } } } })), 'analysis.legacyPlate: unknown key');
 });
 
 test('a migrated document is parsed strictly: an unknown key the migrations do not touch fails invalid at its path', () => {
@@ -317,7 +324,7 @@ test('no JSON value makes the parse throw: every hostile input gets a Result', (
     ['100,000 empty objects as the objects', setAt(versionZeroDocument(), ['objects'], Array.from({ length: 100_000 }, () => ({}))), 'invalid'],
     ['200,000 zeros as the lights', setAt(versionZeroDocument(), ['lights'], Array.from({ length: 200_000 }, () => 0)), 'invalid'],
     ['200,000 zeros as the palette targets', setAt(versionZeroDocument(), ['style', 'paletteTargets'], Array.from({ length: 200_000 }, () => 0)), 'invalid'],
-    ['a newer version with a deeply nested writer', { format: 'noisy-scene', version: 5, provenance: { writer: deep } }, 'newer-version'],
+    ['a newer version with a deeply nested writer', { format: 'noisy-scene', version: real.SCENE_VERSION + 1, provenance: { writer: deep } }, 'newer-version'],
     ['every field null', Object.fromEntries(Object.keys(versionZeroDocument()).map((key) => [key, null])), 'not-a-scene'],
     ['every field null but the header', { ...Object.fromEntries(Object.keys(versionZeroDocument()).map((key) => [key, null])), ...header }, 'invalid'],
     ['a valid document but for its analysis, an array', setAt(versionZeroDocument(), ['analysis'], [1, 2]), 'invalid'],
@@ -354,7 +361,7 @@ test('the synthetic module has the shape of core/migrate.ts, so the build can lo
   assert.equal(realShape.SCENE_VERSION, realShape.MIGRATIONS.length);
 });
 
-test('parseDocumentWith types its documents at its table\'s length, and parseDocument at SCENE_VERSION', () => {
+test('parseDocumentWith types its documents at its table\'s length, and parseDocument preserves the legacy read version', () => {
   const parse = parseDocumentWith(SYNTHETIC);
   type Parsed = Extract<ReturnType<typeof parse>, { ok: true }>['value'];
   const atTwo = true satisfies Equal<Parsed, SceneDocumentAt<2>>;
@@ -367,7 +374,8 @@ test('parseDocumentWith types its documents at its table\'s length, and parseDoc
   assert.ok(result.ok);
   const version: 2 = result.value.version;
   assert.equal(version, 2);
-  const current = parseDocument(result.value);
+  const { drift, ...legacyMotion } = result.value.motion;
+  const current = parseDocument({ ...result.value, motion: { ...legacyMotion, orbit: drift.amount } });
   assert.ok(current.ok);
-  assert.equal(current.value.version, real.SCENE_VERSION);
+  assert.equal(current.value.version, 5);
 });

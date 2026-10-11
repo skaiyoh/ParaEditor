@@ -4,6 +4,8 @@ import type {} from '../../../src/app/gallery-page.ts';
 
 const PIECE = '/gallery/00000000-0000-4000-8000-000000000001';
 const pixelsSchema = z.object({ hash: z.number(), range: z.number(), width: z.number(), height: z.number() });
+const effectIdSchema = z.custom<import('../../../src/core/ids.ts').EffectId>((value) => typeof value === 'string'
+  && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value));
 function pixels() {
   const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="gallery-canvas"]');
   if (canvas === null) throw new Error('No gallery canvas.');
@@ -163,7 +165,7 @@ export const scenarios: readonly Scenario[] = [
   },
   {
     id: 'gallery.publish', title: 'Publish a committed snapshot, view its saved assets without inference, then unpublish',
-    target: 'dev', covers: ['GAL1p-1', 'GAL1p-2', 'GAL1p-3'], timeoutMs: 360_000,
+    target: 'dev', covers: ['GAL1p-1', 'GAL1p-2', 'GAL1p-3', 'PUB2-1', 'PUB2-2', 'PUB2-3'], timeoutMs: 360_000,
     async run(t) {
       const { page } = t;
       await page.goto('/');
@@ -178,13 +180,76 @@ export const scenarios: readonly Scenario[] = [
         const demo = window.__noisyTest?.demo;
         if (demo === undefined) throw new Error('No editor.');
         await demo.tap(.38, .585);
-        demo.setMotion({ enabled: true });
-        await demo.requestPlate();
+        demo.setMotion({ enabled: false });
         return true;
       });
-      await page.waitFor('depth, masks and saved plate ready for publication', z.literal(true), () => {
+      await page.waitFor('depth and masks enable Publish without Motion', z.literal(true), () => {
         return window.__noisyTest?.demo.gallery.canPublish().kind === 'ready' ? true : null;
       }, { timeoutMs: 180_000 });
+      t.equal('ordinary editing leaves the plate absent with Motion off', await page.evaluate(z.boolean(), () => {
+        const doc = window.__noisyTest?.demo.document();
+        return doc != null && doc.objects.length > 0 && !doc.motion.enabled && doc.analysis.plate === null;
+      }), true);
+      const cancelled = await page.evaluate(z.object({ kind: z.string(), sentence: z.string(), phases: z.array(z.string()), pieces: z.number() }), async () => {
+        const demo = window.__noisyTest?.demo;
+        if (demo === undefined) throw new Error('No editor.');
+        const controller = new AbortController(), phases: string[] = [];
+        const result = await demo.gallery.publish({ signal: controller.signal, onProgress(p) {
+          phases.push(p.phase);
+          if (p.phase === 'preparing') setTimeout(() => controller.abort(), 50);
+        } });
+        return { kind: result.kind, sentence: result.sentence, phases, pieces: demo.gallery.publishedHere().length };
+      });
+      t.equal('cancelling preparation publishes nothing', cancelled, {
+        kind: 'failed', sentence: 'Publishing was cancelled.', phases: ['preparing'], pieces: 0,
+      });
+      await page.emulate({ width: 1180, height: 820, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
+      await page.click('[data-testid="tool-actions"]');
+      await page.waitFor('Publish is enabled after cancellation', z.literal(true), () =>
+        document.querySelector<HTMLButtonElement>('[data-testid="share-publish"]')?.disabled === false ? true : null);
+      await page.click('[data-testid="share-publish"]');
+      await page.waitFor('Publish confirmation opens', z.literal(true), () =>
+        document.querySelector<HTMLDialogElement>('[data-testid="share-confirm"]')?.open ? true : null);
+      await page.click('[data-testid="share-confirm"] .primary-action');
+      await page.waitFor('Publish visibly prepares the background', z.literal(true), () =>
+        document.querySelector('[data-testid="preparing"]')?.textContent?.includes('Preparing the background') ? true : null);
+      await page.screenshot('publish-preparing-background');
+      const preparedUrl = await page.waitFor('Publish completes without enabling Motion', z.string(), () =>
+        document.querySelector<HTMLAnchorElement>('[data-testid="share-link"]')?.getAttribute('href'), { timeoutMs: 180_000 });
+      t.equal('publication keeps authored Motion off and installs a saved plate', await page.evaluate(z.boolean(), () => {
+        const doc = window.__noisyTest?.demo.document(); return doc != null && !doc.motion.enabled && doc.analysis.plate !== null;
+      }), true);
+      await page.screenshot('publish-prepared-background');
+      await page.click('[data-testid="share-unpublish"]');
+      await page.waitFor('Unpublish confirmation opens', z.literal(true), () =>
+        document.querySelector<HTMLDialogElement>('[data-testid="share-confirm"]')?.open ? true : null);
+      await page.click('[data-testid="share-confirm"] .primary-action');
+      await page.waitFor('prepared publication is cleaned up', z.literal(true), () =>
+        document.querySelector('[data-testid="share-link"]') === null ? true : null);
+      t.expectMessage({ because: 'the scenario reads the just-unpublished prepared piece, whose manifest returns 404',
+        channel: 'log', source: 'network', level: 'error', url: new RegExp(`/api${preparedUrl}$`) });
+      t.equal('cancelled and cleaned publications leave no public piece', await page.evaluate(z.number(), async (url) =>
+        (await fetch(`/api${url}`)).status, preparedUrl), 404);
+      const local = await page.evaluate(z.object({ id: effectIdSchema, mask: z.string(), objects: z.number() }), async () => {
+        const demo = window.__noisyTest?.demo, doc = demo?.document();
+        if (demo === undefined || doc == null) throw new Error('No editor for the manual local Recolor.');
+        demo.setSelectionTool('rectangle');
+        const { width, height } = doc.frame.master.size;
+        const start = demo.beginSelection({ kind: 'shape', tool: 'rectangle', mode: 'replace', space: { kind: 'photo' }, pointerId: 93,
+          at: { x: Math.floor(width * .07), y: Math.floor(height * .1) } });
+        if (start.kind !== 'began') throw new Error(start.reason);
+        const extend = demo.extendSelection({ kind: 'shape', token: start.token, pointerId: 93,
+          at: { x: Math.floor(width * .65), y: Math.floor(height * .7) } });
+        if (extend.kind === 'refused') throw new Error(extend.reason);
+        const end = await demo.endSelection({ token: start.token, pointerId: 93 });
+        if (end.kind === 'refused') throw new Error(end.reason);
+        const applied = demo.localOperation({ target: { kind: 'selection' }, operation: { kind: 'recolor', color: { l: .7, c: .22, h: 305 } } });
+        if (applied.kind !== 'applied') throw new Error('The manual local Recolor was not applied.');
+        const effect = demo.document()?.localEffects.at(-1);
+        if (effect === undefined || effect.scope.kind !== 'mask' || effect.operation.kind !== 'recolor') throw new Error('No frozen manual Recolor.');
+        return { id: effect.id, mask: effect.scope.mask.plane.asset, objects: doc.objects.length };
+      });
+      t.ok('publication includes the manual selection local Recolor beside the protected foreground', local.objects > 0, local);
       await page.evaluate(z.literal(true), () => { window.__noisyTest?.demo.setStyle({ fry: .7 }); return true; });
       const captured = await page.evaluate(z.object({ document: z.string(), hash: z.string(), longEdge: z.number() }), async () => {
         const demo = window.__noisyTest?.demo;
@@ -247,6 +312,24 @@ export const scenarios: readonly Scenario[] = [
         await page.goto(result.url); await ready(t);
         const frame = await page.evaluate(pixelsSchema, pixels);
         t.ok('real published assets draw a nonblank frame', frame.range > 50 && frame.width > 0 && frame.height > 0, frame);
+        const localPixels = await page.evaluate(z.object({ inside: z.number(), changed: z.number(), outside: z.number(), protected: z.number(), maxOutside: z.number() }), (id) => {
+          const viewer = window.__noisyGallery?.viewer(), debug = viewer?.debug(), canvas = document.querySelector<HTMLCanvasElement>('[data-testid="gallery-canvas"]');
+          if (canvas === null || debug?.readLocalEffectPatch === undefined || debug.readLocalCoveragePatch === undefined) throw new Error('No published local-effect pixel probe.');
+          viewer?.stop();
+          const pixels = debug.readLocalEffectPatch(0, 0, canvas.width, canvas.height), coverage = debug.readLocalCoveragePatch(id, 0, 0, canvas.width, canvas.height);
+          let inside = 0, changed = 0, outside = 0, protectedPixels = 0, maxOutside = 0;
+          for (let i = 0; i < pixels.after.length; i += 4) {
+            const difference = Math.max(...[0, 1, 2].map((channel) => Math.abs((pixels.after[i + channel] ?? 0) - (pixels.before[i + channel] ?? 0))));
+            if ((coverage[i] ?? 0) > 0) { inside++; if (difference > 0) changed++; }
+            else { outside++; maxOutside = Math.max(maxOutside, difference); if ((pixels.owners[i] ?? 0) > 0) protectedPixels++; }
+          }
+          return { inside, changed, outside, protected: protectedPixels, maxOutside };
+        }, local.id);
+        t.ok('piece page evaluates the saved manual Recolor and leaves all outside/protected pixels unchanged',
+          localPixels.inside > 100 && localPixels.changed > 100 && localPixels.outside > 100 && localPixels.protected > 100 && localPixels.maxOutside === 0, localPixels);
+        await t.file('published-local-recolor.json', JSON.stringify({ local, localPixels, id: result.id, capturedDocument }, null, 2));
+        await page.screenshot('published-manual-recolor');
+        await page.evaluate(z.literal(true), async () => { await window.__noisyGallery?.viewer()?.start(); return true; });
         await page.screenshot('published-live');
         const pieceRequests = page.requests().slice(requestStart);
         t.equal('published page loads no models or ORT', pieceRequests.filter((r) => /\/models\/|\/vendor\/ort\//.test(r.url)), []);
@@ -319,7 +402,7 @@ export const scenarios: readonly Scenario[] = [
             const manifest: unknown = await (await fetch(`/api/gallery/${result.id}`)).json();
             if (manifest === null || typeof manifest !== 'object' || !('assets' in manifest) || !Array.isArray(manifest.assets)) throw new Error('No saved assets.');
             const kinds = manifest.assets.map((asset: unknown) => asset !== null && typeof asset === 'object' && 'kind' in asset ? asset.kind : null);
-            if (JSON.stringify(kinds) !== JSON.stringify(['source', 'depth'])) throw new Error(`Unexpected zero-object assets: ${JSON.stringify(kinds)}`);
+            if (JSON.stringify(kinds) !== JSON.stringify(['source', 'png', 'raster'])) throw new Error(`Unexpected zero-object v5 assets: ${JSON.stringify(kinds)}`);
             return { id: result.id, url: result.url };
           }, motion);
           pieces.push(result);

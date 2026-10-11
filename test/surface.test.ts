@@ -5,7 +5,7 @@ import { MIGRATIONS, SCENE_VERSION } from '../src/core/migrate.ts';
 import { RANGES } from '../src/core/ranges.ts';
 import { applyEdit, applyEdits } from '../src/core/reduce.ts';
 import { currentDocumentSchema, parseDocument, surfaceSchema } from '../src/core/schema.ts';
-import { minimalDocument, fiveClusterDocument } from './fixtures/documents.ts';
+import { minimalDocument, fiveClusterDocument, legacyFiveClusterDocument } from './fixtures/documents.ts';
 
 const NOW = '2026-10-10T04:00:00.000Z';
 
@@ -76,16 +76,20 @@ test('empty, equal and refused surface patches retain the original document and 
 });
 
 test('the version-zero migration adds the disabled surface and selection size without changing other fields or its input', () => {
-  const { surface: _surface, ...current } = fiveClusterDocument();
-  const legacy = { ...current, version: 0, objects: current.objects.map((object) => {
+  const frozen = legacyFiveClusterDocument();
+  const { drift, parallax: _parallax, ...oldMotion } = frozen.motion;
+  const { surface: _surface, ...current } = frozen;
+  const legacy = { ...current, version: 0, motion: { ...oldMotion, orbit: drift.amount }, objects: current.objects.map((object) => {
     const { size: _size, ...selection } = object.produced.selection;
-    return { ...object, produced: { ...object.produced, selection } };
+    const { hidden: _hidden, ...oldObject } = object;
+    return { ...oldObject, produced: { ...object.produced, selection } };
   }) };
   const before = structuredClone(legacy);
-  assert.equal(SCENE_VERSION, 4);
+  assert.equal(SCENE_VERSION, 6);
   assert.equal(MIGRATIONS.length, SCENE_VERSION);
   const parsed = parseDocument(legacy);
-  assert.deepEqual(parsed, { ok: true, value: { ...current, version: SCENE_VERSION, surface: defaultSurface() } });
+  const migrated = fiveClusterDocument();
+  assert.deepEqual(parsed, { ok: true, value: { ...migrated, surface: defaultSurface(), analysis: { ...migrated.analysis, plate: null } } });
   assert.deepEqual(legacy, before);
   assert.deepEqual(parseDocument(JSON.parse(JSON.stringify(legacy))), parsed);
   const extra = parseDocument({ ...legacy, unexpected: 1 });

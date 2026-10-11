@@ -6,12 +6,12 @@
 
 import type { LightId, NonEmpty, ObjectId } from './ids.ts';
 import type { Oklch } from './raster.ts';
-import type { DepthProduct, DepthStats, Light, Lighting, Motion, ObjectProduced, PlateProduct, SceneDocument, SceneObject, Style, Symbols, Surface } from './types.ts';
+import type { CompositionEdit, DepthProduct, DepthStats, Light, Lighting, Motion, ObjectProduced, PlateProduct, RepairRequestKey, SceneDocument, SceneObject, Style, Symbols, Surface } from './types.ts';
 
 /** A style patch may carry `fry`, so that a `fry` edit's inverse is one edit; palette targets have their own edit. */
 export type StylePatch = Partial<Omit<Style, 'paletteTargets'>>;
 /** Every field of an object but its id and what analysis produced for it. */
-export type ObjectPatch = Partial<Omit<SceneObject, 'id' | 'produced'>>;
+export type ObjectPatch = Partial<Pick<SceneObject, 'name' | 'hidden' | 'subject' | 'recolor' | 'symbols' | 'motion' | 'thickness'>>;
 /** Every field of a light but its id. */
 export type LightPatch = Partial<Omit<Light, 'id'>>;
 
@@ -23,6 +23,7 @@ export type Restore = { readonly index: number };
 
 /** The owner's actions. Each has an inverse edit list, so each is undoable. */
 export type Edit =
+  | CompositionEdit
   | { readonly kind: 'title'; readonly title: string }
   | { readonly kind: 'style'; readonly patch: StylePatch }
   /** The macro dial: rewrites the eight fried style fields through fryCurve and stores `fry`. */
@@ -52,7 +53,7 @@ export type EditKind = Edit['kind'];
 /** Analysis results, applied by the analysis driver and never on the undo history. */
 export type Produce =
   | { readonly kind: 'depth'; readonly depth: DepthProduct }
-  | { readonly kind: 'plate'; readonly plate: PlateProduct }
+  | { readonly kind: 'plate'; readonly plate: PlateProduct; readonly required: RepairRequestKey }
   | { readonly kind: 'object.depth'; readonly id: ObjectId; readonly depth: DepthStats }
   /** Sets `analysis.autoSubject` to done; adds the object as the subject, or nothing when null. */
   | { readonly kind: 'auto-subject'; readonly found: SceneObject | null };

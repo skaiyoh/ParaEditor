@@ -8,11 +8,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Edit, EditKind, EditResult, RefusalReason, StylePatch } from '../src/core/edits.ts';
+import { localEffect } from './fixtures/composition.ts';
+import { depthProduct } from './fixtures/products.ts';
+import { applyProduce } from '../src/core/produce.ts';
 import { RANGES, type ClampPath } from '../src/core/ranges.ts';
 import { applyEdit, applyEdits } from '../src/core/reduce.ts';
 import { parseDocument } from '../src/core/schema.ts';
-import type { SceneDocument, Style } from '../src/core/types.ts';
-import { fiveClusterDocument, LIGHT_IDS, minimalDocument, OBJECT_IDS } from './fixtures/documents.ts';
+import type { LocalEffect, ObjectProduced, SceneDocument, Style } from '../src/core/types.ts';
+import { assetId, fiveClusterDocument, LIGHT_IDS, minimalDocument, OBJECT_IDS, SAM_MODEL } from './fixtures/documents.ts';
 import { editCases, minimalWithObject, newLightAt, objectId, tappedObject, withLights, withObjects } from './fixtures/edits.ts';
 
 const NOW = '2026-10-02T18:00:00.000Z';
@@ -53,6 +56,8 @@ function deepFreeze<T>(value: T): T {
 
 /** Every edit kind and every refusal reason; `satisfies` fails the type check when either union gains a member this list lacks. */
 const EDIT_KINDS = Object.keys({
+  'layer.add': true, 'layer.remove': true, 'layer.placement': true, 'layer.opacity': true, 'layer.coverage': true, 'layer.depth': true,
+  'source.add': true, 'source.remove': true, 'removal.set': true, 'effect.set': true, compositing: true,
   title: true, style: true, fry: true, symbols: true, surface: true, motion: true, lighting: true, 'palette.target': true,
   'object.add': true, 'object.set': true, 'object.rename': true, 'object.hide': true, 'object.show': true, 'object.refine': true, 'object.remove': true, 'light.add': true, 'light.set': true, 'light.remove': true,
 } satisfies Record<EditKind, true>);
@@ -111,7 +116,7 @@ test('no fixture edit writes to its input document', () => {
   }
 });
 
-test('no edit changes an analysis field, and only object.refine changes a produced field', () => {
+test('no edit changes an analysis field, and only coverage edits change a produced field', () => {
   for (const { name, doc, edit, outcome } of editCases()) {
     if (outcome !== 'applied') continue;
     const before = doc();
@@ -120,7 +125,7 @@ test('no edit changes an analysis field, and only object.refine changes a produc
     for (const object of after.objects) {
       const was = before.objects.find((o) => o.id === object.id);
       if (was === undefined) continue;
-      if (edit.kind === 'object.refine' && edit.id === object.id) assert.notDeepEqual(object.produced, was.produced, name);
+      if ((edit.kind === 'object.refine' || edit.kind === 'layer.coverage') && edit.id === object.id) assert.notDeepEqual(object.produced, was.produced, name);
       else assert.deepEqual(object.produced, was.produced, name);
     }
   }
@@ -138,6 +143,7 @@ test('applyEdits applies a list in order as one step, and refuses the whole list
   assert.equal(forward.doc.objects.length, 1);
   assert.deepEqual(forward.inverse, [
     { kind: 'object.add', object: before.objects[1], restore: { index: 1 } },
+    { kind: 'removal.set', id: before.removals[1]?.id, value: before.removals[1], index: 1 },
     { kind: 'style', patch: { saturation: 0.1 } },
     { kind: 'style', patch: { saturation: before.style.saturation } },
   ]);
@@ -486,7 +492,8 @@ test('object.refine with selection.candidate 3 or -1 changes nothing', () => {
   assert.ok(subject !== undefined);
   for (const candidate of [3, -1]) {
     const doc = fiveClusterDocument();
-    const produced = { ...subject.produced, selection: { ...subject.produced.selection, candidate } };
+    assert.ok(subject.produced.provenance.kind === 'ai');
+    const produced = { ...subject.produced, provenance: { ...subject.produced.provenance, selection: { ...subject.produced.provenance.selection, candidate } } };
     const result = applyEdit(doc, { kind: 'object.refine', id: subject.id, produced }, NOW);
     assert.equal(result.kind === 'refused' ? result.reason : result.kind, 'invalid', String(candidate));
     assert.equal(result.doc, doc);
@@ -534,13 +541,14 @@ test('the first object added to a scene with no subject becomes the subject, and
   assert.equal(beside.doc.objects[2]?.id, objectId(0));
 });
 
-test("object.remove's inverse is object.add alone, and motion.focus is unchanged by the remove and by its undo", () => {
+test("object.remove's inverse restores its layer and original source removal, and motion.focus is unchanged by the remove and by its undo", () => {
   const before = fiveClusterDocument();
   const [subject] = before.objects;
   assert.ok(subject !== undefined && subject.subject);
   assert.equal(before.motion.focus, 0.5);
   const removed = applied(applyEdit(before, { kind: 'object.remove', id: subject.id }, NOW));
-  assert.deepEqual(removed.inverse, [{ kind: 'object.add', object: subject, restore: { index: 0 } }]);
+  assert.deepEqual(removed.inverse, [{ kind: 'object.add', object: subject, restore: { index: 0 } },
+    { kind: 'removal.set', id: before.removals[0]?.id, value: before.removals[0], index: 0 }]);
   assert.equal(removed.doc.motion.focus, 0.5);
   assert.equal(removed.doc.objects.some((o) => o.subject), false);
   const undone = applied(applyEdits(removed.doc, removed.inverse, LATER));
@@ -597,4 +605,29 @@ test('renaming validates the name and shares untouched object products and setti
   assert.equal(renamed.recolor, object.recolor);
   assert.equal(renamed.motion, object.motion);
   assert.equal(renamed.hidden, object.hidden);
+});
+
+
+test('legacy region refinement and deletion maintain linked removal/effect records and restore their exact order', () => {
+  const base = fiveClusterDocument(), layer = base.objects[0]; assert.ok(layer);
+  const effect = localEffect();
+  const owned = { ...effect, owner: { kind: 'layer', id: layer.id } } satisfies LocalEffect;
+  const background = localEffect(2);
+  const doc = { ...base, localEffects: [owned, background] };
+  const replacement = { ...layer.produced, mask: { ...layer.produced.mask, asset: assetId(0xd00) }, sampling: 'coverage', provenance: { kind: 'manual', operation: 'freehand' } } satisfies ObjectProduced;
+  const refined = applied(applyEdit(doc, { kind: 'object.refine', id: layer.id, produced: replacement }, NOW));
+  assert.equal(refined.doc.removals[0]?.threshold, 1);
+  assert.deepEqual(refined.doc.removals[0]?.mask, { plane: replacement.mask, provenance: replacement.provenance });
+  assert.deepEqual(withUpdatedAt(applied(applyEdits(refined.doc, refined.inverse, LATER)).doc, doc.updatedAt), doc);
+  const removed = applied(applyEdit(doc, { kind: 'object.remove', id: layer.id }, NOW));
+  assert.deepEqual(removed.doc.localEffects, [background]);
+  assert.equal(removed.doc.removals.some((removal) => removal.ownership.kind === 'legacy-layer' && removal.ownership.layer === layer.id), false);
+  const depth = depthProduct(7);
+  const enriched = applyProduce(removed.doc, { kind: 'depth', depth }, LATER);
+  assert.equal(enriched.kind, 'applied');
+  const restored = applied(applyEdits(enriched.doc, removed.inverse, LATER));
+  assert.deepEqual(restored.doc.objects, doc.objects);
+  assert.deepEqual(restored.doc.removals, doc.removals);
+  assert.deepEqual(restored.doc.localEffects, doc.localEffects);
+  assert.deepEqual(restored.doc.analysis.depth, depth, 'Undo preserves independent analysis that arrived after deletion');
 });

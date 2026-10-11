@@ -754,7 +754,11 @@ function createServer(options, contract, firstSeq, tls) {
       if (req.method === 'GET') {
         if (resource === 'scene') {
           const scene = await projectJson(file);
-          return scene === null ? missing() : reply(200, scene.transportVersion === 2 ? { transportVersion: 2, document: scene.document, revision: scene.revision } : { document: scene.document, masks: scene.masks, revision: scene.revision ?? 0 });
+          if (scene === null) return missing();
+          projectSerialization ??= import('../src/projects/serialize.ts');
+          const { serializeCompositionScene } = await projectSerialization;
+          return reply(200, scene.transportVersion === 2 ? serializeCompositionScene(scene.document, scene.revision)
+            : { document: scene.document, masks: scene.masks, revision: scene.revision ?? 0 });
         }
         let savedBytes;
         try { savedBytes = await readFile(file); }
@@ -772,10 +776,11 @@ function createServer(options, contract, firstSeq, tls) {
         let scene;
         try {
           projectSerialization ??= import('../src/projects/serialize.ts');
-          const { deserializeProjectEnvelope } = await projectSerialization;
+          const { deserializeProjectEnvelope, serializeCompositionScene } = await projectSerialization;
           const parsed = deserializeProjectEnvelope(JSON.parse(bytes.toString('utf8')));
           if (parsed.scene.document.id !== id) return bad('The project document id must match its path.');
-          scene = { ...parsed.scene, updatedAt: new Date().toISOString() };
+          const wire = parsed.kind === 'composition' ? serializeCompositionScene(parsed.scene.document, parsed.scene.revision) : parsed.scene;
+          scene = { ...wire, updatedAt: new Date().toISOString() };
         } catch { return bad('The project scene or its mask metadata is invalid.'); }
         const stored = await projectJson(file);
         if (stored !== null && scene.revision <= (stored.revision ?? 0)) return reply(409, { error: 'The project scene revision must increase.' });

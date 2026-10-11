@@ -3,6 +3,27 @@ import assert from 'node:assert/strict';
 import { loopTapPoint } from '../src/session/loop.ts';
 import { loopZoom, parallaxMargin } from '../src/core/motion.ts';
 import { frameAtElapsed, wrapFrame } from '../src/render/loop.ts';
+import { createMovieFile } from '../src/export/movie-file.ts';
+
+test('movie file applies container rewrites and refuses bytes beyond its memory limit', async () => {
+  const file = createMovieFile(8), writer = file.stream.getWriter();
+  const write = (position: number, bytes: number[]) => writer.write({ type: 'write', position, data: new Uint8Array(bytes) });
+  await write(0, [1, 2, 3]);
+  await write(5, [6, 7, 8]);
+  await write(1, [9, 10]);
+  const before = file.blob('video/webm');
+  assert.equal(before.type, 'video/webm');
+  assert.deepEqual([...new Uint8Array(await before.arrayBuffer())], [1, 9, 10, 0, 0, 6, 7, 8]);
+  await assert.rejects(write(8, [9]), /too much memory/);
+  assert.equal(file.blob('video/webm').size, 8);
+});
+
+test('canceling a movie file releases retained movie bytes', async () => {
+  const file = createMovieFile(), writer = file.stream.getWriter();
+  await writer.write({ type: 'write', position: 0, data: new Uint8Array([1, 2, 3]) });
+  await writer.abort();
+  assert.equal(file.blob('video/webm').size, 0);
+});
 
 test('30 fps frame stepper boundaries, skipped callbacks and exact wrap', () => {
   assert.equal(frameAtElapsed(0, 30), 0);

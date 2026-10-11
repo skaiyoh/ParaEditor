@@ -1,10 +1,10 @@
 import { isAssetId, isSceneId, type AssetId, type SceneId } from '../core/ids.ts';
 import type { Plane } from '../core/raster.ts';
-import type { SceneDocument } from '../core/types.ts';
+import type { LegacySceneDocument } from '../core/types.ts';
 import { z } from '../core/zod.ts';
-import { deserializeMask, deserializeScene, serializeMask, serializeScene } from './serialize.ts';
-import { deserializeProjectEnvelope, serializeCompositionScene, type SavedComposition } from './serialize.ts';
-import { compositionAssetLimit, compositionAssetPath, compositionInventory, readAssetBody, validateCompositionAssets } from './assets.ts';
+import { deserializeMask, deserializeScene, serializeMask, serializeScene, type SavedScene } from './serialize.ts';
+import { deserializeProjectEnvelope, serializeCompositionScene, type SavedComposition, type SavedCompositionWire } from './serialize.ts';
+import { compositionAssetLimit, compositionAssetPath, compositionInventory, readAssetBody, validateCompositionAsset, validateCompositionAssets } from './assets.ts';
 import { COMPOSITION_LIMITS } from '../core/composition-ranges.ts';
 import { measureCompositionAssets } from '../core/asset-refs.ts';
 
@@ -15,6 +15,25 @@ const listSchema = z.strictObject({ projects: z.array(projectSchema) });
 export type Project = z.infer<typeof projectSchema>;
 export type ProjectStoreProbe = { readonly kind: 'absent' } | { readonly kind: 'available'; readonly projects: readonly Project[] };
 const acknowledgement = z.strictObject({ ok: z.literal(true) });
+
+// A receipt retains only an acknowledged digest and length, never asset bytes.
+// Eviction safely causes an idempotent PUT on the next session checkpoint.
+const compositionReceipts = new Map<SceneId, Map<AssetId, number>>();
+const RECEIPT_PROJECT_LIMIT = 64;
+const RECEIPT_ASSET_LIMIT = 256;
+function acknowledgeAsset(id: SceneId, asset: AssetId, bytes: number): void {
+  const receipts = compositionReceipts.get(id) ?? new Map<AssetId, number>();
+  compositionReceipts.delete(id); compositionReceipts.set(id, receipts);
+  receipts.delete(asset); receipts.set(asset, bytes);
+  while (receipts.size > RECEIPT_ASSET_LIMIT) {
+    const oldest = receipts.keys().next().value;
+    if (oldest !== undefined) receipts.delete(oldest);
+  }
+  while (compositionReceipts.size > RECEIPT_PROJECT_LIMIT) {
+    const oldest = compositionReceipts.keys().next().value;
+    if (oldest !== undefined) compositionReceipts.delete(oldest);
+  }
+}
 
 export class ProjectRequestError extends Error {
   readonly status: number;
@@ -47,6 +66,12 @@ const put = async (path: string, body: BodyInit, contentType: string): Promise<v
   acknowledgement.parse(await (await request(path, { method: 'PUT', headers: { 'Content-Type': contentType }, body })).json());
 };
 
+/** Blob capture copies an exact encoded view once; ordinary buffers need no staging copy. */
+export function captureEncodedAsset(bytes: Uint8Array, mediaType: string): Blob {
+  const part = bytes.buffer instanceof ArrayBuffer ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : new Uint8Array(bytes);
+  return new Blob([part], { type: mediaType });
+}
+
 export async function listProjects(signal?: AbortSignal): Promise<readonly Project[]> {
   return listSchema.parse(await (await request('/api/projects', signal === undefined ? {} : { signal })).json()).projects;
 }
@@ -59,7 +84,8 @@ export async function probeProjects(): Promise<ProjectStoreProbe> {
   }
   return { kind: 'available', projects: listSchema.parse(await response.json()).projects };
 }
-export function saveScene(document: SceneDocument, masks: ReadonlyMap<AssetId, Plane<'u8'>>, revision: number): Promise<void> {
+/** Compatibility-only writer; editor checkpoints use saveComposition. */
+export function saveScene(document: LegacySceneDocument, masks: ReadonlyMap<AssetId, Plane<'u8'>>, revision: number): Promise<void> {
   return put(`${base(document.id)}/scene`, JSON.stringify(serializeScene(document, masks, revision)), 'application/json');
 }
 export function savePhoto(id: SceneId, photo: File): Promise<void> {
@@ -71,8 +97,20 @@ export function saveMask(id: SceneId, asset: AssetId, mask: Plane<'u8'>): Promis
 export function saveThumbnail(id: SceneId, thumbnail: Blob): Promise<void> {
   return put(`${base(id)}/thumbnail`, thumbnail, 'image/jpeg');
 }
+/** Start retaining an imported original before thumbnail capture is needed. */
+export async function saveCompositionOriginal(id: SceneId, source: { readonly asset: AssetId; readonly mediaType: string; readonly byteLength: number }, bytes: Uint8Array | Blob): Promise<void> {
+  const immutable = bytes instanceof Blob ? bytes : captureEncodedAsset(bytes, source.mediaType);
+  await validateCompositionAsset(new Uint8Array(await immutable.arrayBuffer()), source.asset, [{ ...source, kind: 'original' }]);
+  acknowledgement.parse(await (await request(`${base(id)}/photo`, { method: 'PUT',
+    headers: { 'Content-Type': source.mediaType, 'X-Project-Asset': source.asset }, body: immutable,
+  })).json());
+  acknowledgeAsset(id, source.asset, immutable.size);
+}
 export async function loadProject(id: SceneId, signal: AbortSignal) {
   const scene = deserializeScene(await (await request(`${base(id)}/scene`, { signal })).json());
+  return loadLegacyProject(id, signal, scene);
+}
+async function loadLegacyProject(id: SceneId, signal: AbortSignal, scene: SavedScene) {
   if (scene.document.id !== id) throw new Error('The project document belongs to another photo.');
   const [response, entries] = await Promise.all([
     request(`${base(id)}/photo`, { signal }),
@@ -96,20 +134,24 @@ export async function deleteProject(id: SceneId): Promise<void> {
   const response = await request(base(id), { method: 'DELETE' }, true);
   if (response.status === 404) {
     await response.body?.cancel().catch(() => undefined);
+    compositionReceipts.delete(id);
     return;
   }
   acknowledgement.parse(await response.json());
+  compositionReceipts.delete(id);
 }
 
 export type CompositionSaveInput = {
   readonly document: SavedComposition['document'];
   readonly revision: number;
-  /** Encoded stored bytes, not payload-only planes. Only document refs are captured. */
-  readonly assets: ReadonlyMap<AssetId, Uint8Array>;
+  /** Encoded bytes, not payload-only planes. Immutable Blobs share save ownership. */
+  readonly assets: ReadonlyMap<AssetId, Uint8Array | Blob>;
   /** Already captured from this committed document; never a live renderer callback. */
   readonly thumbnail: Blob;
+  /** Session saves use acknowledged immutable hashes; direct callers retain GET probing. */
+  readonly probeMissing?: boolean;
 };
-type Snapshot = { readonly scene: SavedComposition; readonly assets: ReadonlyMap<AssetId, Blob>; readonly thumbnail: Blob; readonly bytes: number };
+type Snapshot = { readonly scene: SavedCompositionWire; readonly assets: ReadonlyMap<AssetId, Blob>; readonly thumbnail: Blob; readonly bytes: number; readonly probeMissing: boolean };
 export type CompositionSaveResult = { readonly kind: 'saved' | 'superseded'; readonly revision: number };
 type SaveJob = { readonly snapshot: Snapshot; readonly resolve: (result: CompositionSaveResult) => void; readonly reject: (error: unknown) => void };
 type SaveQueue = { active: SaveJob; pending: SaveJob | null };
@@ -124,9 +166,10 @@ function captureComposition(input: CompositionSaveInput): Snapshot {
   for (const [asset, refs] of inventory) {
     const bytes = input.assets.get(asset);
     if (bytes === undefined) throw new Error('A committed project asset is missing.');
-    if (bytes.byteLength === 0 || bytes.byteLength > compositionAssetLimit(refs)) throw new Error('The project asset is too large or empty.');
-    lengths.set(asset, bytes.byteLength);
-    if (refs.some((ref) => ref.kind !== 'original')) additional += bytes.byteLength;
+    const length = bytes instanceof Blob ? bytes.size : bytes.byteLength;
+    if (length === 0 || length > compositionAssetLimit(refs)) throw new Error('The project asset is too large or empty.');
+    lengths.set(asset, length);
+    if (refs.some((ref) => ref.kind !== 'original')) additional += length;
   }
   if (additional > COMPOSITION_LIMITS.activeAssetBytes) throw new Error('The composition exceeds its 64 MiB asset budget.');
   const measured = measureCompositionAssets(inventory, lengths);
@@ -136,9 +179,11 @@ function captureComposition(input: CompositionSaveInput): Snapshot {
     const bytes = input.assets.get(asset);
     if (bytes === undefined) throw new Error('A committed project asset is missing.');
     const original = refs.find((ref) => ref.kind === 'original');
-    assets.set(asset, new Blob([new Uint8Array(bytes)], { type: original?.mediaType ?? 'application/octet-stream' }));
+    // A Blob already owns immutable bytes. Sharing it avoids a third physical
+    // snapshot while the session retains an active checkpoint for retries.
+    assets.set(asset, bytes instanceof Blob ? bytes : captureEncodedAsset(bytes, original?.mediaType ?? 'application/octet-stream'));
   }
-  return { scene, assets, thumbnail: input.thumbnail, bytes: measured.value.bytes };
+  return { scene, assets, thumbnail: input.thumbnail, bytes: measured.value.bytes, probeMissing: input.probeMissing ?? true };
 }
 
 async function writeComposition(snapshot: Snapshot): Promise<void> {
@@ -149,26 +194,29 @@ async function writeComposition(snapshot: Snapshot): Promise<void> {
   });
   const thumbnail = new Uint8Array(await snapshot.thumbnail.arrayBuffer());
   if (thumbnail[0] !== 255 || thumbnail[1] !== 216 || thumbnail.at(-2) !== 255 || thumbnail.at(-1) !== 217) throw new Error('The project thumbnail must be a JPEG under 60 KB.');
-  // Assets are immutable and PUT is idempotent. Probe before uploading so Undo,
-  // Redo and metadata-only saves do not send shared bytes again.
+  // Session saves can upload an unknown digest directly, avoiding expected 404
+  // console noise. A complete acknowledgment or strict load is its only receipt.
+  // Direct store callers retain their original GET/probe compatibility contract.
   for (const [asset, refs] of compositionInventory(scene.document)) {
     const blob = assets.get(asset);
     if (blob === undefined) throw new Error('A committed project asset is missing.');
     const path = `${base(scene.document.id)}/${compositionAssetPath(asset, refs)}`;
-    const existing = await request(path, {}, true);
-    if (existing.status === 404) {
-      await existing.body?.cancel();
+    if (!snapshot.probeMissing && compositionReceipts.get(scene.document.id)?.get(asset) === blob.size) continue;
+    const existing = snapshot.probeMissing ? await request(path, {}, true) : null;
+    if (existing === null || existing.status === 404) {
+      await existing?.body?.cancel();
       if (refs.every((ref) => ref.kind === 'original')) {
         // The original upload keeps its existing 24 MiB route limit; the hash
         // opts into immutable storage instead of the legacy mutable photo slot.
         acknowledgement.parse(await (await request(`${base(scene.document.id)}/photo`, {
-          method: 'PUT', headers: { 'Content-Type': blob.type, 'X-Project-Asset': asset }, body: blob,
+          method: 'PUT', headers: { 'Content-Type': refs[0]?.kind === 'original' ? refs[0].mediaType : blob.type, 'X-Project-Asset': asset }, body: blob,
         })).json());
       } else await put(path, blob, 'application/octet-stream');
     } else {
       const bytes = await readAssetBody(existing.body, compositionAssetLimit(refs));
       await verifyAsset(new Uint8Array(bytes).buffer, asset);
     }
+    acknowledgeAsset(scene.document.id, asset, blob.size);
   }
   await saveThumbnail(scene.document.id, snapshot.thumbnail);
   await put(`${base(scene.document.id)}/scene`, JSON.stringify(scene), 'application/json');
@@ -183,6 +231,7 @@ async function drainComposition(id: SceneId, queue: SaveQueue): Promise<void> {
     } catch (error) {
       job.reject(error);
       if (error instanceof ProjectRequestError && error.terminal) {
+        compositionReceipts.delete(id);
         queue.pending?.reject(error);
         compositionQueues.delete(id);
         return;
@@ -232,7 +281,7 @@ export async function loadCompositionProject(id: SceneId, signal: AbortSignal) {
   const response = await request(`${base(id)}/scene`, { signal });
   const envelope = deserializeProjectEnvelope(JSON.parse(new TextDecoder().decode(await readAssetBody(response.body, 1024 * 1024))));
   if (envelope.scene.document.id !== id) throw new Error('The project document belongs to another photo.');
-  if (envelope.kind === 'legacy') return { kind: 'legacy' as const, ...await loadProject(id, signal) };
+  if (envelope.kind === 'legacy') return { kind: 'legacy' as const, ...await loadLegacyProject(id, signal, envelope.scene) };
   const assets = new Map<AssetId, Uint8Array<ArrayBuffer>>();
   await validateCompositionAssets(envelope.scene.document, async (asset, refs) => {
     const response = await request(`${base(id)}/${compositionAssetPath(asset, refs)}`, { signal });
@@ -241,5 +290,6 @@ export async function loadCompositionProject(id: SceneId, signal: AbortSignal) {
     return bytes;
   });
   signal.throwIfAborted();
+  for (const [asset, bytes] of assets) acknowledgeAsset(id, asset, bytes.byteLength);
   return { kind: 'composition' as const, document: envelope.scene.document, revision: envelope.scene.revision, assets };
 }

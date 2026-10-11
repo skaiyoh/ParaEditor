@@ -1,5 +1,6 @@
 import type { Scenario } from '../scenario.ts';
 import { z } from 'zod';
+import { BufferSource, EncodedPacketSink, Input, WEBM } from 'mediabunny';
 import { LOOP_ZOOM, PARALLAX_MARGIN, cameraOffset, parallaxDisplacement, loopPhase, frameCount, loopZoom } from '../../../src/core/motion.ts';
 
 const travelSchema = z.object({ x: z.number(), y: z.number() });
@@ -510,34 +511,69 @@ const exportScenario: Scenario = {
       t.ok('every GIF byte ignores the selected object dim', gif.selectionIgnored);
       t.ok('Preparing pill shows per-frame export progress', gif.progress.length > 2, gif.progress.slice(0, 5));
 
+      await page.emulate({ width: 1180, height: 820, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+      const movieSetup = await page.evaluate(z.object({ grain: z.number(), motion: z.boolean(), seconds: z.number(), width: z.number(), height: z.number() }), () => {
+        const demo = window.__noisyTest?.demo; if (demo === undefined) throw new Error('No movie scene.');
+        demo.setMotion({ enabled: true, loopSeconds: 3 });
+        const doc = demo.document(); if (doc === null) throw new Error('No movie document.');
+        const size = doc.frame.master.size, scale = Math.min(1, 1080 / Math.max(size.width, size.height));
+        return { grain: doc.style.grain, motion: doc.motion.enabled, seconds: doc.motion.loopSeconds,
+          width: Math.round(size.width * scale), height: Math.round(size.height * scale) };
+      });
+      t.ok('grained sample has Motion on at the default three seconds', movieSetup.grain > 0 && movieSetup.motion && movieSetup.seconds === 3, movieSetup);
+      await page.screenshot('export-grained-1180');
       const movieLabel = await page.evaluate(z.string(), () => {
         if (window.__loopExport !== undefined) window.__loopExport.progress.length = 0;
         return document.querySelector('[data-testid="export-movie"]')?.textContent ?? '';
       });
       await page.click('[data-testid="export-movie"]');
       await page.waitFor('movie finished', z.literal(true), () => window.__noisyTest?.demo.exportProgress() === null ? true : null, { timeoutMs: 120_000 });
-      const movie = await page.evaluate(z.object({ type: z.string(), bytes: z.number(), name: z.string(), duration: z.number(), width: z.number(), height: z.number(), status: z.string() }), async () => {
+      const movieDownload = await page.evaluate(z.object({ type: z.string(), bytes: z.number(), name: z.string(), duration: z.number(), width: z.number(), height: z.number(), status: z.string(), data: z.string() }), async () => {
         const entry = window.__loopExport?.entries[2];
-        if (entry === undefined) return { type: '', bytes: 0, name: '', duration: 0, width: 0, height: 0, status: window.__noisyTest?.demo.scene().status ?? '' };
+        if (entry === undefined) return { type: '', bytes: 0, name: '', duration: 0, width: 0, height: 0, status: window.__noisyTest?.demo.scene().status ?? '', data: '' };
         const video = document.createElement('video'), url = URL.createObjectURL(entry.blob);
         try {
           video.muted = true; video.src = url;
           await new Promise<void>((resolve, reject) => { video.onloadedmetadata = () => resolve(); video.onerror = () => reject(new Error('The movie cannot be decoded.')); });
-          // WebM from MediaRecorder may omit its duration header; decode to the end.
+          // Play the actual movie to completion, including containers with a finite duration header.
           let duration = video.duration;
-          if (!Number.isFinite(duration)) {
-            await new Promise<void>((resolve, reject) => {
-              video.onended = () => { duration = video.currentTime; resolve(); };
-              void video.play().catch(reject);
-            });
-          }
-          return { type: entry.blob.type, bytes: entry.blob.size, name: entry.name, duration, width: video.videoWidth, height: video.videoHeight, status: window.__noisyTest?.demo.scene().status ?? '' };
+          await new Promise<void>((resolve, reject) => {
+            video.onended = () => { if (!Number.isFinite(duration)) duration = video.currentTime; resolve(); };
+            video.onerror = () => reject(new Error('The movie stopped decoding.'));
+            void video.play().catch(reject);
+          });
+          const data = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader(); reader.onerror = () => reject(reader.error);
+            reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result.split(',')[1] ?? '') : reject(new Error('No movie bytes.'));
+            reader.readAsDataURL(entry.blob);
+          });
+          return { type: entry.blob.type, bytes: entry.blob.size, name: entry.name, duration, width: video.videoWidth, height: video.videoHeight, status: window.__noisyTest?.demo.scene().status ?? '', data };
         } finally { video.pause(); video.removeAttribute('src'); video.load(); URL.revokeObjectURL(url); }
       });
+      const { data, ...movie } = movieDownload;
+      const movieBytes = Buffer.from(data, 'base64');
+      await t.file('grained-three-seconds.webm', movieBytes);
+      const input = new Input({ source: new BufferSource(movieBytes), formats: [WEBM] });
+      const movieFrames: { timestamp: number; duration: number }[] = [];
+      try {
+        const track = await input.getPrimaryVideoTrack(); if (track === null) throw new Error('No movie video track.');
+        for await (const packet of new EncodedPacketSink(track).packets()) movieFrames.push({ timestamp: packet.timestamp, duration: packet.duration });
+      } finally { input.dispose(); }
       const movieProgress = await page.evaluate(z.array(z.string()), () => window.__loopExport?.progress ?? []);
       t.ok('Movie shows per-frame progress in the Preparing pill', movieProgress.length > 2, movieProgress.slice(0, 5));
       t.ok('movie saves advertised WebM type above 50 KB', movieLabel.includes('WebM') && movie.type.startsWith('video/webm') && movie.name === `${expected.title}-loop.webm` && movie.bytes > 50_000, { movieLabel, ...movie });
-      t.ok('movie decodes at capped master size and one period within one frame', Math.max(movie.width, movie.height) === 1080 && Math.abs(movie.duration - expected.seconds) < 1 / 30 + .01, movie);
+      t.ok('movie decodes at unchanged output size and three seconds within one frame', movie.width === movieSetup.width && movie.height === movieSetup.height && Math.abs(movie.duration - 3) < 1 / 30 + .01, movie);
+      t.equal('movie retains every one of the 90 frames', movieFrames.length, 90);
+      t.ok('all movie timestamps follow the exact 30 fps timeline', movieFrames.every((frame, i) => Math.abs(frame.timestamp - i / 30) < .0011), movieFrames);
+      const movieCancellation = await page.evaluate(z.boolean(), async () => {
+        const demo = window.__noisyTest?.demo, capture = window.__loopExport;
+        if (demo === undefined || capture === undefined) throw new Error('No movie cancellation surface.');
+        const count = capture.entries.length, saving = demo.saveLoop('movie');
+        await new Promise(resolve => setTimeout(resolve, 100));
+        demo.setFry(.4); await saving;
+        return capture.entries.length === count && demo.exportProgress() === null;
+      });
+      t.ok('editing cancels a streaming movie without downloading partial bytes', movieCancellation);
 
       const lifecycle = await page.evaluate(z.object({ second: z.boolean(), reset: z.boolean(), edit: z.boolean(), imported: z.boolean(), failure: z.boolean(), disabled: z.boolean() }), async () => {
         const demo = window.__noisyTest?.demo, capture = window.__loopExport;
@@ -562,8 +598,8 @@ const exportScenario: Scenario = {
         const button = document.querySelector('[data-testid="export-movie"]');
         const disabled = button instanceof HTMLButtonElement && button.disabled && button.title.includes('unavailable');
         window.MediaRecorder = recorder;
-        const importing = demo.saveLoop('gif');
         const response = await fetch('/assets-static/sample.jpg'), blob = await response.blob();
+        const importing = demo.saveLoop('gif');
         await demo.importFile(new File([blob], 'replacement.jpg', { type: blob.type })); await importing;
         const imported = capture.entries.length === count && demo.exportProgress() === null;
         return { second: secondOnly, reset, edit, imported, failure, disabled };
@@ -592,7 +628,27 @@ const exportScenario: Scenario = {
       });
       t.ok('phone sheet shows both exports at 402 x 874 with 44 px targets', phone);
       await page.screenshot('export-phone-402');
-      await t.file('export-loop.json', JSON.stringify({ gif, movieLabel, movie, movieProgress, lifecycle, phone }, null, 2));
+      await page.waitFor('replacement photo ready for movie import cancellation', z.literal(true), () => {
+        const analysis = window.__noisyTest?.demo.analysis(); return analysis?.depth && !analysis.alive.heavy ? true : null;
+      }, { timeoutMs: 180_000 });
+      const movieImport = await page.evaluate(z.object({ running: z.boolean(), immediate: z.boolean(), imported: z.boolean(), changed: z.boolean(), downloads: z.number() }), async () => {
+        const demo = window.__noisyTest?.demo, capture = window.__loopExport;
+        if (demo === undefined || capture === undefined) throw new Error('No movie import surface.');
+        const response = await fetch('/assets-static/sample.jpg'), blob = await response.blob();
+        const before = demo.document()?.id, count = capture.entries.length;
+        const saving = demo.saveLoop('movie');
+        // Yield to the streaming encoder, then import while its export is still active.
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const running = demo.exportProgress() !== null;
+        const importing = demo.importFile(new File([blob], 'movie-replacement.jpg', { type: blob.type }));
+        const immediate = demo.exportProgress() === null;
+        await Promise.all([saving, importing]);
+        return { running, immediate, imported: capture.entries.length === count && demo.exportProgress() === null,
+          changed: demo.document()?.id !== before && demo.document()?.title === 'movie-replacement', downloads: capture.entries.length - count };
+      });
+      t.ok('importing during a streaming movie cancels immediately without downloading and installs the new photo',
+        movieImport.running && movieImport.immediate && movieImport.imported && movieImport.changed && movieImport.downloads === 0, movieImport);
+      await t.file('export-loop.json', JSON.stringify({ gif, movieSetup, movieLabel, movie, movieFrames, movieProgress, movieCancellation, lifecycle, phone, movieImport }, null, 2));
     } finally { await page.evaluate(z.null(), () => { window.__loopExport?.restore(); return null; }); }
   },
 };

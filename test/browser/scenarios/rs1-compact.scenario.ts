@@ -169,6 +169,7 @@ export const scenarios: readonly Scenario[] = [{
       await t.page.screenshot(`adjust-${label}`);
       await t.page.press('Escape');
       t.ok(`${label}: Escape collapses and returns focus without deselecting`, await t.page.evaluate(z.boolean(), () => document.activeElement === document.querySelector('[data-testid="tool-adjust"]') && document.querySelector('.context-bar') !== null && document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'false'));
+      await touch(t, '[data-testid="tool-actions"]');
       await touch(t, '[data-testid="projects-toggle"]');
       await t.page.screenshot(`projects-${label}`);
       await touch(t, '[data-testid="projects-return"]');

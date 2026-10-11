@@ -1,19 +1,25 @@
 /** Displacement endpoints come from core/parallaxDisplacement, not duplicate math. */
+/** Shared verbatim by photo geometry and each constant-disparity paint tile. */
+export const motionProjection = `
+uniform vec3 displacementX;
+uniform vec3 displacementY;
+uniform float zoom;
+vec4 projectPhoto(vec2 point, float d) {
+  vec2 displacement = vec2(mix(displacementX.x, displacementX.y, d), mix(displacementY.x, displacementY.y, d));
+  vec2 p = (point + displacement - .5) * zoom + .5;
+  return vec4(p * 2. - 1., 1. - 2. * d, 1.);
+}`;
 export const geometryVertex = `#version 300 es
 precision highp float;
 invariant gl_Position;
 layout(location=0) in vec2 point;
 uniform sampler2D depthPlane;
-uniform vec3 displacementX;
-uniform vec3 displacementY;
-uniform float zoom;
 out vec2 frameUV;
+${motionProjection}
 void main() {
   frameUV = point;
   float d = clamp(texture(depthPlane, point).r, 0., 1.);
-  vec2 displacement = vec2(mix(displacementX.x, displacementX.y, d), mix(displacementY.x, displacementY.y, d));
-  vec2 p = (point + displacement - .5) * zoom + .5;
-  gl_Position = vec4(p * 2. - 1., 1. - 2. * d, 1.);
+  gl_Position = projectPhoto(point, d);
 }`;
 
 export const geometry = `#version 300 es
@@ -78,28 +84,33 @@ ${coverageBody}
 }`;
 
 /** The same fixed-screen ray intersection as core/perspective; stored textures remain y down. */
-export const perspectiveVertex = `#version 300 es
-precision highp float;
-invariant gl_Position;
-layout(location=0) in vec2 point;
-uniform sampler2D depthPlane;
+export const perspectiveProjection = `
 uniform vec3 apertureCenter;
 uniform vec3 apertureSizeCrop;
 uniform vec3 depthFactors;
 uniform vec3 eye;
-out vec3 sourceProjective;
-void main() {
-  float d = clamp(texture(depthPlane, point).r, 0., 1.);
+vec4 projectPhoto(vec2 point, float d) {
   float t = mix(depthFactors.y, depthFactors.x, d);
-  // The photo is a projection from E0, not a UV parametrization of the 3D triangle.
-  // Carry homogeneous source coordinates so neutral interpolation reproduces it exactly.
-  sourceProjective = vec3(point * t, t);
   vec2 screen = apertureCenter.xy + (point - .5) * vec2(1., -1.) * apertureSizeCrop.xy / (1. - 2. * apertureSizeCrop.z);
   vec3 world = vec3(t * screen, depthFactors.z * (1. - t));
   float w = eye.z - world.z;
   vec2 projected = (eye.z * world.xy - world.z * eye.xy) / w;
   vec2 p = (projected - apertureCenter.xy) / apertureSizeCrop.xy * vec2(1., -1.);
-  gl_Position = vec4(p * 2. * w, (1. - 2. * d) * w, w);
+  return vec4(p * 2. * w, (1. - 2. * d) * w, w);
+}`;
+export const perspectiveVertex = `#version 300 es
+precision highp float;
+invariant gl_Position;
+layout(location=0) in vec2 point;
+uniform sampler2D depthPlane;
+out vec3 sourceProjective;
+${perspectiveProjection}
+void main() {
+  float d = clamp(texture(depthPlane, point).r, 0., 1.);
+  float t = mix(depthFactors.y, depthFactors.x, d);
+  // The source is a neutral projection, not a UV parametrization of the triangle.
+  sourceProjective = vec3(point * t, t);
+  gl_Position = projectPhoto(point, d);
 }`;
 
 export const perspectiveGeometry = `#version 300 es

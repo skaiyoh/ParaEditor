@@ -33,8 +33,10 @@ import {
 } from '../src/core/motion.ts';
 import type { Rect, Size } from '../src/core/raster.ts';
 import { parseDocument } from '../src/core/schema.ts';
+import { linkedRemoval } from '../src/core/reduce.ts';
 import type { Motion, ObjectMotion, SceneDocument, SceneObject } from '../src/core/types.ts';
 import { fiveClusterDocument, validDocuments } from './fixtures/documents.ts';
+import { rasterSource } from './fixtures/composition.ts';
 import { objectId, tappedObject } from './fixtures/edits.ts';
 
 const MOVING_KINDS = ['bob', 'sway', 'wobble'] as const;
@@ -52,7 +54,7 @@ const PHASES = phasesOf(90);
 /** The five-cluster document with `motion` and the given objects, and no plate. */
 function withMotion(motion: Partial<Motion>, objects: readonly SceneObject[] = fiveClusterDocument().objects): SceneDocument {
   const doc = fiveClusterDocument();
-  return { ...doc, motion: { ...doc.motion, ...motion }, objects: [...objects], analysis: { ...doc.analysis, plate: null } };
+  return { ...doc, motion: { ...doc.motion, ...motion }, objects: [...objects], removals: objects.map(linkedRemoval), analysis: { ...doc.analysis, plate: null } };
 }
 
 function objectWith(n: number, motion: ObjectMotion, bounds: Rect, depthMedian = 0.6): SceneObject {
@@ -412,7 +414,7 @@ test('objectMotionBound is motionBound of the object over the master size while 
     { x: 800, y: 30, width: 400, height: 300 },
     { x: 1700, y: 1500, width: 400, height: 300 },
   ];
-  for (const frame of FRAMES) {
+  for (const frame of [...FRAMES, ...LIMIT_FRAMES]) {
     for (const [i, bounds] of placements.entries()) {
       for (const kind of [...MOVING_KINDS, 'none'] as const) {
         const motion: ObjectMotion = { kind, amount: 0.6 };
@@ -499,7 +501,14 @@ test("sway's bound stays a number from 0 to 1 when the gap is the peak reach to 
 
 type Generated = { readonly label: string; readonly doc: SceneDocument };
 
+// Crossing an edge by 20% must still fit v5's 2048-pixel source limit.
 const FRAMES: readonly Size[] = [
+  { width: 1706, height: 1280 },
+  { width: 1280, height: 1706 },
+  { width: 1706, height: 426 },
+];
+// Retain the original full-size cases whose coverage fits a valid source.
+const LIMIT_FRAMES: readonly Size[] = [
   { width: 2048, height: 1536 },
   { width: 1536, height: 2048 },
   { width: 2048, height: 512 },
@@ -522,7 +531,7 @@ const PLACEMENTS: readonly (readonly [string, (frame: Size) => Rect])[] = [
 function generatedDocuments(): readonly Generated[] {
   const out: Generated[] = [];
   const base = fiveClusterDocument();
-  for (const frame of FRAMES) {
+  for (const frame of [...FRAMES, ...LIMIT_FRAMES]) {
     for (const enabled of [true, false]) {
       for (const orbit of [0, 0.5, 1]) {
         for (const focus of [null, 0, 0.3, 1]) {
@@ -530,13 +539,20 @@ function generatedDocuments(): readonly Generated[] {
             for (const kind of MOVING_KINDS) {
               for (const amount of [1, 0.37]) {
                 const bounds = place(frame);
+                if (bounds.x + bounds.width > 2048 || bounds.y + bounds.height > 2048) continue;
                 const objects = [objectWith(0, { kind, amount }, bounds, 0.35), { ...objectWith(1, { kind: 'wobble', amount: 1 }, { x: frame.width * 0.1, y: frame.height * 0.1, width: 64, height: 48 }, 0.9), subject: true }];
+                // A raster source may extend past the frame; photo-region coverage must fit its photo.
+                const extent = { width: Math.ceil(Math.max(frame.width, ...objects.map((layer) => layer.produced.bounds.x + layer.produced.bounds.width))), height: Math.ceil(Math.max(frame.height, ...objects.map((layer) => layer.produced.bounds.y + layer.produced.bounds.height))) };
+                const source = rasterSource();
+                const sourceRef = { kind: 'raster', id: source.id } as const;
                 const doc: SceneDocument = {
                   ...base,
+                  sources: [{ ...source, image: { ...source.image, size: extent }, provenance: { ...source.provenance, originalSize: extent } }],
+                  removals: [],
                   frame: { ...base.frame, master: { ...base.frame.master, size: frame } },
                   analysis: { ...base.analysis, plate: null },
                   motion: { enabled, drift: { direction: 'circle', amount: orbit }, parallax: 1, loopSeconds: 3, focus },
-                  objects,
+                  objects: objects.map((layer) => ({ ...layer, content: { kind: 'source', source: sourceRef }, origin: { kind: 'artwork', source: source.id } })),
                 };
                 out.push({ label: `${frame.width}x${frame.height}, motion ${enabled ? 'on' : 'off'}, orbit ${orbit}, focus ${focus}, ${placement}, ${kind} ${amount}`, doc });
               }

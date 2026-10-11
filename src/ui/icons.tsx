@@ -5,6 +5,9 @@ const ICONS = {
   actions: <><path d="M12.6 3.4a4 4 0 0 0-5 5.1L3.3 12.8a1.6 1.6 0 0 0 2.3 2.3l4.3-4.3a4 4 0 0 0 5-5.1l-2.3 2.3-2-.4-.4-2z"/></>,
   adjust: <><path d="M3.5 16.5 11 9"/><path d="M14 2.5v5M11.5 5h5"/><path d="M15.5 10.5v3M14 12h3"/><path d="M7 4v2.5M5.75 5.25h2.5"/></>,
   selection: <><path d="M6 4.5c4.5-2 9 0 7.5 2.75S4 9.5 5 13s6.5 3.5 9.5 1.75"/><path d="M3.5 3.5v.01M16.5 16.5v.01" stroke-width="2.5"/></>,
+  invert: <><circle cx="10" cy="10" r="6.5"/><path d="M10 3.5v13M10 5l4.5 4.5M10 9l4 4M10 13l1.5 1.5"/></>,
+  feather: <><path d="M4 16 14 6M7 13C3 8 8 2 16 3c1 8-4 13-9 10ZM8 12h4M11 9h4"/></>,
+  fit: <><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/><rect x="6.5" y="6.5" width="7" height="7" rx="1"/></>,
   transform: <><path d="M4 3l11.5 5.25-5 1.25L8.75 15z"/><path d="m11 10 4.5 4.5"/></>,
   brush: <><path d="M16.5 3.5 9 11"/><path d="M8.5 11.5c-2.5-.5-4.5 1-4.75 3.25-.2 1.4-.9 2-1.75 2.25 3 .9 6.5.2 7.25-2.25.4-1.3 0-2.5-.75-3.25z"/></>,
   eraser: <><path d="m8 16.5 9-9-4.5-4.5-9.5 9.5 4 4h9"/><path d="m6.5 8.5 4.5 4.5"/></>,
@@ -28,6 +31,13 @@ const ICONS = {
   sampler: <><path d="m11.5 5.5 2-2a2.1 2.1 0 0 1 3 3l-2 2"/><path d="m10.5 5.5 4 4"/><path d="m11.5 6.5-6.75 6.75-.5 2.5 2.5-.5 6.75-6.75M4.25 15.75 3 17"/></>,
   compare: <><path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5Z"/><circle cx="10" cy="10" r="2.5"/><path d="m3 3 14 14"/></>,
   check: <path d="m4 10 4 4 8-8" />,
+  remix: <><rect x="3" y="3" width="8" height="5" rx="1.5"/><rect x="9" y="12" width="8" height="5" rx="1.5"/><path d="M7 8v6.5h2"/></>,
+  grip: <path d="M7.5 5h.01M12.5 5h.01M7.5 10h.01M12.5 10h.01M7.5 15h.01M12.5 15h.01" stroke-width="2.5"/>,
+  up: <><path d="M10 16V4"/><path d="m5 9 5-5 5 5"/></>,
+  down: <><path d="M10 4v12"/><path d="m5 11 5 5 5-5"/></>,
+  chevron: <path d="m8 5 5 5-5 5"/>,
+  add: <path d="M10 4v12M4 10h12"/>,
+  alert: <><circle cx="10" cy="10" r="7"/><path d="M10 6.5v4.5M10 13.5v.01"/></>,
 };
 
 export function Icon({ name }: { readonly name: keyof typeof ICONS }) {

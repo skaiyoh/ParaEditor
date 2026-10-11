@@ -19,7 +19,7 @@ const INVALID = 'This artwork could not be opened. Try exporting it as PNG, JPEG
 /** Unlike photos, artwork permits odd dimensions and a one-pixel short side. */
 export function artworkSize(original: Size): Size {
   if (![original.width, original.height].every(n => Number.isSafeInteger(n) && n > 0)) throw new Error('The artwork dimensions are invalid.');
-  if (original.width * original.height > 64_000_000) throw new Error('This artwork is too large. noisy opens artwork of up to 64 megapixels.');
+  if (original.width * original.height > 64_000_000) throw new Error('This artwork is too large. ParaEditor opens artwork of up to 64 megapixels.');
   const scale = Math.min(1, COMPOSITION_LIMITS.rasterSide / Math.max(original.width, original.height));
   return { width: Math.max(1, Math.round(original.width * scale)), height: Math.max(1, Math.round(original.height * scale)) };
 }

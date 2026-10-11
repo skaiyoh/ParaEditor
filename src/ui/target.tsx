@@ -73,3 +73,16 @@ export function CompareHold({ session }: { readonly session: DemoSession }) {
     <Icon name="compare" />
   </button>;
 }
+
+/** The active operation target and the actual authoring magnification share one line. */
+export function TargetReadout({ session, fit }: { readonly session: DemoSession; readonly fit: number }) {
+  const scene = session.snapshot().scene, authoring = session.authoringState(), selection = session.selectionState();
+  const layer = scene?.doc.objects.find(layer => layer.id === scene.selected);
+  const name = authoring.target.kind === 'selection' && selection.selection !== null ? 'Selection' : layer?.name;
+  return <div class="photo-name" data-testid="target-readout" title={scene?.doc.frame.original.name}>
+    <span>{scene?.doc.frame.original.name ?? 'No photo open'}{name === undefined ? '' : ` / ${name}`}</span>
+    {scene !== null && <button type="button" class="fit-readout" data-testid="authoring-fit" aria-label="Fit photo" title="Fit photo (0)" onClick={() => session.fitAuthoring()}>
+      <Icon name="fit" />{Math.round(fit * (selection.neutral ? selection.view.zoom : 1))}%
+    </button>}
+  </div>;
+}

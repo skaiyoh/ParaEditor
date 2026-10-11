@@ -1,5 +1,6 @@
 import { encodeRaster } from '../src/core/asset-codec.ts';
 import { compositionDocumentSchema } from '../src/core/composition-schema.ts';
+import { migrateV5ToV6, withDerivedGrainStyle } from '../src/core/remix-schema.ts';
 import { hashAsset, compositionInventory } from '../src/projects/assets.ts';
 import { serializeCompositionScene, deserializeCompositionScene } from '../src/projects/serialize.ts';
 import { newComposition, artworkLayer, rasterSource, repairProduct } from './fixtures/composition.ts';
@@ -15,7 +16,7 @@ import { deserializeScene, serializeScene } from '../src/projects/serialize.ts';
 import type { Plane } from '../src/core/raster.ts';
 import * as store from '../src/projects/store.ts';
 import { createProjectSession } from '../src/session/projects.ts';
-import { fiveClusterDocument, minimalDocument, uuid } from './fixtures/documents.ts';
+import { legacyFiveClusterDocument as fiveClusterDocument, legacyMinimalDocument as minimalDocument, minimalDocument as activeDocument, uuid } from './fixtures/documents.ts';
 import { startServer, tempDir, type Server } from './support/cli.ts';
 
 const projectList = z.object({ projects: z.array(z.object({ id: z.string(), name: z.string(), updatedAt: z.iso.datetime(), thumbnail: z.string() })) });
@@ -205,16 +206,17 @@ test('a production 204 probe disables every subsequent project request, includin
   let renders = 0;
   try {
     const projects = createProjectSession(() => { renders++; throw new Error('An absent store must not export thumbnails.'); });
-    const file = new File([photo], document.frame.original.name, { type: 'image/png' });
+    const { minimalDocument: currentDocument } = await import('./fixtures/documents.ts');
+    const active = currentDocument();
     // Import and edit can begin before the boot probe's response arrives.
-    projects.begin(file, document, new Map(), null);
-    projects.observe({ ...document, style: { ...document.style, fry: 0.7 } }, new Map());
+    projects.begin({ document: active, assets: new Map(), checkpoint: { kind: 'new' } });
+    projects.observe({ ...active, style: { ...active.style, fry: 0.7 } }, new Map());
     await projects.refresh();
     assert.equal(projects.snapshot().state, 'absent');
     assert.deepEqual(projects.snapshot().projects, []);
     assert.equal(projects.snapshot().current, null);
-    projects.begin(file, document, new Map(), null);
-    projects.observe({ ...document, style: { ...document.style, fry: 0.3 } }, new Map());
+    projects.begin({ document: active, assets: new Map(), checkpoint: { kind: 'new' } });
+    projects.observe({ ...active, style: { ...active.style, fry: 0.3 } }, new Map());
     projects.suspend();
     await projects.refresh();
     assert.equal(await projects.remove(document.id), false);
@@ -354,7 +356,14 @@ test('DELETE tombstones stop a surviving timed-out scene PUT and every binary PU
 }));
 
 test('a failed first photo upload can be deleted with 404, drops its job and cancels its pending save', async () => withClient(async () => {
-  const doc = freshDocument(204), route = `/api/projects/${doc.id}`;
+  const original = createHash('sha256').update(photo).digest('hex'); assert.ok(isAssetId(original));
+  const masterBytes = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR4nGP4zwAE/xnqQeR/bh7e/wAuSQWfwB0i9wAAAABJRU5ErkJggg==', 'base64'));
+  const master = createHash('sha256').update(masterBytes).digest('hex'); assert.ok(isAssetId(master));
+  const template = activeDocument(), id = uuid(204); assert.ok(isSceneId(id));
+  const doc = { ...template, id, frame: { ...template.frame, master: { ...template.frame.master, asset: master },
+    source: { asset: original, byteLength: photo.length, mediaType: 'image/png' } } };
+  const assets = new Map([[master, masterBytes], [original, photo]]);
+  const route = `/api/projects/${doc.id}`;
   await setFault(`path:${route}/photo:http500:times=1`);
   const clientFetch = globalThis.fetch, calls: string[] = [];
   globalThis.fetch = (input, init) => {
@@ -367,14 +376,14 @@ test('a failed first photo upload can be deleted with 404, drops its job and can
   const failed = new Promise<void>((resolve) => {
     const unsubscribe = projects.subscribe((state) => { if (state.states.get(doc.id) === 'failed') { unsubscribe(); resolve(); } });
   });
-  projects.begin(new File([photo], 'photo.png', { type: 'image/png' }), doc, new Map(), null);
+  projects.begin({ document: doc, assets, checkpoint: { kind: 'new' } });
   await failed;
   assert.equal(projects.diagnostics().retainedJobs, 1);
   assert.equal((await request(`${route}/scene`)).status, 404);
   assert.equal(await projects.remove(doc.id), true);
   assert.deepEqual(projects.diagnostics(), { retainedJobs: 0, pendingSaves: 0 });
   assert.ok(!projects.snapshot().projects.some((project) => project.id === doc.id));
-  projects.observe({ ...doc, style: { ...doc.style, fry: 0.9 } }, new Map());
+  projects.observe({ ...doc, style: { ...doc.style, fry: 0.9 } }, assets);
   await new Promise((resolve) => setTimeout(resolve, 1700));
   assert.equal(renders, 0);
   assert.deepEqual(calls, [`${route}/photo`]);
@@ -384,9 +393,10 @@ test('a failed first photo upload can be deleted with 404, drops its job and can
   assert.equal(projects.snapshot().state, 'saving', 'an import in preparation is not a saved project');
   projects.openFailed();
   assert.equal(projects.snapshot().state, 'failed', 'a refused import clears its preparation state');
-  const next = freshDocument(206);
+  const nextId = uuid(206); assert.ok(isSceneId(nextId));
+  const next = { ...doc, id: nextId };
   projects.suspend();
-  projects.begin(new File([photo], 'next.png', { type: 'image/png' }), next, new Map(), null);
+  projects.begin({ document: next, assets, checkpoint: { kind: 'new' } });
   assert.equal(projects.snapshot().current, next.id);
   assert.equal(projects.snapshot().states.get(next.id), 'saving');
   assert.equal(await projects.remove(next.id), true);
@@ -473,6 +483,25 @@ test('v2 real HTTP checkpoint retains RGBA alpha, fractional masks, depth, PNG, 
   const rgba = assets.get(rgbaId); assert.ok(rgba);
   assert.equal((await put(`${route}/assets/${rgbaId}`, new Uint8Array(rgba), 'application/octet-stream')).status, 410);
   await assert.rejects(stat(path.join(scratch, 'results', 'projects', doc.id)), { code: 'ENOENT' });
+}));
+
+test('v6 HTTP checkpoints persist wire documents and reopen older dev-server derived Grain fields', async () => withClient(async () => {
+  const { doc, assets } = await compositionFixture(404);
+  const migrated = migrateV5ToV6(doc); assert.ok(migrated.ok);
+  const document = withDerivedGrainStyle(migrated.value), wire = serializeCompositionScene(document, 0);
+  const route = `/api/projects/${doc.id}/scene`;
+  assert.deepEqual(await store.saveComposition({ document, revision: 0, assets,
+    thumbnail: new Blob([jpeg], { type: 'image/jpeg' }) }), { kind: 'saved', revision: 0 });
+  assert.deepEqual(await (await request(route)).json(), wire);
+  const file = path.join(scratch, 'results', 'projects', doc.id, 'scene.json');
+  const stored = z.object({ document: z.unknown() }).parse(JSON.parse(await readFile(file, 'utf8')));
+  assert.deepEqual(stored.document, wire.document, 'disk contains the serialized v6 shape');
+  const reopened = await store.loadCompositionProject(doc.id, new AbortController().signal);
+  assert.equal(reopened.kind, 'composition'); assert.deepEqual(reopened.document, document);
+  // The frozen candidate wrote its derived read model to disk before this fix.
+  await writeFile(file, JSON.stringify({ ...wire, document, updatedAt: doc.updatedAt }));
+  assert.deepEqual(await (await request(route)).json(), wire);
+  assert.deepEqual((await store.loadCompositionProject(doc.id, new AbortController().signal)).document, document);
 }));
 
 test('slow v2 store and Undo/Redo retain at most active + newest pending, release superseded bytes, and upload committed refs only', async () => withClient(async () => {

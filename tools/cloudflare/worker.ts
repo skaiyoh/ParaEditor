@@ -110,7 +110,9 @@ export function createHandler(config: HostingConfig): { fetch(request: Request, 
         return handleProjects(request, pathname, { PROJECTS: env.PROJECTS, NEON_DATABASE_URL: env.NEON_DATABASE_URL }, headers, apiError);
       }
       const galleryAlias = pathname === '/gallery' || (pathname.startsWith('/gallery/') && isGalleryId(pathname.slice('/gallery/'.length)));
-      const route = routes.get(galleryAlias ? '/gallery.html' : pathname);
+      // Pages redirects /scenes.html to /scenes, as it does /gallery.html to /gallery.
+      const scenesAlias = pathname === '/scenes' && routes.has('/scenes.html');
+      const route = routes.get(galleryAlias ? '/gallery.html' : scenesAlias ? '/scenes.html' : pathname);
       if (route === undefined) return error(request, 404, 'Not found.');
       if (request.method !== 'GET' && request.method !== 'HEAD') return error(request, 405, 'Use GET or HEAD.', { Allow: 'GET, HEAD' });
       try {
@@ -118,6 +120,7 @@ export function createHandler(config: HostingConfig): { fetch(request: Request, 
           // Pages redirects /index.html; the local production contract serves it directly.
           const url = new URL(request.url);
           if (galleryAlias || pathname === '/gallery.html') url.pathname = '/gallery';
+          if (scenesAlias || pathname === '/scenes.html') url.pathname = '/scenes';
           if (pathname === '/index.html') url.pathname = '/';
           const tag = tags.get(route) ?? policyTag(route.headers);
           const forwarded = new Request(url, request);

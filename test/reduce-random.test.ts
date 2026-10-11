@@ -13,7 +13,7 @@ import { applyProduce, sortedMasks } from '../src/core/produce.ts';
 import { applyEdit, applyEdits } from '../src/core/reduce.ts';
 import { parseDocument } from '../src/core/schema.ts';
 import type { DepthStats, Harmony, ObjectMotion, ObjectProduced, Recolor, SceneDocument } from '../src/core/types.ts';
-import { assetId, fiveClusterDocument, validDocuments } from './fixtures/documents.ts';
+import { assetId, SAM_MODEL, fiveClusterDocument, validDocuments } from './fixtures/documents.ts';
 import { editCases, lightId, newLightAt, objectId, tappedObject } from './fixtures/edits.ts';
 import { depthProduct, plateProduct } from './fixtures/products.ts';
 
@@ -91,11 +91,16 @@ function stylePatch(random: Random): StylePatch {
   return patch;
 }
 
+function aiSelection(base: ObjectProduced) {
+  assert.ok(base.provenance.kind === 'ai');
+  return base.provenance.selection;
+}
+
 function produced(random: Random, base: ObjectProduced): ObjectProduced {
   const candidate = pick(random, [-1, 0, 1, 2, 3, 1.5]);
   return chance(random, 0.5)
-    ? { ...base, selection: { kind: 'taps', points: [{ at: { x: value(random), y: value(random) }, label: 'include' }], candidate } }
-    : { ...base, selection: { ...base.selection, candidate } };
+    ? { ...base, provenance: { kind: 'ai', model: SAM_MODEL, selection: { kind: 'taps', points: [{ at: { x: value(random), y: value(random) }, label: 'include' }], candidate, size: .5 } } }
+    : { ...base, provenance: { kind: 'ai', model: SAM_MODEL, selection: { ...aiSelection(base), candidate } } };
 }
 
 /** An id of an object in `doc`, or of no object. */
@@ -200,7 +205,8 @@ function randomProduct(random: Random, doc: SceneDocument): Produce {
       const roll = random();
       // The current masks, a stale set, or an unsorted one the schema refuses.
       const forMasks = roll < 0.6 ? current : roll < 0.9 ? [...current, assetId(0x99)].sort() : [assetId(0x99), assetId(0x31)];
-      return { kind, plate: plateProduct(Math.floor(random() * 4), forMasks) };
+      const plate = plateProduct(Math.floor(random() * 4), forMasks, doc);
+      return { kind, plate, required: plateProduct(0, sortedMasks(doc), doc).key };
     }
     case 'object.depth':
       return { kind, id: someObjectId(random, doc), depth: stats(random) };

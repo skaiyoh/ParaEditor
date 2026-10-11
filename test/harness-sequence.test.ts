@@ -363,7 +363,8 @@ test('the cooldown after a worker counts the largest stage that started in it: a
   const encodeWaitMs = COOLDOWN_MS.encode * SCALE;
   assert.ok(encodeWaitMs > COOLDOWN_MS.depth * SCALE);
   const second = await w.execute(RUN);
-  assert.ok(at(second.phases, 'setup').at - at(first.phases, 'after').at >= encodeWaitMs, `the setup came ${at(second.phases, 'setup').at - at(first.phases, 'after').at} ms after the termination, the encoder's wait being ${encodeWaitMs} ms`);
+  // One millisecond of slack: timers may fire a fraction of a millisecond early by performance.now(); the encoder's wait still exceeds depth's by far more.
+  assert.ok(at(second.phases, 'setup').at - at(first.phases, 'after').at >= encodeWaitMs - 1, `the setup came ${at(second.phases, 'setup').at - at(first.phases, 'after').at} ms after the termination, the encoder's wait being ${encodeWaitMs} ms`);
   const { gapMs, setupMs } = ran(second.outcome).reading;
   assert.ok(gapMs !== null && gapMs >= encodeWaitMs + setupMs, JSON.stringify({ gapMs, setupMs }));
 });

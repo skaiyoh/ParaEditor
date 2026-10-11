@@ -1,0 +1,599 @@
+{
+  "version": 1,
+  "title": "Lantern Court",
+  "authoredGeometry": true,
+  "geometry": "geometry.bin",
+  "vertexCount": 277260,
+  "geometrySha256": "d00f1faf92fe26bdb8da102c629b50f4d62e089b5e5ff264c025864fa796b15f",
+  "objects": 798,
+  "batches": [
+    {
+      "name": "04 / garden earth",
+      "color": [
+        0.020288562402129173,
+        0.03560131415724754,
+        0.028426039963960648
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 0,
+      "count": 36
+    },
+    {
+      "name": "03 / deep slate joints",
+      "color": [
+        0.040915198624134064,
+        0.0666259378194809,
+        0.08650045841932297
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 36,
+      "count": 11052
+    },
+    {
+      "name": "01 / weathered blue limestone",
+      "color": [
+        0.2345505803823471,
+        0.30054378509521484,
+        0.3324515223503113
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 11088,
+      "count": 40332
+    },
+    {
+      "name": "02 / silver limestone edges",
+      "color": [
+        0.35153260827064514,
+        0.43415364623069763,
+        0.41788506507873535
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 51420,
+      "count": 8100
+    },
+    {
+      "name": "10 / blackened bronze",
+      "color": [
+        0.04666508734226227,
+        0.05951123684644699,
+        0.04817182570695877
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 59520,
+      "count": 5664
+    },
+    {
+      "name": "09 / aged warm brass",
+      "color": [
+        0.47353148460388184,
+        0.31398871541023254,
+        0.11953842639923096
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 65184,
+      "count": 10524
+    },
+    {
+      "name": "11 / amber silk lantern",
+      "color": [
+        1.0,
+        0.520995557308197,
+        0.16513219475746155
+      ],
+      "emission": 1.7999999523162842,
+      "lighting": "baked",
+      "first": 75708,
+      "count": 1320
+    },
+    {
+      "name": "07 / peacock glazed roof",
+      "color": [
+        0.0423114113509655,
+        0.17464740574359894,
+        0.17144110798835754
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 77028,
+      "count": 312
+    },
+    {
+      "name": "06 / old red cedar",
+      "color": [
+        0.13286831974983215,
+        0.04373503103852272,
+        0.02518685907125473
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 77340,
+      "count": 35148
+    },
+    {
+      "name": "17 / quiet jade water",
+      "color": [
+        0.022173885256052017,
+        0.08437620848417282,
+        0.0802198201417923
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 112488,
+      "count": 36
+    },
+    {
+      "name": "14 / garden foliage 1",
+      "color": [
+        0.0666259378194809,
+        0.18782077729701996,
+        0.11953842639923096
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 112524,
+      "count": 26688
+    },
+    {
+      "name": "15 / pale lotus petals",
+      "color": [
+        0.8962693810462952,
+        0.46207699179649353,
+        0.43415364623069763
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 139212,
+      "count": 10080
+    },
+    {
+      "name": "16 / lotus heart",
+      "color": [
+        0.8631572127342224,
+        0.533276379108429,
+        0.13013647496700287
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 149292,
+      "count": 792
+    },
+    {
+      "name": "14 / garden foliage 2",
+      "color": [
+        0.13563333451747894,
+        0.2622506618499756,
+        0.12213877588510513
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 150084,
+      "count": 29376
+    },
+    {
+      "name": "14 / garden foliage 0",
+      "color": [
+        0.03071344457566738,
+        0.11443537473678589,
+        0.08228270709514618
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 179460,
+      "count": 27828
+    },
+    {
+      "name": "12 / pavilion rice paper",
+      "color": [
+        1.0,
+        0.5088813304901123,
+        0.16202937066555023
+      ],
+      "emission": 1.350000023841858,
+      "lighting": "baked",
+      "first": 207288,
+      "count": 72
+    },
+    {
+      "name": "08 / roof underside",
+      "color": [
+        0.015208514407277107,
+        0.045186202973127365,
+        0.05448027700185776
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 207360,
+      "count": 1944
+    },
+    {
+      "name": "13 / maple leaf 3",
+      "color": [
+        0.8069522380828857,
+        0.38642942905426025,
+        0.10702310502529144
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 209304,
+      "count": 16008
+    },
+    {
+      "name": "13 / maple leaf 0",
+      "color": [
+        0.5394794940948486,
+        0.10461648553609848,
+        0.03688944876194
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 225312,
+      "count": 15300
+    },
+    {
+      "name": "13 / maple leaf 2",
+      "color": [
+        0.3967552185058594,
+        0.05448027700185776,
+        0.03189603239297867
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 240612,
+      "count": 14592
+    },
+    {
+      "name": "13 / maple leaf 1",
+      "color": [
+        0.7083757519721985,
+        0.21952620148658752,
+        0.05951123684644699
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 255204,
+      "count": 15828
+    },
+    {
+      "name": "05 / velvet moss",
+      "color": [
+        0.07227185368537903,
+        0.15592646598815918,
+        0.05448027700185776
+      ],
+      "emission": 0.0,
+      "lighting": "baked",
+      "first": 271032,
+      "count": 4800
+    },
+    {
+      "name": "18 / distant moon",
+      "color": [
+        0.46207699179649353,
+        0.6938717365264893,
+        0.6653872728347778
+      ],
+      "emission": 1.399999976158142,
+      "lighting": "baked",
+      "first": 275832,
+      "count": 240
+    },
+    {
+      "name": "19 / faint distant stars",
+      "color": [
+        0.47353148460388184,
+        0.6653872728347778,
+        0.6938717365264893
+      ],
+      "emission": 1.5,
+      "lighting": "baked",
+      "first": 276072,
+      "count": 144
+    },
+    {
+      "name": "Showcase / recessed blue stone",
+      "color": [
+        0.017999999225139618,
+        0.03200000151991844,
+        0.039000000804662704
+      ],
+      "emission": 0.0,
+      "lighting": "world",
+      "first": 276216,
+      "count": 180
+    },
+    {
+      "name": "Showcase / solid bronze window",
+      "color": [
+        0.0949999988079071,
+        0.061000000685453415,
+        0.02800000086426735
+      ],
+      "emission": 0.0,
+      "lighting": "world",
+      "first": 276396,
+      "count": 144
+    },
+    {
+      "name": "Showcase / bronze depth ribs",
+      "color": [
+        0.17000000178813934,
+        0.10999999940395355,
+        0.04500000178813934
+      ],
+      "emission": 0.0,
+      "lighting": "world",
+      "first": 276540,
+      "count": 720
+    }
+  ],
+  "size": [
+    1280,
+    960
+  ],
+  "camera": {
+    "projection": [
+      1.6666666269302368,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      2.222222089767456,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      -1.058290719985962,
+      -1.0,
+      0.0,
+      0.0,
+      -14.572698593139648,
+      0.0
+    ],
+    "view": [
+      1.0,
+      -0.0,
+      0.0,
+      -0.0,
+      -0.0,
+      -1.6292068494294654e-07,
+      -1.0,
+      0.0,
+      0.0,
+      1.0,
+      -1.6292068494294654e-07,
+      -0.0,
+      -0.0,
+      -2.850001573562622,
+      -10.0,
+      1.0
+    ],
+    "position": [
+      0.0,
+      -10.0,
+      2.8499999046325684
+    ],
+    "right": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "up": [
+      0.0,
+      -1.4901161193847656e-07,
+      0.9999999403953552
+    ],
+    "shift": [
+      -0.23474174737930298,
+      -0.3129890263080597
+    ],
+    "near": 7.079999923706055,
+    "far": 250.0,
+    "travel": [
+      4.5,
+      3.5
+    ],
+    "convergence": 7.1,
+    "window": {
+      "halfWidth": 3.95,
+      "halfHeight": 3.05,
+      "depth": 25.0
+    }
+  },
+  "landmarks": {
+    "lantern": [
+      -2.48,
+      -1.35,
+      3.22
+    ],
+    "pavilion": [
+      0,
+      20,
+      4.3
+    ]
+  },
+  "references": [
+    {
+      "image": "neutral.webp",
+      "matrix": [
+        1.6666666269302368,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -3.6204593811817176e-07,
+        1.058290719985962,
+        1.0,
+        0.0,
+        2.222222089767456,
+        1.7241744387774816e-07,
+        1.6292068494294654e-07,
+        0.0,
+        -6.333336353302002,
+        -3.9897918701171875,
+        10.0
+      ],
+      "eye": [
+        0,
+        0
+      ]
+    },
+    {
+      "image": "left.webp",
+      "matrix": [
+        1.6666666269302368,
+        0.0,
+        0.0,
+        0.0,
+        -1.0915493965148926,
+        -3.6204593811817176e-07,
+        1.058290719985962,
+        1.0,
+        -1.778359717263811e-07,
+        2.222222089767456,
+        1.7241744387774816e-07,
+        1.6292068494294654e-07,
+        -3.165493965148926,
+        -6.333336353302002,
+        -3.9897918701171875,
+        10.0
+      ],
+      "eye": [
+        -4.65,
+        0
+      ]
+    },
+    {
+      "image": "right.webp",
+      "matrix": [
+        1.6666666269302368,
+        0.0,
+        0.0,
+        0.0,
+        1.0915493965148926,
+        -3.6204593811817176e-07,
+        1.058290719985962,
+        1.0,
+        1.778359717263811e-07,
+        2.222222089767456,
+        1.7241744387774816e-07,
+        1.6292068494294654e-07,
+        3.165493965148926,
+        -6.333336353302002,
+        -3.9897918701171875,
+        10.0
+      ],
+      "eye": [
+        4.65,
+        0
+      ]
+    },
+    {
+      "image": "down.webp",
+      "matrix": [
+        1.6666666269302368,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -1.1424102783203125,
+        1.058290719985962,
+        1.0,
+        0.0,
+        2.222221851348877,
+        1.7241744387774816e-07,
+        1.6292068494294654e-07,
+        0.0,
+        -9.646324157714844,
+        -3.989792823791504,
+        9.999999046325684
+      ],
+      "eye": [
+        0,
+        -3.65
+      ]
+    },
+    {
+      "image": "up.webp",
+      "matrix": [
+        1.6666666269302368,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.1424095630645752,
+        1.058290719985962,
+        1.0,
+        0.0,
+        2.222222328186035,
+        1.7241744387774816e-07,
+        1.6292068494294654e-07,
+        0.0,
+        -3.0203475952148438,
+        -3.9897918701171875,
+        10.0
+      ],
+      "eye": [
+        0,
+        3.65
+      ]
+    }
+  ],
+  "omittedBeforeGlass": [
+    "Path flagstone 00-0",
+    "Path flagstone 00-1",
+    "Path flagstone 00-2",
+    "Path flagstone 01-0",
+    "Path flagstone 01-1",
+    "Path flagstone 01-2",
+    "Path flagstone 02-0",
+    "Path flagstone 02-1",
+    "Path flagstone 02-2",
+    "Path flagstone 03-0",
+    "Path flagstone 03-1",
+    "Path flagstone 03-2",
+    "Path flagstone 04-0",
+    "Path flagstone 04-1",
+    "Path flagstone 04-2",
+    "Path flagstone 05-0",
+    "Path flagstone 05-1",
+    "Low courtyard border",
+    "Courtyard coping",
+    "Low courtyard border.001",
+    "Courtyard coping.001",
+    "Low courtyard border.019",
+    "Courtyard coping.019",
+    "Low courtyard border.020",
+    "Courtyard coping.020",
+    "Moss-covered garden boulder.004",
+    "Garden fern rosette.004",
+    "Moss-covered garden boulder.025",
+    "Garden fern rosette.025",
+    "Single fallen maple leaf.001",
+    "Single fallen maple leaf.005",
+    "Single fallen maple leaf.006",
+    "Single fallen maple leaf.009",
+    "Single fallen maple leaf.011",
+    "Single fallen maple leaf.012",
+    "Single fallen maple leaf.017",
+    "Single fallen maple leaf.025",
+    "Single fallen maple leaf.028"
+  ],
+  "provenance": "Original Blender triangles and procedural scene. Five static lighting references; continuous WebGL2 geometry rendering, not video or inferred depth.",
+  "neutralProjection": {
+    "lantern": [
+      0.26107901334762573,
+      0.5475271344184875
+    ],
+    "pavilion": [
+      0.5,
+      0.5537035465240479
+    ]
+  },
+  "elapsedSeconds": 16.626656499996898
+}

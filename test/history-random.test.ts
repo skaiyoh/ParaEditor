@@ -16,7 +16,7 @@ import { applyProduce, sortedMasks } from '../src/core/produce.ts';
 import { applyEdit, applyEdits } from '../src/core/reduce.ts';
 import { parseDocument } from '../src/core/schema.ts';
 import type { SceneDocument, SceneObject } from '../src/core/types.ts';
-import { assetId, validDocuments } from './fixtures/documents.ts';
+import { assetId, SAM_MODEL, validDocuments } from './fixtures/documents.ts';
 import { lightId, newLightAt, objectId, tappedObject } from './fixtures/edits.ts';
 import { depthProduct, plateProduct } from './fixtures/products.ts';
 
@@ -60,20 +60,25 @@ test('100 seeded gesture sessions preserve separate actions, cancellation and an
     const landed = applyProduce(current, { kind: 'depth', depth: depthProduct(3) }, current.updatedAt);
     assert.notEqual(landed.kind, 'refused'); current = landed.doc;
     for (let i = snapshots.length - 2; i >= 0; i--) {
-      const step = undo(history); assert.ok(step);
+      const step = undo(history); assert.ok(step); assert.equal(step.kind, 'document'); if (step.kind !== 'document') throw new Error('Expected a document history step.');
       const result = applyEdits(current, step.edits, current.updatedAt); assert.notEqual(result.kind, 'refused');
       current = result.doc; history = step.history;
       const expected = snapshots[i]; assert.ok(expected);
       assert.deepEqual(editable(current), editable(expected)); assert.deepEqual(current.analysis.depth, depthProduct(3));
     }
     for (const expected of snapshots.slice(1)) {
-      const step = redo(history); assert.ok(step);
+      const step = redo(history); assert.ok(step); assert.equal(step.kind, 'document'); if (step.kind !== 'document') throw new Error('Expected a document history step.');
       const result = applyEdits(current, step.edits, current.updatedAt); assert.notEqual(result.kind, 'refused');
       current = result.doc; history = step.history;
       assert.deepEqual(editable(current), editable(expected)); assert.deepEqual(current.analysis.depth, depthProduct(3));
     }
   }
 });
+
+function aiSelection(produced: SceneDocument['objects'][number]['produced']) {
+  assert.ok(produced.provenance.kind === 'ai');
+  return produced.provenance.selection;
+}
 
 /** mulberry32: a small seeded generator of uniform numbers in [0, 1). */
 function seeded(seed: number): Random {
@@ -144,7 +149,7 @@ function randomEdit(random: Random, doc: SceneDocument, fresh: () => number, kin
     case 'object.refine':
       return object === undefined
         ? null
-        : { kind: 'object.refine', id: object.id, produced: { ...object.produced, selection: { ...object.produced.selection, candidate: Math.floor(random() * 3) } } };
+        : { kind: 'object.refine', id: object.id, produced: { ...object.produced, provenance: { kind: 'ai', model: SAM_MODEL, selection: { ...aiSelection(object.produced), candidate: Math.floor(random() * 3) } } } };
     case 'light.add':
       return { kind: 'light.add', light: newLightAt(lightId(fresh()), 0.5, 0.5) };
     case 'light.remove':
@@ -168,7 +173,8 @@ function randomProduct(random: Random, doc: SceneDocument, fresh: () => number):
   if (roll < 0.25) return { kind: 'depth', depth: depthProduct(fresh()) };
   if (roll < 0.5) {
     const forMasks = random() < 0.7 ? sortedMasks(doc) : [assetId(0x99)];
-    return { kind: 'plate', plate: plateProduct(fresh(), forMasks) };
+    const plate = plateProduct(fresh(), forMasks, doc);
+    return { kind: 'plate', plate, required: plateProduct(0, sortedMasks(doc), doc).key };
   }
   if (roll < 0.8) {
     const id = random() < 0.8 ? (someOf(random, doc.objects)?.id ?? objectId(0)) : objectId(fresh());
@@ -235,8 +241,8 @@ test(`${SEQUENCES} seeded random sessions of edits, products, undos, and redos s
             guessed++;
             for (const snap of [...undoSnaps, ...redoSnaps]) {
               assert.deepEqual([snap.before.objects, snap.after.objects], [[], []], label);
-              snap.before = { ...snap.before, objects: [withoutDepth(guess)] };
-              snap.after = { ...snap.after, objects: [withoutDepth(guess)] };
+              snap.before = { ...snap.before, objects: [withoutDepth(guess)], removals: result.doc.removals };
+              snap.after = { ...snap.after, objects: [withoutDepth(guess)], removals: result.doc.removals };
             }
           }
         }
@@ -244,6 +250,8 @@ test(`${SEQUENCES} seeded random sessions of edits, products, undos, and redos s
       } else if (roll < 0.3) {
         const taken: HistoryStep | null = undo(history);
         if (taken === null) continue;
+        assert.equal(taken.kind, 'document');
+        if (taken.kind !== 'document') throw new Error('Expected a document history step.');
         const result = applyEdits(doc, taken.edits, now);
         assert.notEqual(result.kind, 'refused', `${label}: undo ${JSON.stringify(taken.edits)}`);
         doc = result.doc;
@@ -256,6 +264,8 @@ test(`${SEQUENCES} seeded random sessions of edits, products, undos, and redos s
       } else if (roll < 0.4) {
         const taken = redo(history);
         if (taken === null) continue;
+        assert.equal(taken.kind, 'document');
+        if (taken.kind !== 'document') throw new Error('Expected a document history step.');
         const result = applyEdits(doc, taken.edits, now);
         assert.notEqual(result.kind, 'refused', `${label}: redo ${JSON.stringify(taken.edits)}`);
         doc = result.doc;
@@ -289,7 +299,7 @@ test(`${SEQUENCES} seeded random sessions of edits, products, undos, and redos s
           assert.ok(snap !== undefined, label);
           assert.deepEqual(editable(doc), snap.before, `${label}: returned`);
           counts.returned++;
-        } else if (last !== undefined && top !== undefined && top.inverse === last.inverse) {
+        } else if (last !== undefined && top !== undefined && !('kind' in last) && !('kind' in top) && top.inverse === last.inverse) {
           const snap = undoSnaps.at(-1);
           assert.ok(snap !== undefined, label);
           snap.after = editable(doc);

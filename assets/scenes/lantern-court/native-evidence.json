@@ -1,0 +1,84 @@
+{
+  "title": "Lantern Court",
+  "blender": "5.2.2 LTS",
+  "seed": 11102026,
+  "camera": "perspective, 30 mm, fixed rotation, native reference eye offsets +/-0.55 m",
+  "resolution": [
+    1920,
+    1440
+  ],
+  "objects": 825,
+  "materials": 25,
+  "external_images": [],
+  "landmark_normalized_projection": {
+    "neutral": {
+      "near_lantern": [
+        0.261223,
+        0.527665,
+        8.655228
+      ],
+      "bridge_rail": [
+        0.568556,
+        0.410389,
+        18.476341
+      ],
+      "pavilion": [
+        0.5,
+        0.533833,
+        30.021109
+      ],
+      "moon": [
+        0.401067,
+        0.802448,
+        88.443939
+      ]
+    },
+    "left": {
+      "near_lantern": [
+        0.297811,
+        0.527665,
+        8.655228
+      ],
+      "bridge_rail": [
+        0.576996,
+        0.410389,
+        18.476341
+      ],
+      "pavilion": [
+        0.498901,
+        0.533833,
+        30.021109
+      ],
+      "moon": [
+        0.389883,
+        0.802448,
+        88.443939
+      ]
+    },
+    "right": {
+      "near_lantern": [
+        0.224635,
+        0.527665,
+        8.655228
+      ],
+      "bridge_rail": [
+        0.560116,
+        0.410389,
+        18.476341
+      ],
+      "pavilion": [
+        0.501099,
+        0.533833,
+        30.021109
+      ],
+      "moon": [
+        0.412252,
+        0.802448,
+        88.443939
+      ]
+    }
+  },
+  "elapsed_seconds": 35.375,
+  "native_views_are_app_output": false,
+  "native_preview": "Saved Blender timeline, frames 1-120 at 30 fps; true 3D reference, not app output"
+}

@@ -1,3 +1,6 @@
+import { BlobSource, CanvasSource, EncodedPacketSink, getFirstEncodableVideoCodec, Input, MP4, Mp4OutputFormat, Output, Quality, StreamTarget, WEBM, WebMOutputFormat } from 'mediabunny';
+import { createMovieFile, MOVIE_BYTE_LIMIT } from './movie-file.ts';
+
 export type MovieFormat = { readonly mime: string; readonly extension: 'mp4' | 'webm'; readonly label: string };
 
 export function movieFormat(): MovieFormat | null {
@@ -18,7 +21,61 @@ export function exportWait(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** Preparation holds compressed PNGs, never a period of uncompressed 1080p frames. */
+/** Encode each rendered frame with exact timing, applying backpressure before rendering another. */
+export async function recordLoopMovie({ canvas, frames, render, fps, format, signal, progress }: {
+  readonly canvas: HTMLCanvasElement; readonly frames: number; readonly render: (frame: number) => void;
+  readonly fps: number; readonly format: MovieFormat; readonly signal: AbortSignal;
+  readonly progress: (completed: number) => void;
+}): Promise<Blob> {
+  signal.throwIfAborted();
+  if (!Number.isSafeInteger(frames) || frames <= 0 || !Number.isFinite(fps) || fps <= 0) throw new Error('The movie timing is invalid.');
+  const quality = new Quality({ bitrate: 8_000_000 });
+  const codec = await getFirstEncodableVideoCodec(format.extension === 'mp4' ? ['avc'] : ['vp9', 'vp8'],
+    { width: canvas.width, height: canvas.height, frameRate: fps, quality });
+  signal.throwIfAborted();
+  if (codec === null) {
+    // Keep MediaRecorder-only browsers supported without retaining noisy, lossless PNGs.
+    const prepared: Blob[] = [];
+    let bytes = 0;
+    for (let frame = 0; frame < frames; frame++) {
+      signal.throwIfAborted(); render(frame);
+      const image = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => {
+        if (value === null) reject(new Error('A movie frame could not be prepared.')); else resolve(value);
+      }, 'image/jpeg', .92));
+      signal.throwIfAborted(); bytes += image.size;
+      if (bytes > MOVIE_BYTE_LIMIT) throw new Error('This movie needs too much memory; shorten the loop and try again.');
+      prepared.push(image); progress(frame + 1);
+      await exportWait(0, signal);
+    }
+    return recordMovie({ canvas, frames: prepared, fps, format, signal, progress });
+  }
+  const file = createMovieFile();
+  const output = new Output({ target: new StreamTarget(file.stream),
+    format: format.extension === 'mp4' ? new Mp4OutputFormat({ fastStart: false }) : new WebMOutputFormat() });
+  let encodedFrames = 0;
+  const source = new CanvasSource(canvas, { codec, quality, latencyMode: 'quality', alpha: 'discard',
+    onEncodedPacket() { encodedFrames++; } });
+  output.addVideoTrack(source, { frameRate: fps });
+  const aborted = () => { void output.cancel().catch(() => undefined); };
+  signal.addEventListener('abort', aborted, { once: true });
+  try {
+    signal.throwIfAborted(); await output.start();
+    for (let frame = 0; frame < frames; frame++) {
+      signal.throwIfAborted(); render(frame);
+      await source.add(frame / fps, 1 / fps);
+      signal.throwIfAborted(); progress(frame + 1);
+      await exportWait(0, signal);
+    }
+    await output.finalize(); signal.throwIfAborted();
+    if (encodedFrames !== frames) throw new Error('The browser could not encode every movie frame; try Export again.');
+    return file.blob(`video/${format.extension}`);
+  } finally {
+    signal.removeEventListener('abort', aborted);
+    if (output.state !== 'finalized') await output.cancel();
+  }
+}
+
+/** Compatibility recorder for prepared frames on browsers without a suitable WebCodecs encoder. */
 export async function recordMovie({ canvas, frames, fps, format, signal, progress }: {
   readonly canvas: HTMLCanvasElement; readonly frames: readonly Blob[]; readonly fps: number;
   readonly format: MovieFormat; readonly signal: AbortSignal; readonly progress: (completed: number) => void;
@@ -33,6 +90,7 @@ export async function recordMovie({ canvas, frames, fps, format, signal, progres
   let periodTimer: ReturnType<typeof setTimeout> | null = null;
   const queue = new Map<number, Promise<ImageBitmap>>();
   const chunks: Blob[] = [];
+  let bytes = 0;
   let failure: unknown = null;
   const aborted = () => { if (recorder !== null && recorder.state !== 'inactive') recorder.stop(); };
   const waitEvent = (target: EventTarget, event: string, start: () => void) => new Promise<void>((resolve, reject) => {
@@ -74,11 +132,17 @@ export async function recordMovie({ canvas, frames, fps, format, signal, progres
     }
     recorder = new MediaRecorder(stream, { mimeType: format.mime, videoBitsPerSecond: 8_000_000 });
     const active = recorder;
-    active.ondataavailable = ({ data }) => { if (data.size > 0) chunks.push(data); };
+    active.ondataavailable = ({ data }) => {
+      bytes += data.size;
+      if (bytes > MOVIE_BYTE_LIMIT) {
+        failure = new Error('This movie needs too much memory; shorten the loop and try again.');
+        if (active.state !== 'inactive') active.stop();
+      } else if (data.size > 0) chunks.push(data);
+    };
     active.onerror = () => { failure = new Error('The browser could not record the movie.'); };
     signal.addEventListener('abort', aborted, { once: true });
     // Chromium may wait for encoded data before emitting start: submit frame zero immediately.
-    const stopped = waitEvent(active, 'stop', () => active.start());
+    const stopped = waitEvent(active, 'stop', () => active.start(250));
     void stopped.catch(() => undefined);
     const origin = performance.now();
     // A decode can remain pending past the period, so stopping cannot depend on it.
@@ -93,26 +157,32 @@ export async function recordMovie({ canvas, frames, fps, format, signal, progres
     while (index < frames.length) {
       await deadline(index);
       const due = Math.max(index, Math.floor((performance.now() - origin) * fps / 1000));
-      if (due >= frames.length) break;
-      index = due;
-      // A slow browser skips to the current loop time instead of stretching the period.
-      for (const [oldIndex, pending] of queue) if (oldIndex < index) {
-        queue.delete(oldIndex); void pending.then((bitmap) => bitmap.close(), () => undefined);
-      }
+      if (due > index) throw new Error('The browser could not record every movie frame; try Export again.');
       for (let ahead = index; ahead < index + 3; ahead++) prepare(ahead);
       const pending = queue.get(index);
       if (pending === undefined) throw new Error('A movie frame is missing.');
       const ready = await Promise.race([pending.then(() => true), stopped.then(() => false)]);
       signal.throwIfAborted();
-      if (!ready || active.state === 'inactive') break;
+      if (!ready || active.state === 'inactive') throw new Error('The browser could not record every movie frame; try Export again.');
       const afterDecode = Math.floor((performance.now() - origin) * fps / 1000);
-      if (afterDecode > index) { index = afterDecode; continue; }
+      if (afterDecode > index) throw new Error('The browser could not record every movie frame; try Export again.');
       await draw(index); progress(index + 1); index++;
     }
     await stopped; signal.throwIfAborted();
     if (failure !== null) throw failure;
     const blob = new Blob(chunks, { type: active.mimeType });
     if (blob.size === 0) throw new Error('The browser returned an empty movie.');
+    // Canvas capture can lose frames inside the browser even when every draw met its deadline.
+    const input = new Input({ source: new BlobSource(blob), formats: [MP4, WEBM] });
+    try {
+      const video = await input.getPrimaryVideoTrack();
+      if (video === null) throw new Error('The movie has no video track.');
+      let count = 0;
+      for await (const _packet of new EncodedPacketSink(video).packets(undefined, undefined, { metadataOnly: true })) {
+        signal.throwIfAborted(); count++;
+      }
+      if (count !== frames.length) throw new Error('The browser could not record every movie frame; try Export again.');
+    } finally { input.dispose(); }
     return blob;
   } finally {
     if (periodTimer !== null) clearTimeout(periodTimer);

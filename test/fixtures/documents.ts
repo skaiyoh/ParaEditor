@@ -6,8 +6,8 @@
 
 import type { AssetId, BuildId, LightId, ModelId, ObjectId, SceneId } from '../../src/core/ids.ts';
 import { isAssetId, isBuildId, isLightId, isModelId, isObjectId, isSceneId } from '../../src/core/ids.ts';
-import type { Light, SceneDocument, SceneObject } from '../../src/core/types.ts';
-import { SCENE_VERSION } from '../../src/core/migrate.ts';
+import type { LegacySceneDocument, LegacySceneObject, Light, FrozenCompositionDocument, SceneDocument } from '../../src/core/types.ts';
+import { migrateV4ToV5 } from '../../src/core/composition.ts';
 
 function brand<T extends string>(check: (text: string) => text is T, text: string): T {
   if (!check(text)) throw new Error(`fixture id ${JSON.stringify(text)} fails its check`);
@@ -33,10 +33,10 @@ export const SAM_MODEL: ModelId = brand(isModelId, `sam@${'b'.repeat(64)}`);
 export const INPAINT_MODEL: ModelId = brand(isModelId, `migan@${'c'.repeat(64)}`);
 
 /** The smallest valid document: one color cluster, no products, no objects, no lights. */
-export function minimalDocument(): SceneDocument {
+export function legacyMinimalDocument(): LegacySceneDocument {
   return {
     format: 'noisy-scene',
-    version: SCENE_VERSION,
+    version: 4,
     id: SCENE_ID,
     title: 'Minimal',
     createdAt: '2026-10-02T12:00:00.000Z',
@@ -81,7 +81,7 @@ export function minimalDocument(): SceneDocument {
   };
 }
 
-const subject: SceneObject = {
+const subject: LegacySceneObject = {
   id: OBJECT_IDS[0],
   name: 'Object 1',
   hidden: false,
@@ -106,7 +106,7 @@ const subject: SceneObject = {
   },
 };
 
-const box: SceneObject = {
+const box: LegacySceneObject = {
   id: OBJECT_IDS[1],
   name: 'Object 2',
   hidden: false,
@@ -172,10 +172,10 @@ const lights: readonly [Light, Light] = [
  * every arm of every union and nullable field but Harmony's `auto`, which
  * validDocuments adds.
  */
-export function fiveClusterDocument(): SceneDocument {
+export function legacyFiveClusterDocument(): LegacySceneDocument {
   return {
     format: 'noisy-scene',
-    version: SCENE_VERSION,
+    version: 4,
     id: SCENE_ID,
     title: 'Five colors',
     createdAt: '2026-10-02T12:00:00.000Z',
@@ -237,9 +237,36 @@ export function fiveClusterDocument(): SceneDocument {
   };
 }
 
+/** Active constructors keep old fixture content and explicitly type its repair cache. */
+function activeMinimalFixture(): FrozenCompositionDocument {
+  const result = migrateV4ToV5(legacyMinimalDocument());
+  if (!result.ok) throw new Error(JSON.stringify(result.error));
+  if (result.value.version !== 5) throw new Error('The legacy fixture migration must retain version 5.');
+  return result.value;
+}
+function activeFiveFixture(): FrozenCompositionDocument {
+  const legacy = legacyFiveClusterDocument();
+  const result = migrateV4ToV5(legacy);
+  if (!result.ok) throw new Error(JSON.stringify(result.error));
+  if (result.value.version !== 5) throw new Error('The legacy fixture migration must retain version 5.');
+  const plate = legacy.analysis.plate;
+  if (plate === null) throw new Error('The five-cluster fixture needs a legacy repair cache.');
+  return { ...result.value, analysis: { ...result.value.analysis, plate: {
+    key: { algorithm: 'photo-repair-v2', source: legacy.frame.master.asset, size: legacy.frame.master.size,
+      removalUnion: assetId(0x23), hole: assetId(0x24), depth: legacy.analysis.depth?.map.asset ?? null,
+      radius: Math.ceil(Math.ceil(Math.max(legacy.frame.master.size.width, legacy.frame.master.size.height) / 100) * legacy.motion.parallax),
+      purpose: { kind: 'loop', parallax: legacy.motion.parallax, reach: legacy.motion.drift.amount }, model: plate.model },
+    image: plate.image, backgroundDepth: { asset: assetId(0x22), format: 'f32', size: legacy.analysis.depth?.map.size ?? legacy.frame.master.size },
+  } } };
+}
+const ACTIVE_MINIMAL = activeMinimalFixture();
+const ACTIVE_FIVE = activeFiveFixture();
+export function minimalDocument(): FrozenCompositionDocument { return structuredClone(ACTIVE_MINIMAL); }
+export function fiveClusterDocument(): FrozenCompositionDocument { return structuredClone(ACTIVE_FIVE); }
+
 /** Every valid fixture document; together they hold every arm of every union and nullable field. */
 export function validDocuments(): readonly SceneDocument[] {
-  const autoHarmony: SceneDocument = { ...fiveClusterDocument(), style: { ...fiveClusterDocument().style, harmony: { kind: 'auto', strength: 0.35 } } };
+  const autoHarmony: FrozenCompositionDocument = { ...fiveClusterDocument(), style: { ...fiveClusterDocument().style, harmony: { kind: 'auto', strength: 0.35 } } };
   return [minimalDocument(), fiveClusterDocument(), autoHarmony];
 }
 
@@ -286,7 +313,7 @@ export function withValues(json: unknown, changes: readonly (readonly [readonly 
 export type InvalidVariant = { readonly name: string; readonly path: string; readonly json: unknown };
 
 function objectsWithIds(count: number): readonly unknown[] {
-  const [first] = fiveClusterDocument().objects;
+  const [first] = legacyFiveClusterDocument().objects;
   return Array.from({ length: count }, (_, i) => ({ ...first, id: uuid(0x1000 + i) }));
 }
 
@@ -301,7 +328,7 @@ function clustersOfWeights(weights: readonly number[]): readonly unknown[] {
 
 /** The invalid variants, each on the five-cluster document. */
 export function invalidVariants(): readonly InvalidVariant[] {
-  const base = fiveClusterDocument();
+  const base = legacyFiveClusterDocument();
   const v = (name: string, path: string, changes: readonly (readonly [readonly Key[], unknown])[]): InvalidVariant => ({
     name,
     path,
@@ -357,7 +384,7 @@ export function invalidVariants(): readonly InvalidVariant[] {
     v('an odd cellSize', 'symbols.cellSize', [[['symbols', 'cellSize'], 13]]),
     v("a light's chroma above 0.25", 'lights[1].color.c', [[['lights', 1, 'color', 'c'], 0.26]]),
     v('a light past 1.5 of the frame', 'lights[0].at.x', [[['lights', 0, 'at', 'x'], 1.6]]),
-    v('a version other than the current one', 'version', [[['version'], SCENE_VERSION + 1]]),
+    v('a version other than the current one', 'version', [[['version'], 5]]),
     v('a scene id that is not a UUID v4', 'id', [[['id'], 'scene-1']]),
     v('an uppercase asset id', 'frame.master.asset', [[['frame', 'master', 'asset'], 'A'.repeat(64)]]),
     v('a depth map stored as u8', 'analysis.depth.map.format', [[['analysis', 'depth', 'map', 'format'], 'u8']]),

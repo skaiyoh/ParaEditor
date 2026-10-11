@@ -8,22 +8,30 @@ import type { NonEmpty, SceneId } from '../src/core/ids.ts';
 import { MIGRATIONS, SCENE_VERSION, type Migration } from '../src/core/migrate.ts';
 import { FLOORS, LENGTHS, RANGES, type FloorPath, type LengthPath, type NumberRange, type RangePath } from '../src/core/ranges.ts';
 import type { ImagePoint, ImageRef, Oklab, Oklch, PlaneRef, Rect, Size } from '../src/core/raster.ts';
-import { currentDocumentSchema, describeIssues, formatPath, parseDocument, sceneDocumentSchema, selectionSchema } from '../src/core/schema.ts';
+import { currentDocumentSchema as activeDocumentSchema, describeIssues, formatPath, parseDocument as parseActiveDocument, parseLegacyDocument as parseDocument, sceneDocumentSchema, selectionSchema } from '../src/core/schema.ts';
+import { legacyV4DocumentSchema as currentDocumentSchema } from '../src/core/legacy-schema.ts';
 import type {
-  Analysis,
-  DepthProduct,
+  LegacyAnalysis as Analysis,
+  LegacySceneDocument,
+  SceneDocument as ActiveSceneDocument,
   Frame,
   Light,
-  ObjectProduced,
+  LegacyObjectProduced as ObjectProduced,
   PaletteTarget,
-  PlateProduct,
+  LegacyPlateProduct as PlateProduct,
   Recolor,
-  SceneDocument,
+  LegacySceneDocument as SceneDocument,
   SceneDocumentAt,
   TapPoint,
 } from '../src/core/types.ts';
 import { z } from '../src/core/zod.ts';
-import { assetId, fiveClusterDocument, getAt, invalidVariants, minimalDocument, setAt, validDocuments, type Key } from './fixtures/documents.ts';
+import { assetId, legacyFiveClusterDocument as fiveClusterDocument, getAt, invalidVariants, legacyMinimalDocument as minimalDocument, minimalDocument as activeMinimalDocument, setAt, type Key } from './fixtures/documents.ts';
+
+type DepthProduct = NonNullable<LegacySceneDocument['analysis']['depth']>;
+function validDocuments(): readonly SceneDocument[] {
+  const doc = fiveClusterDocument();
+  return [minimalDocument(), doc, { ...doc, style: { ...doc.style, harmony: { kind: 'auto', strength: .35 } } }];
+}
 
 /** The paths of every issue a parse of `json` reports, unknown keys at their own paths; empty when it parses. */
 function failingPaths(json: unknown): readonly string[] {
@@ -443,14 +451,16 @@ test("the document's primitives are core/raster.ts's types, and its ids and arra
   assert.deepEqual(checks, checks.map(() => true));
 });
 
-test('the version is the migration table length and a literal type', () => {
+test('the active version is the migration table length and a literal type', () => {
   assert.equal(SCENE_VERSION, MIGRATIONS.length);
-  const literal = true satisfies Equal<SceneDocument['version'], 4>;
-  // @ts-expect-error version 5 is newer than the current migration table
-  const newer: SceneDocument = { ...minimalDocument(), version: 5 };
+  const literal = true satisfies Equal<ActiveSceneDocument['version'], 5 | 6>;
+  // @ts-expect-error version 7 is newer than the current migration table
+  const newer: ActiveSceneDocument = { ...activeMinimalDocument(), version: 7 };
   assert.ok(literal);
-  assert.equal(minimalDocument().version, 4);
-  assert.deepEqual(failingPaths(newer), ['version']);
+  assert.equal(activeMinimalDocument().version, 5);
+  const parsed = parseActiveDocument(newer);
+  assert.ok(!parsed.ok && parsed.error.kind === 'newer-version');
+  assert.equal(parsed.error.version, 7);
 });
 
 test('a five-entry migration table makes a schema and a type of version 5', () => {
@@ -460,7 +470,7 @@ test('a five-entry migration table makes a schema and a type of version 5', () =
   const literal = true satisfies Equal<SceneDocumentAt<typeof chain.length>['version'], 5>;
   const inferred = true satisfies Equal<z.infer<typeof schema>['version'], 5>;
   const atFive: SceneDocumentAt<5> = { ...minimalDocument(), version: 5 };
-  // @ts-expect-error current version 4 is not version 5
+  // @ts-expect-error frozen version 4 is not version 5
   const atCurrent: SceneDocumentAt<5> = minimalDocument();
   assert.ok(literal && inferred);
   assert.ok(schema.safeParse(atFive).success);
@@ -469,7 +479,8 @@ test('a five-entry migration table makes a schema and a type of version 5', () =
 
 test('legacy objects retain names and gain visible defaults; current hidden layers round trip', () => {
   const current = fiveClusterDocument();
-  const old = { ...current, version: 2, objects: current.objects.map(({ hidden: _hidden, ...object }) => object) };
+  const { drift: _drift, ...oldMotion } = current.motion;
+  const old = { ...current, version: 2, motion: { ...oldMotion, orbit: current.motion.drift.amount }, objects: current.objects.map(({ hidden: _hidden, ...object }) => object) };
   const before = structuredClone(old);
   const parsed = parseDocument(old);
   assert.ok(parsed.ok);
@@ -483,22 +494,24 @@ test('legacy objects retain names and gain visible defaults; current hidden laye
 
 test('version 1 scenes migrate Parallax to 1 without changing their existing fields or input', () => {
   const current = minimalDocument();
-  const { parallax: _parallax, ...motion } = current.motion;
+  const { parallax: _parallax, drift, ...motionFields } = current.motion;
+  const motion = { ...motionFields, orbit: drift.amount };
   const old = { ...current, version: 1, motion };
   const before = structuredClone(old);
   const parsed = parseDocument(old);
   assert.ok(parsed.ok, parsed.ok ? '' : JSON.stringify(parsed.error));
   assert.equal(parsed.value.motion.parallax, 1);
-  assert.deepEqual(parsed.value, { ...old, version: SCENE_VERSION, motion: { ...motion, parallax: 1 } });
+  assert.deepEqual(parsed.value, { ...current, version: 4, motion: { ...current.motion, parallax: 1 } });
   assert.deepEqual(old, before);
 });
 
 test('version 0 scenes run the surface and Parallax migrations in order', () => {
   const { surface: _surface, ...current } = minimalDocument();
-  const { parallax: _parallax, ...motion } = current.motion;
+  const { parallax: _parallax, drift, ...motionFields } = current.motion;
+  const motion = { ...motionFields, orbit: drift.amount };
   const parsed = parseDocument({ ...current, version: 0, motion });
   assert.ok(parsed.ok, parsed.ok ? '' : JSON.stringify(parsed.error));
-  assert.equal(parsed.value.version, SCENE_VERSION);
+  assert.equal(parsed.value.version, 4);
   assert.equal(parsed.value.motion.parallax, 1);
   assert.equal(parsed.value.surface.enabled, false);
 });
@@ -516,4 +529,18 @@ test('current scenes require Parallax, retain chosen values, and reject malforme
     const rejected = parseDocument(old);
     assert.ok(!rejected.ok && rejected.error.kind === 'invalid');
   }
+});
+
+
+test('active v5 keeps strict composition refs, exact coverage formats and typed provenance', () => {
+  const current = activeMinimalDocument();
+  const parsed = parseActiveDocument(current);
+  assert.ok(parsed.ok);
+  assert.deepEqual(parsed.value, current);
+  assert.equal(parsed.value.compositing, 'legacy-order');
+  assert.deepEqual([parsed.value.sources, parsed.value.removals, parsed.value.localEffects], [[], [], []]);
+  assert.equal(activeDocumentSchema.safeParse({ ...current, unexpected: true }).success, false);
+  const formats = [true satisfies Equal<ActiveSceneDocument['objects'][number]['produced']['mask']['format'], 'u8'>,
+    true satisfies Equal<NonNullable<ActiveSceneDocument['analysis']['depth']>['map']['format'], 'f32'>];
+  assert.deepEqual(formats, [true, true]);
 });

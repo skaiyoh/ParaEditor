@@ -157,5 +157,5 @@ export function resolvePalette({ colors, style, tone, objects = [] }: {
 
 export function documentPalette(doc: SceneDocument): Palette {
   return resolvePalette({ colors: doc.analysis.colors, style: doc.style, tone: doc.analysis.tone,
-    objects: doc.objects.map((object, i) => ({ label: i + 1, subject: object.subject, recolor: object.recolor, color: object.produced.color })) });
+    objects: doc.objects.flatMap((object, i) => object.produced.color === null ? [] : [{ label: i + 1, subject: object.subject, recolor: object.recolor, color: object.produced.color }]) });
 }

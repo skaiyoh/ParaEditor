@@ -3,6 +3,7 @@ import { inspectPng, inspectRaster, MAX_ASSET_BYTES, MAX_ORIGINAL_BYTES } from '
 import { COMPOSITION_LIMITS } from '../core/composition-ranges.ts';
 import { isAssetId, type AssetId } from '../core/ids.ts';
 import type { CompositionDocument } from '../core/types.ts';
+import type { RemixDocument } from '../core/remix-schema.ts';
 
 export { MAX_ASSET_BYTES, MAX_ORIGINAL_BYTES } from '../core/asset-codec.ts';
 
@@ -14,7 +15,7 @@ export async function hashAsset(bytes: Uint8Array): Promise<AssetId> {
   return id;
 }
 
-export function compositionInventory(document: CompositionDocument): CompositionAssetInventory {
+export function compositionInventory(document: CompositionDocument | RemixDocument): CompositionAssetInventory {
   const result = collectCompositionAssets([{ kind: 'document', document }]);
   if (!result.ok) throw new Error(result.error.detail);
   return result.value;
@@ -72,7 +73,7 @@ async function validatePng(bytes: Uint8Array): Promise<ReturnType<typeof inspect
   return png;
 }
 
-/** Generic uploads are self-describing PNG/NSRA only. No paint or opaque kind. */
+/** Generic uploads are self-describing PNG/NSRA, including encoded paint tiles. */
 export async function validateGenericAsset(bytes: Uint8Array, asset: AssetId): Promise<void> {
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_ASSET_BYTES) throw new Error('The project asset is too large or empty.');
   if (await hashAsset(bytes) !== asset) throw new Error('The project asset bytes are invalid.');
@@ -97,7 +98,7 @@ export async function validateCompositionAsset(bytes: Uint8Array, asset: AssetId
 }
 
 /** Validate complete checkpoints sequentially, including actual depth + offset. */
-export async function validateCompositionAssets(document: CompositionDocument,
+export async function validateCompositionAssets(document: CompositionDocument | RemixDocument,
   read: (asset: AssetId, refs: readonly CompositionAssetRef[]) => Promise<Uint8Array | null>,
 ): Promise<{ readonly bytes: number; readonly assets: number }> {
   const inventory = compositionInventory(document), lengths = new Map<AssetId, number>();

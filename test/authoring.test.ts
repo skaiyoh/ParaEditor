@@ -41,6 +41,9 @@ function rig() {
       authoring.cancel(); assert.ok(doc);
       const step = direction === 'undo' ? undo(history) : redo(history);
       assert.ok(step);
+      // This harness records only document edits; a selection step here would be a defect.
+      assert.equal(step.kind, 'document');
+      if (step.kind !== 'document') return;
       const result = applyEdits(doc, step.edits, '2026-10-11T00:01:00.000Z');
       assert.notEqual(result.kind, 'refused'); doc = result.doc; history = step.history;
     },

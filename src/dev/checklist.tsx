@@ -352,7 +352,7 @@ function ModelCacheCard() {
   return (
     <section class="card" data-tool="model-cache">
       <h2>Model cache</h2>
-      <p class="muted">Deletes the downloaded models, so noisy downloads them again the next time it needs them. Do this only when a row asks.</p>
+      <p class="muted">Deletes the downloaded models, so ParaEditor downloads them again the next time it needs them. Do this only when a row asks.</p>
       <button type="button" class="wide" data-testid="clear-model-cache" disabled={state.clear === 'clearing'} onClick={clear}>
         Clear model cache
       </button>

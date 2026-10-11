@@ -3,11 +3,15 @@ import { createHash } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
-import { GALLERY_LIMITS, galleryDraftSchema, galleryIdSchema, galleryManifestSchema, type GalleryDraft } from '../src/core/gallery.ts';
+import { GALLERY_LIMITS, galleryDraftSchema, galleryLegacyDraftSchema, galleryCompositionDraftSchema, galleryIdSchema, galleryManifestSchema, type GalleryLegacyDraft } from '../src/core/gallery.ts';
 import { isAssetId, type AssetId } from '../src/core/ids.ts';
+import { encodeRaster } from '../src/core/asset-codec.ts';
+import { compositionDocumentSchema } from '../src/core/composition-schema.ts';
+import { migrateV4ToV5 } from '../src/core/composition.ts';
 import { z } from '../src/core/zod.ts';
 import * as gallery from '../src/projects/gallery.ts';
-import { assetId, fiveClusterDocument, minimalDocument, uuid } from './fixtures/documents.ts';
+import { assetId, legacyFiveClusterDocument as fiveClusterDocument, legacyMinimalDocument as minimalDocument, uuid } from './fixtures/documents.ts';
+import { localEffect, newComposition } from './fixtures/composition.ts';
 import { startServer, tempDir, type Server } from './support/cli.ts';
 
 // JavaScript verifier exports cross into this test through a checked boundary.
@@ -23,9 +27,9 @@ function hash(bytes: Uint8Array): AssetId {
   assert.ok(isAssetId(id));
   return id;
 }
-function fixture(): GalleryDraft {
+function fixture(): GalleryLegacyDraft {
   const original = minimalDocument(), id = hash(jpeg), size = { width: 2, height: 1 };
-  return galleryDraftSchema.parse({
+  return galleryLegacyDraftSchema.parse({
     document: { ...original, frame: { ...original.frame,
       source: { asset: id, mediaType: 'image/jpeg', byteLength: jpeg.length },
       original: { name: 'tiny.jpg', mediaType: 'image/jpeg', size },
@@ -79,6 +83,71 @@ test('all gallery client functions complete a real HTTP publish, read and unpubl
     assert.equal(failure(await gallery.manifest({ id: created.id }), 'http').status, 404);
     assert.ok(!value(await gallery.list()).some((piece) => piece.id === created.id));
   } finally { await gallery.unpublish(created); }
+});
+
+test('v2 client publishes a zero-object manual Recolor with encoded PNG and NSRA assets, then reads it unchanged', async () => {
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR4nGP4zwAE/xnqQeR/bh7e/wAuSQWfwB0i9wAAAABJRU5ErkJggg==', 'base64'));
+  const size = { width: 2, height: 2 }, coverage = encodeRaster({ format: 'u8', size, data: new Uint8Array([0, 127, 128, 255]) });
+  const original = newComposition(), effect = localEffect(), sourceId = hash(jpeg), masterId = hash(png), maskId = hash(coverage);
+  const document = compositionDocumentSchema.parse({ ...original, compositing: 'legacy-order', frame: { ...original.frame,
+    source: { asset: sourceId, mediaType: 'image/jpeg', byteLength: jpeg.length }, master: { asset: masterId, size },
+    original: { name: 'tiny.jpg', mediaType: 'image/jpeg', size: { width: 2, height: 1 } } }, localEffects: [{ ...effect,
+      scope: { kind: 'mask', mask: { plane: { asset: maskId, format: 'u8', size }, provenance: { kind: 'manual', operation: 'rectangle' } } },
+      operation: { kind: 'recolor', color: { l: .63, c: .18, h: 241 } } }] });
+  const draft = galleryCompositionDraftSchema.parse({ version: 2, document, assets: [
+    { kind: 'source', id: sourceId, mediaType: 'image/jpeg', size: document.frame.original.size, byteLength: jpeg.length },
+    { kind: 'png', id: masterId, mediaType: 'image/png', size, byteLength: png.length },
+    { kind: 'raster', id: maskId, format: 'u8', size, byteLength: coverage.length },
+  ], poster: fixture().poster });
+  const bytes = new Map([[sourceId, jpeg], [masterId, png], [maskId, coverage]]);
+  assert.equal(document.objects.length, 0);
+  assert.equal(document.analysis.plate, null);
+  const created = value(await gallery.createDraft({ draft }));
+  try {
+    for (const asset of draft.assets) {
+      const encoded = bytes.get(asset.id); assert.ok(encoded);
+      value(await gallery.uploadAsset({ ...created, asset, bytes: encoded }));
+    }
+    value(await gallery.uploadPoster({ ...created, poster: draft.poster, bytes: jpeg }));
+    const published = value(await gallery.publishDraft(created));
+    assert.equal(published.version, 2);
+    assert.deepEqual(published.document, document);
+    assert.deepEqual(value(await gallery.manifest(created)), published);
+    for (const asset of draft.assets) {
+      const response = await fetch(value(gallery.assetUrl({ id: created.id, asset: asset.id })));
+      assert.equal(response.headers.get('Content-Type'), 'mediaType' in asset ? asset.mediaType : 'application/octet-stream');
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(bytes.get(asset.id) ?? []));
+    }
+    value(await gallery.unpublish(created));
+    failure(await gallery.manifest(created), 'http');
+  } finally { await gallery.unpublish(created); }
+});
+
+test('v2 schema admits shared original/master PNG once and rejects wrong, absent and extra composition descriptors', () => {
+  const original = newComposition(), effect = localEffect(), master = assetId(90), mask = assetId(91), size = { width: 2, height: 2 };
+  const document = compositionDocumentSchema.parse({ ...original, compositing: 'legacy-order', frame: { ...original.frame,
+    source: { asset: master, mediaType: 'image/png', byteLength: 79 }, master: { asset: master, size } }, localEffects: [{ ...effect,
+      scope: { kind: 'mask', mask: { plane: { asset: mask, format: 'u8', size }, provenance: { kind: 'manual', operation: 'rectangle' } } } }] });
+  const draft = galleryCompositionDraftSchema.parse({ version: 2, document, assets: [
+    { kind: 'source', id: master, mediaType: 'image/png', size, byteLength: 79 },
+    { kind: 'raster', id: mask, format: 'u8', size, byteLength: 20 },
+  ], poster: fixture().poster });
+  assert.equal(draft.assets.length, 2, 'one immutable descriptor satisfies original and master references');
+  assert.deepEqual(galleryDraftSchema.parse(draft), draft);
+  for (const invalid of [
+    { ...draft, version: 1 },
+    { ...draft, document: { ...document, version: 4 } },
+    { ...draft, assets: draft.assets.slice(0, 1) },
+    { ...draft, assets: [...draft.assets, draft.assets[0]] },
+    { ...draft, assets: [...draft.assets, { kind: 'png', id: assetId(92), size, byteLength: 79, mediaType: 'image/png' }] },
+    { ...draft, assets: draft.assets.map((asset) => asset.kind === 'raster' ? { ...asset, byteLength: 4 } : asset) },
+    { ...draft, assets: draft.assets.map((asset) => asset.kind === 'raster' ? { ...asset, format: 'f32' } : asset) },
+    { ...draft, assets: draft.assets.map((asset) => asset.kind === 'raster' ? { ...asset, kind: 'mask', byteLength: 4 } : asset) },
+    { ...draft, assets: draft.assets.map((asset) => asset.kind === 'source' ? { ...asset, mediaType: 'image/jpeg' } : asset) },
+  ]) assert.equal(galleryDraftSchema.safeParse(invalid).success, false);
+  const manifest = { ...draft, id: galleryIdSchema.parse(uuid(451)), publishedAt: new Date().toISOString() };
+  assert.ok(galleryManifestSchema.safeParse(manifest).success);
+  assert.equal(galleryManifestSchema.safeParse({ ...manifest, version: 1 }).success, false);
 });
 
 test('every HTTP client function returns typed HTTP failure with the server sentence', async () => {
@@ -228,6 +297,27 @@ test('gallery schema enforces complete immutable asset graphs and resource limit
     ],
     poster: fixture().poster,
   });
+  assert.deepEqual(draft.document, document, 'v1 preserves the frozen document, including raw-asset plate metadata');
+  const v5 = migrateV4ToV5(document); assert.ok(v5.ok);
+  assert.equal(galleryDraftSchema.safeParse({ ...draft, document: v5.value }).success, false,
+    'a valid composition needs a different gallery manifest and asset protocol');
+  for (const version of [0, 1, 2, 3]) {
+    const { drift: _drift, parallax, ...motion } = document.motion;
+    const { surface, ...rest } = document;
+    const objects = document.objects.map((object) => {
+      const { hidden, ...other } = object;
+      return version < 3 ? other : { ...other, hidden };
+    });
+    const old = { ...rest, version, objects, ...(version > 0 ? { surface } : {}),
+      motion: { ...motion, orbit: .37, ...(version > 1 ? { parallax } : {}) } };
+    const restored = galleryDraftSchema.parse({ ...draft, document: old });
+    assert.equal(restored.document.version, 4);
+    assert.deepEqual(restored.document.analysis.plate, document.analysis.plate);
+    assert.deepEqual(restored.assets, draft.assets);
+    assert.deepEqual(restored.document.motion.drift, { direction: 'circle', amount: .37 });
+    assert.equal(galleryDraftSchema.safeParse({ ...draft, document: { ...old, motion: { ...old.motion, orbit: 'bad' } } }).success, false,
+      'historical fields are validated before legacy migrations overwrite them');
+  }
   const rejects = (value: unknown, message: RegExp): void => {
     const result = galleryDraftSchema.safeParse(value);
     assert.equal(result.success, false);

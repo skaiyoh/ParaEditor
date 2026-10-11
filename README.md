@@ -1,4 +1,4 @@
-# noisy
+# ParaEditor
 
 > Owns: the repository entry point and quick start.
 > Does not own: product scope ([PRODUCT.md](PRODUCT.md)), current priorities ([plan/revision.md](plan/revision.md)), or implementation ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).

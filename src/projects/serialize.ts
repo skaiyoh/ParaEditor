@@ -1,10 +1,11 @@
 import { isAssetId } from '../core/ids.ts';
 import type { AssetId } from '../core/ids.ts';
 import type { Plane, Size } from '../core/raster.ts';
-import { parseDocument } from '../core/schema.ts';
-import type { SceneDocument } from '../core/types.ts';
+import { parseDocument, parseLegacyDocument } from '../core/schema.ts';
+import type { LegacySceneDocument, SceneDocument } from '../core/types.ts';
 import { z } from '../core/zod.ts';
 import { compositionDocumentSchema } from '../core/composition-schema.ts';
+import { remixDocumentSchema, serializeRemixDocument, withDerivedGrainStyle, type RemixDocument } from '../core/remix-schema.ts';
 
 export const MAX_MASK_BYTES = 16 * 1024 * 1024;
 const sizeSchema = z.strictObject({ width: z.number().int().min(1).max(4096), height: z.number().int().min(1).max(4096) });
@@ -19,9 +20,21 @@ export function deserializeDocument(json: unknown): SceneDocument {
 }
 
 /** JSON transport always re-enters through the versioned document parser. */
-export function serializeDocument(document: SceneDocument): unknown {
-  const json: unknown = JSON.parse(JSON.stringify(document));
+export function serializeDocument(document: SceneDocument | RemixDocument): unknown {
+  const json: unknown = JSON.parse(JSON.stringify(document.version === 6 ? serializeRemixDocument(document) : document));
   deserializeDocument(json);
+  return json;
+}
+
+/** Frozen v4 transport for old Projects and gallery manifests. */
+export function deserializeLegacyDocument(json: unknown): LegacySceneDocument {
+  const parsed = parseLegacyDocument(json);
+  if (!parsed.ok) throw new Error('The legacy project document is invalid or uses an unsupported version.');
+  return parsed.value;
+}
+export function serializeLegacyDocument(document: LegacySceneDocument): unknown {
+  const json: unknown = JSON.parse(JSON.stringify(document));
+  deserializeLegacyDocument(json);
   return json;
 }
 
@@ -42,11 +55,11 @@ export function deserializeMask(bytes: Uint8Array, size: Size): Plane<'u8'> {
   return { format: 'u8', size: { ...size }, data: new Uint8Array(bytes) };
 }
 
-export type SavedScene = { readonly document: SceneDocument; readonly masks: Readonly<Record<string, Size>>; readonly revision: number };
+export type SavedScene = { readonly document: LegacySceneDocument; readonly masks: Readonly<Record<string, Size>>; readonly revision: number };
 
 export function deserializeScene(json: unknown): SavedScene {
   const parsed = sceneSchema.parse(json);
-  const document = deserializeDocument(parsed.document);
+  const document = deserializeLegacyDocument(parsed.document);
   const refs = new Map(document.objects.map((object) => [object.produced.mask.asset, object.produced.mask.size]));
   if (refs.size !== Object.keys(parsed.masks).length) throw new Error('The project masks do not match its objects.');
   for (const object of document.objects) {
@@ -57,7 +70,7 @@ export function deserializeScene(json: unknown): SavedScene {
   return { document, masks: parsed.masks, revision: parsed.revision };
 }
 
-export function serializeScene(document: SceneDocument, planes: ReadonlyMap<AssetId, Plane<'u8'>>, revision: number) {
+export function serializeScene(document: LegacySceneDocument, planes: ReadonlyMap<AssetId, Plane<'u8'>>, revision: number) {
   const masks: Record<string, Size> = {};
   for (const object of document.objects) {
     const ref = object.produced.mask, plane = planes.get(ref.asset);
@@ -65,20 +78,25 @@ export function serializeScene(document: SceneDocument, planes: ReadonlyMap<Asse
     serializeMask(plane);
     masks[ref.asset] = { ...plane.size };
   }
-  const payload = { document: serializeDocument(document), masks, revision };
+  const payload = { document: serializeLegacyDocument(document), masks, revision };
   deserializeScene(payload);
   return payload;
 }
 
-const compositionSceneSchema = z.strictObject({ transportVersion: z.literal(2), document: compositionDocumentSchema, revision: revisionSchema }).readonly();
-export type SavedComposition = z.infer<typeof compositionSceneSchema>;
+export const PROJECTS_TRANSPORT_VERSION = 2;
+const compositionSceneSchema = z.strictObject({ transportVersion: z.literal(PROJECTS_TRANSPORT_VERSION),
+  document: z.discriminatedUnion('version', [compositionDocumentSchema, remixDocumentSchema]), revision: revisionSchema }).readonly();
+export type SavedCompositionWire = z.infer<typeof compositionSceneSchema>;
+export type SavedComposition = Omit<SavedCompositionWire, 'document'> & { readonly document: SceneDocument };
 
-/** Staged v2 boundary. Never migrate an old envelope into a complete checkpoint. */
+/** Active v2 boundary. Never migrate an old envelope into a complete checkpoint. */
 export function deserializeCompositionScene(json: unknown): SavedComposition {
-  return compositionSceneSchema.parse(json);
+  const scene = compositionSceneSchema.parse(json);
+  return { ...scene, document: withDerivedGrainStyle(scene.document) };
 }
-export function serializeCompositionScene(document: SavedComposition['document'], revision: number): SavedComposition {
-  return deserializeCompositionScene({ transportVersion: 2, document, revision });
+export function serializeCompositionScene(document: SceneDocument | RemixDocument, revision: number): SavedCompositionWire {
+  return compositionSceneSchema.parse({ transportVersion: PROJECTS_TRANSPORT_VERSION,
+    document: document.version === 6 ? serializeRemixDocument(document) : document, revision });
 }
 export type ProjectEnvelope =
   | { readonly kind: 'legacy'; readonly scene: SavedScene }

@@ -79,7 +79,7 @@ function Grid({ context, ready }: { readonly context: GalleryUiContext; readonly
             <time dateTime={piece.publishedAt}>{timeLabel(piece.publishedAt)}</time>
           </a>
         </li>)}</ul>
-        <p class="gallery-hint">{touch ? 'Tap a piece to step into it. Tilt your phone to look around.' : 'Click a piece to step into it.'}</p></>)}
+        <p class="gallery-hint">{touch ? 'Tap a piece to step into it. Tilt to look around.' : 'Click a piece to step into it.'}</p></>)}
   </main>;
 }
 
@@ -150,7 +150,7 @@ function Piece({ context, register, ready }: {
           context.status.set({ kind: 'unavailable', message: 'This piece is not available.' });
           fallback('This piece is not available.', 'unavailable'); return;
         }
-        document.title = `${content.title} · noisy`;
+        document.title = `${content.title} · ParaEditor`;
         hasPoster = true; setPoster(content.posterUrl);
         const piece = await content.loadPiece(controller.signal);
         if (controller.signal.aborted || canvas.current === null) return;

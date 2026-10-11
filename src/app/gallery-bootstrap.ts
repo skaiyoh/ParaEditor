@@ -1,9 +1,11 @@
 import { createViewer, type ViewerStatus, type ViewerFailure, type ViewerPiece } from '../session/viewer.ts';
 import { isGalleryId, type GalleryId, type GalleryListItem, type GalleryManifest, type GalleryAsset } from '../core/gallery.ts';
 import * as client from '../projects/gallery.ts';
+import { readAssetBody, validateCompositionAssets } from '../projects/assets.ts';
 import type { AssetId } from '../core/ids.ts';
 import type { Plane, Rgb8 } from '../core/raster.ts';
 import { mountGalleryPage, type GalleryLoader } from './gallery-page.ts';
+import { withDerivedGrainStyle } from '../core/remix-schema.ts';
 
 export type GalleryRoute = { readonly kind: 'list' } | { readonly kind: 'piece'; readonly id: GalleryId };
 export type GalleryStatus = ViewerStatus | { readonly kind: 'unavailable'; readonly message: string }
@@ -44,7 +46,10 @@ async function readAsset(id: GalleryId, asset: GalleryAsset, signal: AbortSignal
   try {
     const response = await fetch(url.value, { signal: AbortSignal.any([signal, timeout]) });
     if (!response.ok) throw new GalleryLoadError({ kind: 'missing-asset', asset: asset.id, message: 'A published asset is unavailable.' });
-    const bytes = await response.arrayBuffer();
+    const bytes = (await readAssetBody(response.body, asset.byteLength).catch((error: unknown) => {
+      if (signal.aborted || timeout.aborted) throw error;
+      throw new GalleryLoadError({ kind: 'invalid-asset', asset: asset.id, message: 'A published asset does not match its saved bytes.' });
+    })).buffer;
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
     const hash = [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
     if (bytes.byteLength !== asset.byteLength || hash !== asset.id) {
@@ -60,6 +65,22 @@ async function readAsset(id: GalleryId, asset: GalleryAsset, signal: AbortSignal
 
 /** Bytes stay outside the document. Only saved planes are decoded; inference is never loaded. */
 async function loadPiece(manifest: GalleryManifest, signal: AbortSignal): Promise<ViewerPiece> {
+  if (manifest.version === 2 || manifest.version === 3) {
+    const assets = new Map<AssetId, Uint8Array>();
+    const descriptors = new Map(manifest.assets.map((asset) => [asset.id, asset]));
+    try { await validateCompositionAssets(manifest.document, async (id) => {
+      checkSignal(signal);
+      const descriptor = descriptors.get(id);
+      if (descriptor === undefined) throw new GalleryLoadError({ kind: 'missing-asset', asset: id, message: 'A published asset is unavailable.' });
+      const bytes = new Uint8Array(await readAsset(manifest.id, descriptor, signal));
+      assets.set(id, bytes); return bytes;
+    }); } catch (error) {
+      if (error instanceof GalleryLoadError) throw error;
+      throw new GalleryLoadError({ kind: 'invalid-asset', asset: null, message: 'A published composition asset is invalid.' });
+    }
+    checkSignal(signal);
+    return { document: withDerivedGrainStyle(manifest.document), assets };
+  }
   const planes = new Map<AssetId, Plane<'u8'> | Plane<'f32'> | Rgb8>();
   let source: Blob | null = null;
   for (const asset of manifest.assets) {

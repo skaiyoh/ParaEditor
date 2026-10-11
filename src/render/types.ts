@@ -1,10 +1,14 @@
-import type { CompositingPolicy, SceneDocument } from '../core/types.ts';
+import type { PaintPlane, PaintAdmission, PaintResources, PaintDepthCapture } from './paint.ts';
+export type { PaintPlane, PaintTile, PaintAdmission, PaintResources, PaintDepthCapture } from './paint.ts';
+import type { CompositingPolicy, SceneDocument, LegacySceneDocument } from '../core/types.ts';
 import type { EffectId, ObjectId } from '../core/ids.ts';
 import type { ImagePoint, Plane, Rgb8 } from '../core/raster.ts';
 import type { Vec2 } from '../core/motion.ts';
 import type { PerspectiveEye, PerspectiveGeometry } from '../core/perspective.ts';
 import type { CompareMode, SampleColorRequest, SampleColorResult } from './compare.ts';
 import type { RenderLocalEffect } from './local-effects.ts';
+import type { MathResult } from '../core/math-expression.ts';
+import type { MathPhotoRack } from './math-program.ts';
 export type { CompareMode, SampleSource, SampleColorRequest, SampleColorResult } from './compare.ts';
 export type { RenderLocalEffect } from './local-effects.ts';
 
@@ -26,12 +30,16 @@ export type PerspectiveHit =
   | { readonly kind: 'miss' };
 
 export type RenderScene = {
-  readonly doc: SceneDocument;
+  readonly doc: SceneDocument | LegacySceneDocument;
   readonly master: ImageBitmap;
   readonly masks: ReadonlyMap<ObjectId, Plane<'u8'>>;
   readonly depth: Plane<'f32'> | null;
   readonly plate: Rgb8 | null;
+  /** Persisted repair output, independently keyed from the source disparity map. */
+  readonly backgroundDepth?: Plane<'f32'> | null;
   readonly selected: ObjectId | null;
+  /** Screen-only source-space stencil in the neutral manual authoring view. */
+  readonly manualSelection?: Plane<'u8'> | null;
   readonly livePlate?: PerspectivePlate | null;
   /** Ordered resolved C2a operations; omitted by existing v4 callers. */
   readonly localEffects?: readonly RenderLocalEffect[];
@@ -59,11 +67,25 @@ export type RendererDebug = {
   /** RGBA8; R is the exact evaluated scope weight for this effect. */
   readLocalCoveragePatch?(id: EffectId, x: number, y: number, w: number, h: number): Uint8Array;
   localResources?(): { readonly targets: number; readonly textures: number };
+  paintResources?(): PaintResources;
+  readPaintPixel?(x: number, y: number): { depth: number[]; linear: number[]; encoded: number[]; error: number } | null;
   timings(): { readonly lastMs: number; readonly simplifyMs: number };
 };
 
-export type Renderer = {
+export type PreparedPhotoRack = Readonly<{ handle: symbol }>;
+export interface PhotoRackRenderer {
+  /** Compile all live passes before activation. A new attempt supersedes pending preparation. */
+  preparePhotoRack(rack: MathPhotoRack): MathResult<PreparedPhotoRack>;
+  /** Consume the latest preparation from this renderer/photo; null restores legacy Grain. */
+  activatePhotoRack(prepared: PreparedPhotoRack | null): void;
+}
+
+export type Renderer = PhotoRackRenderer & {
   setScene(scene: RenderScene): void;
+  /** Atomic immutable snapshots; requires depth. Clear before replacing photo/depth identity. */
+  setPaintPlanes(planes: readonly PaintPlane[]): PaintAdmission;
+  /** Capture the visible opaque photo's rendered depth at normalized displayed coordinates. */
+  capturePaintDepth(at: ImagePoint): PaintDepthCapture;
   /** Redraw the preceding view with a transient comparison; exports always use Edited. */
   setCompare(mode: CompareMode): void;
   /** Read the displayed image before selection decoration, or its original source hit. */

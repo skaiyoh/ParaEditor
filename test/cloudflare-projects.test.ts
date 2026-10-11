@@ -13,7 +13,7 @@ import { z } from '../src/core/zod.ts';
 import { isAssetId, isSceneId } from '../src/core/ids.ts';
 import { serializeScene } from '../src/projects/serialize.ts';
 import type { Plane } from '../src/core/raster.ts';
-import { minimalDocument, fiveClusterDocument, uuid } from './fixtures/documents.ts';
+import { legacyMinimalDocument as minimalDocument, legacyFiveClusterDocument as fiveClusterDocument, uuid } from './fixtures/documents.ts';
 import { createHandler, type HostingConfig, type HostingEnv } from '../tools/cloudflare/worker.ts';
 import type { ProjectsEnv } from '../tools/cloudflare/projects.ts';
 

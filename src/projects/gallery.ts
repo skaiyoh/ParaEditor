@@ -78,7 +78,7 @@ export async function uploadAsset(options: AuthorizedOptions & { readonly asset:
     if (!parsed.success) return invalid();
     const body = uploadBody(options.bytes, parsed.data.byteLength);
     if (body === null) return invalid();
-    const type = parsed.data.kind === 'source' ? parsed.data.mediaType : 'application/octet-stream';
+    const type = 'mediaType' in parsed.data ? parsed.data.mediaType : 'application/octet-stream';
     return request(`${base(options.id)}/assets/${parsed.data.id}`, { method: 'PUT', headers: authHeaders(options.token, type), body }, galleryAckSchema, options);
   } catch { return invalid(); }
 }

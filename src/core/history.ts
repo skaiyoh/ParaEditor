@@ -1,15 +1,18 @@
 // The undo history: a bounded stack of undo entries and a stack of redo
 // entries, each entry the edits that redo a step and the edits that undo it.
-// Only edits enter it: a product or a dropped source never does. The history
+// Document edits and selection operations share it; products and dropped
+// sources never enter it. The history
 // is never persisted; the session holds it while a scene is open.
 // Pure: no browser global, no Node API, no I/O, no clock. Times arrive as
 // arguments, in milliseconds on any clock that does not go backwards.
 
 import type { Edit, EditResult } from './edits.ts';
+import { sameValue } from './equal.ts';
 import type { AssetId, NonEmpty } from './ids.ts';
 import { applyEdit, applyEdits } from './reduce.ts';
-import type { SceneDocument } from './types.ts';
+import type { ActiveSelection, SceneDocument } from './types.ts';
 import type { Plane } from './raster.ts';
+import { activeSelectionSchema } from './selection.ts';
 
 /** The most entries the undo stack holds; pushing one more drops the oldest. */
 export const HISTORY_LIMIT = 50;
@@ -24,20 +27,30 @@ export const COALESCE_WINDOW_MS = 600;
  * applied. `forward` redoes the step and `inverse` undoes it; a step that
  * took in later edits keeps its first inverse and its last forward.
  */
-export type HistoryEntry = {
+export type SelectionTransition = { readonly before: ActiveSelection; readonly after: ActiveSelection };
+export type DocumentHistoryEntry = {
   readonly key: string | null;
   readonly at: number;
   readonly forward: NonEmpty<Edit>;
   readonly inverse: NonEmpty<Edit>;
   /** Session-owned mask products, shared with the active store while this step is retained. */
   readonly masks?: ReadonlyMap<AssetId, Plane<'u8'>>;
+  readonly selection?: SelectionTransition;
 };
+export type SelectionHistoryEntry = {
+  readonly kind: 'selection'; readonly key: null; readonly at: number;
+  readonly selection: SelectionTransition;
+  readonly masks?: ReadonlyMap<AssetId, Plane<'u8'>>;
+};
+export type HistoryEntry = DocumentHistoryEntry | SelectionHistoryEntry;
 
 /** Both stacks list their entries oldest first, so the last entry of each is the next to undo or redo. */
 export type History = { readonly undo: readonly HistoryEntry[]; readonly redo: readonly HistoryEntry[] };
 
 /** What undoing or redoing a step applies, with `applyEdits`, and the history once it has. */
-export type HistoryStep = { readonly edits: NonEmpty<Edit>; readonly history: History };
+export type HistoryStep =
+  | { readonly kind: 'document'; readonly edits: NonEmpty<Edit>; readonly selection?: ActiveSelection; readonly history: History }
+  | { readonly kind: 'selection'; readonly selection: ActiveSelection; readonly history: History };
 
 export const EMPTY_HISTORY: History = { undo: [], redo: [] };
 
@@ -46,19 +59,44 @@ export function recordEdit(input: {
   readonly doc: SceneDocument; readonly history: History; readonly edit: Edit;
   readonly now: string; readonly at: number; readonly key?: string | null;
   readonly masks?: ReadonlyMap<AssetId, Plane<'u8'>>;
+  readonly selection?: SelectionTransition;
 }): EditResult & { readonly history: History } {
   const result = applyEdit(input.doc, input.edit, input.now);
   if (result.kind !== 'applied') return { ...result, history: input.history };
   const masks = new Map<AssetId, Plane<'u8'>>();
-  for (const edit of [input.edit, ...result.inverse]) {
-    const asset = edit.kind === 'object.add' ? edit.object.produced.mask.asset
-      : edit.kind === 'object.refine' ? edit.produced.mask.asset : null;
-    const mask = asset === null ? undefined : input.masks?.get(asset);
-    if (asset !== null && mask !== undefined) masks.set(asset, mask);
+  for (const asset of editAssets([input.edit, ...result.inverse])) {
+    const mask = input.masks?.get(asset);
+    if (mask !== undefined) masks.set(asset, mask);
+  }
+  for (const selection of [input.selection?.before, input.selection?.after]) {
+    if (selection === null || selection === undefined) continue;
+    const mask = input.masks?.get(selection.mask.plane.asset);
+    if (mask !== undefined) masks.set(selection.mask.plane.asset, mask);
   }
   return { ...result, history: push(input.history, {
     key: input.key ?? null, at: input.at, forward: [input.edit], inverse: result.inverse, masks,
+    ...(input.selection === undefined ? {} : { selection: frozenSelectionTransition(input.selection) }),
   }, result.doc) };
+}
+
+function frozenSelectionTransition(value: SelectionTransition): SelectionTransition {
+  return Object.freeze({ before: activeSelectionSchema.parse(value.before), after: activeSelectionSchema.parse(value.after) });
+}
+
+/** A completed selection operation shares the chronological 50-step history. */
+export function recordSelection(input: {
+  readonly doc: SceneDocument; readonly history: History; readonly before: ActiveSelection;
+  readonly after: ActiveSelection; readonly at: number; readonly masks?: ReadonlyMap<AssetId, Plane<'u8'>>;
+}): History {
+  if (sameValue(input.before, input.after)) return input.history;
+  const selection = frozenSelectionTransition(input);
+  const masks = new Map<AssetId, Plane<'u8'>>();
+  for (const root of [selection.before, selection.after]) {
+    if (root === null) continue;
+    const mask = input.masks?.get(root.mask.plane.asset);
+    if (mask !== undefined) masks.set(root.mask.plane.asset, mask);
+  }
+  return push(input.history, { kind: 'selection', key: null, at: input.at, selection, masks }, input.doc);
 }
 
 /**
@@ -114,6 +152,8 @@ export function coalesceKey(edit: Edit): string | null {
     case 'object.show':
     case 'light.add':
     case 'light.remove':
+    case 'layer.add': case 'layer.remove': case 'layer.placement': case 'layer.opacity': case 'layer.coverage': case 'layer.depth':
+    case 'source.add': case 'source.remove': case 'removal.set': case 'effect.set': case 'compositing':
       return null;
     default: {
       const unhandled: never = edit;
@@ -146,7 +186,7 @@ function onlyKey(patch: object): string | null {
  */
 export function push(history: History, entry: HistoryEntry, doc: SceneDocument): History {
   const last = history.undo.at(-1);
-  if (last !== undefined && coalesces(last, entry)) {
+  if (last !== undefined && !isSelectionEntry(last) && !isSelectionEntry(entry) && coalesces(last, entry)) {
     const rest = history.undo.slice(0, -1);
     // Only the kind of the result is read, so the time stamped is immaterial.
     if (applyEdits(doc, last.inverse, doc.updatedAt).kind === 'unchanged') return { undo: closeTop(rest), redo: [] };
@@ -158,9 +198,13 @@ export function push(history: History, entry: HistoryEntry, doc: SceneDocument):
   return { undo: undo.length > HISTORY_LIMIT ? undo.slice(undo.length - HISTORY_LIMIT) : undo, redo: [] };
 }
 
-function coalesces(last: HistoryEntry, entry: HistoryEntry): boolean {
+function isSelectionEntry(entry: HistoryEntry): entry is SelectionHistoryEntry {
+  return 'kind' in entry && entry.kind === 'selection';
+}
+
+function coalesces(last: DocumentHistoryEntry, entry: DocumentHistoryEntry): boolean {
   const gap = entry.at - last.at;
-  return last.key !== null && last.key === entry.key && gap >= 0 && gap <= COALESCE_WINDOW_MS;
+  return last.selection === undefined && entry.selection === undefined && last.key !== null && last.key === entry.key && gap >= 0 && gap <= COALESCE_WINDOW_MS;
 }
 
 /**
@@ -173,7 +217,10 @@ function coalesces(last: HistoryEntry, entry: HistoryEntry): boolean {
 export function undo(history: History): HistoryStep | null {
   const entry = history.undo.at(-1);
   if (entry === undefined) return null;
-  return { edits: entry.inverse, history: { undo: closeTop(history.undo.slice(0, -1)), redo: [...history.redo, entry] } };
+  const next = { undo: closeTop(history.undo.slice(0, -1)), redo: [...history.redo, entry] };
+  return isSelectionEntry(entry) ? { kind: 'selection', selection: entry.selection.before, history: next }
+    : { kind: 'document', edits: entry.inverse, history: next,
+      ...(entry.selection === undefined ? {} : { selection: entry.selection.before }) };
 }
 
 /**
@@ -184,7 +231,10 @@ export function undo(history: History): HistoryStep | null {
 export function redo(history: History): HistoryStep | null {
   const entry = history.redo.at(-1);
   if (entry === undefined) return null;
-  return { edits: entry.forward, history: { undo: [...history.undo, closed(entry)], redo: history.redo.slice(0, -1) } };
+  const next = { undo: [...history.undo, closed(entry)], redo: history.redo.slice(0, -1) };
+  return isSelectionEntry(entry) ? { kind: 'selection', selection: entry.selection.after, history: next }
+    : { kind: 'document', edits: entry.forward, history: next,
+      ...(entry.selection === undefined ? {} : { selection: entry.selection.after }) };
 }
 
 /** The stack with its top entry closed, so no later edit coalesces into it. */
@@ -198,18 +248,39 @@ function closed(entry: HistoryEntry): HistoryEntry {
 }
 
 /**
- * Every asset a mask in the history names: the mask of each `object.add` and
- * each `object.refine` in any entry's forward or inverse list, on either
- * stack. The inverse of an `object.remove` is an `object.add`, so a removed
- * object's mask is among them. The session keeps these assets cached and
- * stored while the scene is open, so any undo or redo finds its mask.
+ * Every asset named by a retained edit or selection root on either stack.
+ * Inverses retain removed layers, source images, effects, and removals.
+ * The session keeps these bytes while their undo or redo step is reachable.
  */
 export function referencedAssets(history: History): ReadonlySet<AssetId> {
   const assets = new Set<AssetId>();
   for (const entry of [...history.undo, ...history.redo]) {
-    for (const edit of [...entry.forward, ...entry.inverse]) {
-      if (edit.kind === 'object.add') assets.add(edit.object.produced.mask.asset);
-      else if (edit.kind === 'object.refine') assets.add(edit.produced.mask.asset);
+    if (!isSelectionEntry(entry)) for (const asset of editAssets([...entry.forward, ...entry.inverse])) assets.add(asset);
+    for (const selection of [entry.selection?.before, entry.selection?.after]) {
+      if (selection !== null && selection !== undefined) assets.add(selection.mask.plane.asset);
+    }
+  }
+  return assets;
+}
+
+/** Referenced bytes only; historical provenance hashes are not assets. */
+function editAssets(edits: readonly Edit[]): ReadonlySet<AssetId> {
+  const assets = new Set<AssetId>();
+  for (const edit of edits) {
+    switch (edit.kind) {
+      case 'object.add': case 'layer.add': {
+        const layer = edit.kind === 'object.add' ? edit.object : edit.layer;
+        assets.add(layer.produced.mask.asset);
+        if (layer.depthAttachment.kind === 'source') assets.add(layer.depthAttachment.map.asset);
+        break;
+      }
+      case 'object.refine': assets.add(edit.produced.mask.asset); break;
+      case 'layer.coverage': assets.add(edit.value.mask.asset); break;
+      case 'layer.depth': if (edit.value.kind === 'source') assets.add(edit.value.map.asset); break;
+      case 'source.add': assets.add(edit.source.image.asset); break;
+      case 'removal.set': if (edit.value !== null) assets.add(edit.value.mask.plane.asset); break;
+      case 'effect.set': if (edit.value?.scope.kind === 'mask') assets.add(edit.value.scope.mask.plane.asset); break;
+      default: break;
     }
   }
   return assets;

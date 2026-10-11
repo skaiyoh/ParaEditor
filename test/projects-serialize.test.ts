@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deserializeDocument, deserializeMask, deserializeScene, serializeDocument, serializeMask, serializeScene } from '../src/projects/serialize.ts';
 import type { Plane } from '../src/core/raster.ts';
-import { assetId, fiveClusterDocument, invalidVariants, minimalDocument, validDocuments } from './fixtures/documents.ts';
+import { assetId, legacyFiveClusterDocument, legacyMinimalDocument, invalidVariants, minimalDocument, validDocuments } from './fixtures/documents.ts';
 
 test('every full document fixture round-trips through JSON and the versioned parser', () => {
   for (const document of validDocuments()) {
@@ -39,7 +39,7 @@ test('mask byte lengths, dimensions and allocation bounds are checked before res
 });
 
 test('scene transport includes exactly the distinct object masks at their referenced sizes', () => {
-  const document = fiveClusterDocument();
+  const document = legacyFiveClusterDocument();
   const masks = new Map(document.objects.map((object) => [object.produced.mask.asset, {
     format: 'u8', size: object.produced.mask.size, data: new Uint8Array(object.produced.mask.size.width * object.produced.mask.size.height),
   } satisfies Plane<'u8'>]));
@@ -55,31 +55,32 @@ test('scene transport includes exactly the distinct object masks at their refere
   assert.throws(() => deserializeScene({ ...wire, masks: { ...wire.masks, [first.produced.mask.asset]: { width: 1, height: 1 } } }));
   assert.throws(() => deserializeScene({ ...wire, masks: { '../escape': { width: 1, height: 1 } } }));
   assert.throws(() => serializeScene(document, new Map(), 0));
-  assert.deepEqual(serializeScene(minimalDocument(), new Map(), 0).masks, {});
+  assert.deepEqual(serializeScene(legacyMinimalDocument(), new Map(), 0).masks, {});
 });
 
 test('scene revisions are required, nonnegative safe integers and survive transport', () => {
-  const wire = serializeScene(minimalDocument(), new Map(), 0);
+  const wire = serializeScene(legacyMinimalDocument(), new Map(), 0);
   assert.equal(deserializeScene(wire).revision, 0);
   assert.throws(() => deserializeScene({ document: wire.document, masks: wire.masks }));
   for (const revision of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Infinity, '1']) {
     assert.throws(() => deserializeScene({ ...wire, revision }));
   }
-  assert.throws(() => serializeScene(minimalDocument(), new Map(), -1));
-  assert.equal(deserializeScene(serializeScene(minimalDocument(), new Map(), 13)).revision, 13);
+  assert.throws(() => serializeScene(legacyMinimalDocument(), new Map(), -1));
+  assert.equal(deserializeScene(serializeScene(legacyMinimalDocument(), new Map(), 13)).revision, 13);
 });
 
-test('staged v2 envelopes retain strict v5 refs and revisions without changing the v4 writer', async () => {
+test('active v2 envelopes retain strict v5 refs and revisions beside the frozen v4 writer', async () => {
   const { newComposition, artworkLayer } = await import('./fixtures/composition.ts');
   const { serializeCompositionScene, deserializeCompositionScene, deserializeProjectEnvelope } = await import('../src/projects/serialize.ts');
   const { SCENE_VERSION } = await import('../src/core/migrate.ts');
   const document = newComposition(), envelope = serializeCompositionScene(document, 7);
   assert.deepEqual(deserializeCompositionScene(JSON.parse(JSON.stringify(envelope))), { transportVersion: 2, document, revision: 7 });
   assert.equal(deserializeProjectEnvelope(envelope).kind, 'composition');
-  assert.equal(deserializeProjectEnvelope(serializeScene(minimalDocument(), new Map(), 1)).kind, 'legacy');
-  assert.equal(SCENE_VERSION, 4);
+  assert.equal(deserializeProjectEnvelope(serializeScene(legacyMinimalDocument(), new Map(), 1)).kind, 'legacy');
+  assert.equal(SCENE_VERSION, 6);
   assert.throws(() => deserializeScene(envelope));
-  assert.throws(() => deserializeDocument(document));
+  assert.deepEqual(deserializeDocument(document), document);
+  assert.throws(() => deserializeScene({ document, masks: {}, revision: 1 }));
   assert.throws(() => deserializeProjectEnvelope({ ...envelope, transportVersion: 3 }));
   assert.throws(() => deserializeProjectEnvelope({ ...envelope, masks: {} }));
   assert.throws(() => deserializeProjectEnvelope({ ...envelope, revision: -1 }));

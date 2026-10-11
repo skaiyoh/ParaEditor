@@ -9,6 +9,7 @@ import { err, ok, type Result } from '../core/result.ts';
 import { selectionSpaceSchema } from '../core/selection.ts';
 import type { SelectionSpace } from '../core/types.ts';
 import type { CommandResult } from './authoring.ts';
+import { COMPOSITION_LIMITS } from '../core/composition-ranges.ts';
 
 export type SelectionPixels = { readonly space: SelectionSpace; readonly plane: Plane<'u8'> };
 export type SelectionOperation = 'rectangle' | 'freehand' | 'add' | 'remove' | 'feather' | 'invert' | 'clear' | 'initialize';
@@ -117,7 +118,11 @@ export function createSelection(host: SelectionHost, layout: AuthoringLayout) {
         current.preview = featherMask(current.baseline, input.radius);
       } else if (input.kind === 'shape' && current.start.kind === 'shape') {
         sourcePointSchema.parse(input.at);
-        if (current.start.tool === 'freehand') current.points.push({ ...input.at });
+        if (current.start.tool === 'freehand') {
+          const bytes = current.baseline.data.byteLength * 2 + (current.points.length + 1) * 16;
+          if (bytes > COMPOSITION_LIMITS.dirtyStrokeBytes) return { kind: 'refused', reason: 'This selection exceeds the 16 MiB gesture limit.' };
+          current.points.push({ ...input.at });
+        }
         const brush = current.start.tool === 'rectangle'
           ? rasterizeMask(current.owner.size, { kind: 'rectangle', from: current.start.at, to: input.at })
           : rasterizeMask(current.owner.size, { kind: 'path', points: current.points });
@@ -145,6 +150,9 @@ export function createSelection(host: SelectionHost, layout: AuthoringLayout) {
   }
   return {
     begin, extend, end, cancel, cancelActive, reconcile,
+    dirtyBytes(): number {
+      return gesture === null ? 0 : gesture.baseline.data.byteLength + (gesture.preview?.data.byteLength ?? 0) + gesture.points.length * 16;
+    },
     snapshot(): SelectionPixels | null { reconcile(); return snapshot(selection); },
     preview(): SelectionPixels | null {
       reconcile();

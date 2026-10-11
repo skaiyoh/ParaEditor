@@ -312,9 +312,9 @@ export const scenarios: readonly Scenario[] = [
       t.equal('the conditions come first, then H1 and H2', view.cards.map((c) => c.row), ['conditions', 'H1', 'H2']);
       const [, h1, h2] = view.cards;
       t.equal('H1 names its part', h1?.heading, 'H1 P0.1');
-      t.equal('H1\'s action is the registry\'s, word for word', h1?.action, 'In Safari open the noisy address the agent sends.');
+      t.equal('H1\'s action is the registry\'s, word for word', h1?.action, 'In Safari open the ParaEditor address the agent sends.');
       t.equal('H1 asks the registry\'s question with its expected answer', h1?.question, 'Does the page say "isolated: yes"? [yes]');
-      t.equal('H1 links the noisy address on this origin', h1?.links, [{ text: 'the noisy address', href: t.baseUrl, target: '_blank' }]);
+      t.equal('H1 links the noisy address on this origin', h1?.links, [{ text: 'the ParaEditor address', href: t.baseUrl, target: '_blank' }]);
       t.equal('H2 names its part', h2?.heading, 'H2 P0.2');
       t.equal('H2\'s action is the registry\'s, word for word', h2?.action, 'Open /dev/threads.html and tap Run.');
       t.equal('H2 asks the registry\'s question with its expected answer', h2?.question, 'What thread count does it show? [2]');

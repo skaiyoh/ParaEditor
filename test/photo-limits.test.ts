@@ -27,15 +27,15 @@ test('oriented sizes follow both even master rounding rules', () => {
 test('the three import refusals name their exact limits', () => {
   assert.deepEqual(checkPhotoSize({ width: 400, height: 300 }), {
     kind: 'too-small', limit: 'long-edge', original: { width: 400, height: 300 },
-    message: 'This photo is too small. noisy needs at least 512 pixels on its long side.',
+    message: 'This photo is too small. ParaEditor needs at least 512 pixels on its long side.',
   });
   assert.deepEqual(checkPhotoSize({ width: 20000, height: 400 }), {
     kind: 'too-small', limit: 'master-short-side', original: { width: 20000, height: 400 },
-    message: 'This photo is too narrow. Fitted within 2048 pixels, its short side would be under the 64 pixels noisy needs.',
+    message: 'This photo is too narrow. Fitted within 2048 pixels, its short side would be under the 64 pixels ParaEditor needs.',
   });
   assert.deepEqual(checkPhotoSize({ width: 9000, height: 8000 }), {
     kind: 'too-large', original: { width: 9000, height: 8000 },
-    message: 'This photo is too large. noisy opens photos of up to 64 megapixels.',
+    message: 'This photo is too large. ParaEditor opens photos of up to 64 megapixels.',
   });
 });
 test('limits accept their boundaries and long-edge refusal takes priority', () => {

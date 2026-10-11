@@ -388,6 +388,7 @@ export const scenarios: readonly Scenario[] = [{
             !demo.products().plateNeeded ? true : null;
         }, { timeoutMs: 180_000 });
         const before = await page.evaluate(z.string(), () => JSON.stringify({ document: window.__noisyTest?.demo.document(), selected: window.__noisyTest?.demo.objects().filter((object) => object.selected) }));
+        await page.click('[data-testid="tool-actions"]');
         await page.click('[data-testid="projects-toggle"]');
         const projects = await page.evaluate(z.object({ railAbsent: z.boolean(), resetAbsent: z.boolean(), returnVisible: z.boolean(), statusVisible: z.boolean(), stageFills: z.boolean() }), () => {
           const stage = document.querySelector('.phone-stage')?.getBoundingClientRect();
@@ -668,12 +669,13 @@ export const scenarios: readonly Scenario[] = [{
         return true;
       });
       await page.screenshot(size.width === 402 ? 'inspector-phone-402' : 'inspector-phone-390');
+      await page.click('[data-testid="tool-actions"]');
       await page.click('[data-testid="projects-toggle"]');
       t.ok(`${size.width}: the hidden expanded sheet does not reserve space for Projects`, await page.evaluate(z.boolean(), () => {
         const stage = document.querySelector('.phone-stage')?.getBoundingClientRect();
         return stage !== undefined && stage.height > innerHeight * .75 && document.querySelector('.phone-sheet')?.hasAttribute('hidden') === true;
       }));
-      await page.click('[data-testid="projects-toggle"]');
+      await page.click('[data-testid="projects-return"]');
     }
     await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
     await page.waitFor('desktop inspector', z.literal(true), () => document.querySelector('.inspector') === null ? null : true);
@@ -732,6 +734,7 @@ export const scenarios: readonly Scenario[] = [{
       const focus = await focusedControl();
       t.ok(`${label}: keyboard focus is a separate inset 2 px text ring`, focus.focused && focus.visible && focus.width === '2px' && focus.color === 'rgb(230, 230, 230)' && focus.offset === '-2px', focus);
     };
+    await page.click('[data-testid="tool-actions"]');
     await page.click('[data-testid="projects-toggle"]');
     await page.click('[data-testid="projects-return"]');
     await page.click('[data-testid=tool-layers]');
@@ -743,6 +746,8 @@ export const scenarios: readonly Scenario[] = [{
     await tabTo('[data-testid=mode-pill] button:first-child');
     await markFocus('pressed Motion mode');
     t.equal('Motion retains its pressed state while focused', (await focusedControl()).pressed, 'true');
+    await tabTo('[data-testid="tool-actions"]');
+    await page.press('Enter');
     await tabTo('[data-testid="projects-toggle"]');
     await page.press('Enter');
     await markFocus('active Projects toggle');

@@ -3,6 +3,7 @@ import type { Scenario } from '../scenario.ts';
 
 const listing = z.object({ projects: z.array(z.object({ id: z.string(), name: z.string(), updatedAt: z.string(), thumbnail: z.string() })) });
 const savedSchema = z.object({ id: z.string(), revision: z.number(), json: z.string(), objects: z.number(), masksMatch: z.boolean(),
+  assetsMatch: z.boolean(), transportVersion: z.number(), version: z.number(),
   thumbnailJpeg: z.boolean(), thumbnailBytes: z.number(), thumbnailLongEdge: z.number(), photoMatches: z.boolean() });
 
 async function savedChecks(): Promise<unknown> {
@@ -11,24 +12,32 @@ async function savedChecks(): Promise<unknown> {
   const response = await fetch(`/api/projects/${doc.id}/scene`);
   if (!response.ok) throw new Error('No saved scene.');
   const scene: unknown = await response.json();
-  if (scene === null || typeof scene !== 'object' || !('document' in scene) || !('masks' in scene) || !('revision' in scene) || typeof scene.revision !== 'number') throw new Error('Invalid scene response.');
-  const metadata = scene.masks;
-  if (metadata === null || typeof metadata !== 'object') throw new Error('Invalid mask metadata.');
-  let masksMatch = Object.keys(metadata).length === demo.projectMasks().length;
+  if (scene === null || typeof scene !== 'object' || !('document' in scene) || !('transportVersion' in scene) || scene.transportVersion !== 2 ||
+    'masks' in scene || !('revision' in scene) || typeof scene.revision !== 'number') throw new Error('Invalid v5 scene response.');
+  const metadata = new Map(doc.objects.map((object) => [object.produced.mask.asset, object.produced.mask.size]));
+  let masksMatch = metadata.size === demo.projectMasks().length;
   for (const mask of demo.projectMasks()) {
-    const size: unknown = Reflect.get(metadata, mask.asset);
-    const response = await fetch(`/api/projects/${doc.id}/masks/${mask.asset}`);
+    const size = [...metadata].find(([asset]) => asset === mask.asset)?.[1];
+    const response = await fetch(`/api/projects/${doc.id}/assets/${mask.asset}`);
     const bytes = new Uint8Array(await response.arrayBuffer());
-    masksMatch &&= response.ok && size !== null && typeof size === 'object' && 'width' in size && 'height' in size &&
-      size.width === mask.width && size.height === mask.height && bytes.length === mask.bytes.length && bytes.every((value, i) => value === mask.bytes[i]);
+    const header = bytes.length >= 16 ? new DataView(bytes.buffer, bytes.byteOffset, 16) : null;
+    masksMatch &&= response.ok && size !== undefined && size.width === mask.width && size.height === mask.height &&
+      bytes.length === mask.bytes.length + 16 && bytes[0] === 78 && bytes[1] === 83 && bytes[2] === 82 && bytes[3] === 65 && bytes[4] === 1 && bytes[5] === 1 &&
+      header?.getUint32(8, true) === mask.width && header.getUint32(12, true) === mask.height && bytes.subarray(16).every((value, i) => value === mask.bytes[i]);
+  }
+  let assetsMatch = true;
+  for (const asset of demo.projectAssets()) {
+    const response = await fetch(`/api/projects/${doc.id}/${asset.path}`), bytes = new Uint8Array(await response.arrayBuffer());
+    assetsMatch &&= response.ok && bytes.length === asset.bytes.length && bytes.every((value, index) => value === asset.bytes[index]);
   }
   const thumb = await fetch(`/api/projects/${doc.id}/thumbnail`);
   const blob = await thumb.blob(), bytes = new Uint8Array(await blob.arrayBuffer());
   const bitmap = await createImageBitmap(blob), thumbnailLongEdge = Math.max(bitmap.width, bitmap.height); bitmap.close();
-  const photo = await fetch(`/api/projects/${doc.id}/photo`);
+  const photo = await fetch(`/api/projects/${doc.id}/assets/${doc.frame.source?.asset ?? doc.frame.master.asset}`);
   const sample = await fetch('/assets-static/sample.jpg');
   const original = new Uint8Array(await photo.arrayBuffer()), expected = new Uint8Array(await sample.arrayBuffer());
-  return { id: doc.id, revision: scene.revision, json: JSON.stringify(scene.document), objects: doc.objects.length, masksMatch,
+  return { id: doc.id, revision: scene.revision, json: JSON.stringify(scene.document), objects: doc.objects.length, masksMatch, assetsMatch,
+    transportVersion: scene.transportVersion, version: doc.version,
     thumbnailJpeg: thumb.ok && blob.type === 'image/jpeg' && bytes[0] === 255 && bytes[1] === 216,
     thumbnailBytes: bytes.length, thumbnailLongEdge,
     photoMatches: photo.ok && original.length === expected.length && original.every((value, i) => value === expected[i]) };
@@ -39,6 +48,8 @@ export const scenarios: readonly Scenario[] = [{
   target: 'dev', covers: ['PS1a', 'POL1b-4'], timeoutMs: 360_000,
   async run(t) {
     const { page } = t;
+    t.expectMessage({ because: 'the immutable writer probes a digest before its first upload', channel: 'log', source: 'network', level: 'error',
+      text: /\b404\b/, url: /\/api\/projects\/[^/]+\/assets\/[a-f0-9]{64}$/ });
     const clickAction = async (label: string): Promise<void> => {
       if (await page.evaluate(z.boolean(), () => document.querySelector('[data-testid=tool-actions]')?.getAttribute('aria-expanded') === 'false')) await page.click('[data-testid=tool-actions]');
       const selector = await page.evaluate(z.string(), (label) => {
@@ -65,17 +76,25 @@ export const scenarios: readonly Scenario[] = [{
       }, project.id);
     };
     const addFixtureRows = (count: number): Promise<string[]> => page.evaluate(z.array(z.string()), async (count) => {
-      const doc = window.__noisyTest?.demo.document();
-      if (doc == null) throw new Error('No project to copy for the list.');
+      const demo = window.__noisyTest?.demo, doc = demo?.document();
+      if (demo === undefined || doc == null) throw new Error('No project to copy for the list.');
       const scene: unknown = await (await fetch(`/api/projects/${doc.id}/scene`)).json();
-      if (scene === null || typeof scene !== 'object' || !('masks' in scene)) throw new Error('No saved mask metadata.');
+      if (scene === null || typeof scene !== 'object' || !('transportVersion' in scene) || scene.transportVersion !== 2) throw new Error('No saved v5 checkpoint.');
       const thumbnail = await (await fetch(`/api/projects/${doc.id}/thumbnail`)).blob();
+      const assets = await Promise.all(demo.projectAssets().map(async (asset) => ({ ...asset,
+        body: await (await fetch(`/api/projects/${doc.id}/${asset.path}`)).blob() })));
       const ids: string[] = [];
       for (let index = 0; index < count; index++) {
         const id = crypto.randomUUID();
+        for (const asset of assets) {
+          const response = await fetch(`/api/projects/${id}/${asset.original ? 'photo' : asset.path}`, { method: 'PUT',
+            headers: { 'Content-Type': asset.mediaType, ...(asset.original ? { 'X-Project-Asset': asset.asset } : {}) }, body: asset.body });
+          if (!response.ok) throw new Error('Could not copy a complete project asset.');
+          await response.json();
+        }
         for (const [resource, body, type] of [
           ['thumbnail', thumbnail, 'image/jpeg'],
-          ['scene', JSON.stringify({ document: { ...doc, id, title: `${doc.title} ${index + 1}` }, masks: scene.masks, revision: 0 }), 'application/json'],
+          ['scene', JSON.stringify({ transportVersion: 2, document: { ...doc, id, title: `${doc.title} ${index + 1}` }, revision: 0 }), 'application/json'],
         ] satisfies readonly [string, BodyInit, string][]) {
           const response = await fetch(`/api/projects/${id}/${resource}`, { method: 'PUT', headers: { 'Content-Type': type }, body });
           if (!response.ok) throw new Error('Could not create a project row.');
@@ -153,6 +172,7 @@ export const scenarios: readonly Scenario[] = [{
       const list = await page.evaluate(listing, async () => (await fetch('/api/projects')).json());
       t.equal('list contains exactly the imported project', list.projects.map((project) => project.id), [saved.id]);
       t.ok('every object mask matches products byte for byte', saved.objects > 0 && saved.masksMatch, saved);
+      t.ok('the live writer checkpoints v5 through transport v2 and every durable asset matches', saved.version === 5 && saved.transportVersion === 2 && saved.assetsMatch, saved);
       t.ok('thumbnail is JPEG at 256 px, under 60 KB; photo bytes are original', saved.thumbnailJpeg && saved.thumbnailBytes < 60_000 && saved.thumbnailLongEdge === 256 && saved.photoMatches, saved);
       const desktop = await page.evaluate(z.object({ selected: z.boolean(), rows: z.number(), rowHeight: z.number(), thumbSize: z.array(z.number()), timeSize: z.string(), native: z.boolean() }), () => {
         const row = document.querySelector('[data-testid="project-row"]'), thumb = row?.querySelector('img'), time = row?.querySelector('.project-time');
@@ -171,13 +191,23 @@ export const scenarios: readonly Scenario[] = [{
       const scrollRows = await addFixtureRows(12);
       await page.click('[data-testid="projects-toggle"]');
       await page.click('[data-testid="projects-toggle"]');
-      await page.waitFor('scrolling project rows loaded', z.literal(true), () => document.querySelectorAll('[data-testid="project-row"]').length === 13 ? true : null);
+      // v5 fixture rows carry their full asset set, so the list can take longer than the default wait to show all thirteen.
+      await page.waitFor('scrolling project rows loaded', z.literal(true), () => document.querySelectorAll('[data-testid="project-row"]').length === 13 ? true : null, { timeoutMs: 30_000 });
       await page.evaluate(z.literal(true), () => { Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 }); return true; });
       await page.emulate({ width: 402, height: 874, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await page.waitFor('compact editor after crossing the tier boundary', z.literal(true), () => document.querySelector('.phone-editor') === null ? null : true);
-      if (await page.evaluate(z.boolean(), () => document.querySelector('[data-testid="projects-toggle"]')?.getAttribute('aria-pressed') === 'false')) await page.click('[data-testid="projects-toggle"]');
+      if (await page.evaluate(z.boolean(), () => document.querySelector('[data-testid="projects-toggle"]')?.getAttribute('aria-pressed') === 'true')) await page.click('[data-testid="projects-return"]');
+      await page.click('[data-testid="tool-actions"]');
+      const projectsRow = await page.evaluate(z.object({ firstControl: z.boolean(), topmost: z.boolean() }), () => {
+        const panel = document.querySelector('#panel-actions'), row = panel?.querySelector('[data-testid="projects-toggle"]');
+        const first = panel?.querySelector('button, input, select, textarea, a[href], [tabindex]'), box = row?.getBoundingClientRect();
+        const hit = box === undefined ? null : document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+        return { firstControl: row instanceof HTMLButtonElement && row === first, topmost: row instanceof HTMLButtonElement && hit !== null && row.contains(hit) };
+      });
+      t.ok('phone Actions starts with Projects as its first control and the row is topmost before opening', projectsRow.firstControl && projectsRow.topmost, projectsRow);
+      await page.click('[data-testid="projects-toggle"]');
       await page.waitFor('phone Projects panel', z.literal(true), () => document.querySelector('.phone-stage [data-testid="projects-panel"]') === null ? null : true);
-      const phone = await page.evaluate(z.object({ fits: z.boolean(), stageFilled: z.boolean(), toggleBeforeCapture: z.boolean(), controlsHidden: z.boolean(), sheetHidden: z.boolean(), railAbsent: z.boolean(), lastTappable: z.boolean(), scrolled: z.boolean() }), () => {
+      const phone = await page.evaluate(z.object({ fits: z.boolean(), stageFilled: z.boolean(), returnTappable: z.boolean(), controlsHidden: z.boolean(), sheetHidden: z.boolean(), railAbsent: z.boolean(), lastTappable: z.boolean(), scrolled: z.boolean() }), () => {
         const panel = document.querySelector('[data-testid="projects-panel"]')?.getBoundingClientRect(), stage = document.querySelector('.phone-stage')?.getBoundingClientRect();
         const sheet = document.querySelector('.phone-sheet');
         const list = document.querySelector('.projects-list');
@@ -185,19 +215,18 @@ export const scenarios: readonly Scenario[] = [{
         list.scrollTop = list.scrollHeight;
         const last = list.querySelector('[data-testid="project-row"]:last-child .project-open'), bounds = last?.getBoundingClientRect();
         const hit = bounds === undefined ? null : document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-        // RS1b: the strip is icon tools (Projects first); Take a photo lives in Actions and in the Projects panel's own import action.
-        const toggle = document.querySelector<HTMLElement>('[data-testid="projects-toggle"]'), first = document.querySelector('.phone-strip button');
-        const toggleBox = toggle?.getBoundingClientRect(), toggleHit = toggleBox === undefined ? null : document.elementFromPoint(toggleBox.x + toggleBox.width / 2, toggleBox.y + toggleBox.height / 2);
+        const returnButton = document.querySelector('[data-testid="projects-return"]'), returnBox = returnButton?.getBoundingClientRect();
+        const returnHit = returnBox === undefined ? null : document.elementFromPoint(returnBox.x + returnBox.width / 2, returnBox.y + returnBox.height / 2);
         return { fits: document.documentElement.scrollWidth === innerWidth && panel !== undefined && panel.left >= 0 && panel.right <= innerWidth,
           stageFilled: panel !== undefined && stage !== undefined && panel.width === stage.width && panel.height === stage.height,
-          toggleBeforeCapture: toggle !== null && first === toggle && toggle.getAttribute('aria-pressed') === 'true' && toggleHit !== null && toggle.contains(toggleHit),
+          returnTappable: returnButton instanceof HTMLButtonElement && returnHit !== null && returnButton.contains(returnHit),
           controlsHidden: (document.getElementById('phone-tools')?.hasAttribute('hidden') ?? false) && document.querySelector('.phone-editor .primary-action')?.hasAttribute('disabled') === true,
           sheetHidden: sheet instanceof HTMLElement && sheet.hidden && getComputedStyle(sheet).display === 'none',
           railAbsent: document.querySelector('.phone-editor .fry-rail, .phone-editor .mode-pill, .phone-editor .context-bar') === null,
           scrolled: list.scrollHeight > list.clientHeight && list.scrollTop > 0 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1,
           lastTappable: last instanceof HTMLButtonElement && !last.disabled && hit !== null && last.contains(hit) };
       });
-      t.ok('phone panel fills the stage, fits, keeps its Projects toggle first and reachable, and hides the editing controls', phone.fits && phone.stageFilled && phone.toggleBeforeCapture && phone.controlsHidden, phone);
+      t.ok('phone Projects fills the stage, fits, keeps Return topmost at its center, and hides the editing controls', phone.fits && phone.stageFilled && phone.returnTappable && phone.controlsHidden, phone);
       t.ok('Projects hides the editing sheet and rail, and its last row remains tappable at maximum scroll', phone.sheetHidden && phone.railAbsent && phone.scrolled && phone.lastTappable, phone);
       await page.waitFor('phone thumbnail loaded', z.literal(true), () => {
         const image = document.querySelector('[data-testid="project-row"]:last-child img');
@@ -232,8 +261,8 @@ export const scenarios: readonly Scenario[] = [{
         const doc = demo.document(), object = doc?.objects[0];
         let masksMatch = true;
         for (const mask of demo.projectMasks()) {
-          const bytes = new Uint8Array(await (await fetch(`/api/projects/${doc?.id}/masks/${mask.asset}`)).arrayBuffer());
-          masksMatch &&= bytes.length === mask.bytes.length && bytes.every((value, i) => value === mask.bytes[i]);
+          const bytes = new Uint8Array(await (await fetch(`/api/projects/${doc?.id}/assets/${mask.asset}`)).arrayBuffer());
+          masksMatch &&= bytes.length === mask.bytes.length + 16 && bytes.subarray(16).every((value, i) => value === mask.bytes[i]);
         }
         return { equal: JSON.stringify(doc) === json, selectionCleared: demo.objects().every((object) => !object.selected),
           layerPresent: object !== undefined && Array.from(document.querySelectorAll('.layer-name')).some((node) => node.textContent === object.name), masksMatch };
@@ -242,6 +271,12 @@ export const scenarios: readonly Scenario[] = [{
       t.equal('restored project keeps the layer name and hidden flag', await page.evaluate(z.object({ name: z.string(), hidden: z.boolean() }), () => {
         const object = window.__noisyTest?.demo.objects()[0]; return { name: object?.name, hidden: object?.hidden };
       }), { name: 'Saved ball', hidden: true });
+      await page.waitFor('restored models are available for an explicit SAM request', z.literal(true), () => window.__noisyTest?.demo.analysis().modelsReady ? true : null, { timeoutMs: 180_000 });
+      await page.evaluate(z.literal(true), () => {
+        const result = window.__noisyTest?.demo.setSelectionTool('select');
+        if (result?.kind === 'refused' || result === undefined) throw new Error('Restored SAM tool could not be selected.');
+        return true;
+      });
       await page.waitFor('restored analysis is ready', z.literal(true), () => window.__noisyTest?.demo.analysis().decoderReady ? true : null, { timeoutMs: 180_000 });
       const refusedRows = await addFixtureRows(1), refusedId = refusedRows[0];
       if (refusedId === undefined) throw new Error('No refusal fixture.');
@@ -413,7 +448,7 @@ export const scenarios: readonly Scenario[] = [{
         if (!response.ok) throw new Error('Could not create the remote deletion.');
         await response.json(); return true;
       }, second);
-      t.expectMessage({ because: 'a remotely deleted project refuses its next thumbnail PUT with 410', channel: 'log', source: 'network', level: 'error', url: new RegExp(`/api/projects/${second}/thumbnail`) });
+      t.expectMessage({ because: 'a remotely deleted project refuses its next thumbnail PUT with 410', channel: 'log', source: 'network', level: 'error', url: new RegExp(`/api/projects/${second}/thumbnail$`) });
       await page.evaluate(z.literal(true), () => { window.__noisyTest?.demo.setFry(.27); return true; });
       await page.waitFor('410 refuses a remotely deleted project save', z.literal(true), () => window.__noisyTest?.demo.projects().state === 'failed' ? true : null, { timeoutMs: 30_000 });
       t.equal('a terminal 410 does not retain the refused snapshot for retry', await page.evaluate(z.number(), () => window.__noisyTest?.demo.projects().pendingSaves ?? -1), 0);
@@ -433,6 +468,8 @@ export const scenarios: readonly Scenario[] = [{
   target: 'dev', covers: ['POL1b-3'], timeoutMs: 300_000,
   async run(t) {
     const { page } = t;
+    t.expectMessage({ because: 'the immutable writer probes a digest before its first upload', channel: 'log', source: 'network', level: 'error',
+      text: /\b404\b/, url: /\/api\/projects\/[^/]+\/assets\/[a-f0-9]{64}$/ });
     await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
     await page.goto('/');
     await page.click('[data-testid="tool-actions"]');
@@ -448,15 +485,21 @@ export const scenarios: readonly Scenario[] = [{
       const demo = window.__noisyTest?.demo, doc = demo?.document();
       if (demo === undefined || doc == null) throw new Error('No saved project to copy');
       const wire: unknown = await (await fetch(`/api/projects/${doc.id}/scene`)).json();
-      if (wire === null || typeof wire !== 'object' || !('masks' in wire)) throw new Error('No saved masks');
-      const photo = await (await fetch(`/api/projects/${doc.id}/photo`)).blob();
+      if (wire === null || typeof wire !== 'object' || !('transportVersion' in wire) || wire.transportVersion !== 2) throw new Error('No saved v5 checkpoint');
+      const assets = await Promise.all(demo.projectAssets().map(async (asset) => ({ ...asset,
+        body: await (await fetch(`/api/projects/${doc.id}/${asset.path}`)).blob() })));
       const thumb = await (await fetch(`/api/projects/${doc.id}/thumbnail`)).blob();
       const ids: string[] = [];
       for (const [name, fry] of [['Saved alternate', .24], ['Saved third photo', .61]] satisfies readonly [string, number][]) {
         const id = crypto.randomUUID();
-        const resources: [string, BodyInit, string][] = [['photo', photo, photo.type], ['thumbnail', thumb, 'image/jpeg']];
-        for (const mask of demo.projectMasks()) resources.push([`masks/${mask.asset}`, new Uint8Array(mask.bytes), 'application/octet-stream']);
-        resources.push(['scene', JSON.stringify({ document: { ...doc, id, title: name, style: { ...doc.style, fry } }, masks: wire.masks, revision: 0 }), 'application/json']);
+        for (const asset of assets) {
+          const response = await fetch(`/api/projects/${id}/${asset.original ? 'photo' : asset.path}`, { method: 'PUT',
+            headers: { 'Content-Type': asset.mediaType, ...(asset.original ? { 'X-Project-Asset': asset.asset } : {}) }, body: asset.body });
+          if (!response.ok) throw new Error(`Could not copy an asset for ${name}`);
+          await response.json();
+        }
+        const resources: [string, BodyInit, string][] = [['thumbnail', thumb, 'image/jpeg']];
+        resources.push(['scene', JSON.stringify({ transportVersion: 2, document: { ...doc, id, title: name, style: { ...doc.style, fry } }, revision: 0 }), 'application/json']);
         for (const [resource, body, type] of resources) {
           const response = await fetch(`/api/projects/${id}/${resource}`, { method: 'PUT', headers: { 'Content-Type': type }, body });
           if (!response.ok) throw new Error(`Could not save ${name}`);

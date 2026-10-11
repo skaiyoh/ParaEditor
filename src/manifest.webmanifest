@@ -1,6 +1,6 @@
 {
-  "name": "noisy",
-  "short_name": "noisy",
+  "name": "ParaEditor",
+  "short_name": "ParaEditor",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

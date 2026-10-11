@@ -8,7 +8,7 @@ import { gpuHeaders, gpuUrl } from '../build.mjs';
 import { expectedHeaders, loadHeaderContract } from '../headers.mjs';
 import { ROOT, STATE, OUTPUT, lockedFiles } from './prepare.mjs';
 import { serializeScene } from '../../src/projects/serialize.ts';
-import { fiveClusterDocument } from '../../test/fixtures/documents.ts';
+import { legacyFiveClusterDocument as fiveClusterDocument } from '../../test/fixtures/documents.ts';
 
 /** Recompute the configured policy and verify the prepared build carries it. */
 export function preparedHeaderContract(build, source) {

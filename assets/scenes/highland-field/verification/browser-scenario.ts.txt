@@ -1,0 +1,140 @@
+import { z } from '../../../src/core/zod.ts';
+import type { Scenario, ScenarioContext } from '../scenario.ts';
+
+const snapshot = z.object({ ready: z.boolean(), target: z.array(z.number()), current: z.array(z.number()),
+  source: z.string(), gain: z.number(), auto: z.boolean(), triangles: z.number(),
+  error: z.string().nullable(), frames: z.number(),
+  frameTiming: z.object({ samples: z.number(), medianMs: z.number(), p95Ms: z.number() }).nullable() });
+type Snapshot = z.infer<typeof snapshot>;
+const visible = z.array(z.object({ id: z.number(), name: z.string(), pixels: z.number() }));
+declare global {
+  interface Window {
+    highland?: {
+      snapshot(): Snapshot;
+      project(point: readonly number[], control: readonly number[]): readonly number[];
+      visibility(): z.infer<typeof visible>;
+      objects(): readonly { name: string; kind: number }[];
+    };
+  }
+}
+async function settle(t: ScenarioContext, ms = 900): Promise<void> {
+  await t.page.evaluate(z.literal(true), async ms => { await new Promise<void>(resolve => setTimeout(resolve, ms)); return true; }, ms);
+}
+async function move(t: ScenarioContext, x: number, y: number): Promise<Snapshot> {
+  await t.page.evaluate(z.literal(true), (x, y) => {
+    const canvas = document.querySelector('canvas');
+    if (!(canvas instanceof HTMLCanvasElement)) throw new Error('Missing canvas');
+    const r = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', clientX: r.x + r.width * x, clientY: r.y + r.height * y }));
+    return true;
+  }, x, y);
+  await settle(t);
+  return t.page.evaluate(snapshot, () => window.highland?.snapshot());
+}
+async function layout(t: ScenarioContext, width: number, height: number, name: string): Promise<void> {
+  await t.page.emulate({ width, height, deviceScaleFactor: 1, mobile: width < 650, colorScheme: 'dark' });
+  await settle(t, 200);
+  await t.page.click('#recenter');
+  t.ok(`${name} controls fit and have 44px targets`, await t.page.evaluate(z.boolean(), () => {
+    return document.documentElement.scrollWidth === innerWidth && ['#recenter', '#head', '#tilt', '#auto', '#fullscreen', '#gain'].every(selector => {
+      const e = document.querySelector(selector);
+      if (!(e instanceof HTMLElement)) return false;
+      const r = e.getBoundingClientRect();
+      return r.width >= 44 && r.height >= 44 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+    });
+  }));
+  t.ok(`${name} scene is unobscured and has no visible frame`, await t.page.evaluate(z.boolean(), () => {
+    const canvas = document.querySelector('canvas'), frame = document.querySelector('#window'), footer = document.querySelector('footer');
+    if (!canvas || !frame || !footer) return false;
+    const r = canvas.getBoundingClientRect(), f = footer.getBoundingClientRect();
+    return r.width > 300 && r.height > 200 && r.bottom <= f.top + 1 && getComputedStyle(frame).borderTopWidth === '0px';
+  }));
+  await t.page.screenshot(name);
+}
+
+export const scenarios: readonly Scenario[] = [{
+  id: 'bld4.highland-field', title: 'Approved unframed meadow, fixed perspective, occlusion and smooth controls', target: 'dev', covers: [], timeoutMs: 120_000,
+  async run(t) {
+    await t.page.emulate({ width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
+    await t.page.goto('/scene/index.html');
+    await t.page.waitFor('real geometry ready', z.literal(true), () => window.highland?.snapshot().ready ? true : null, { timeoutMs: 30_000 });
+    const neutral = await move(t, .5, .5);
+    t.equal('approved 2x gain is the default', neutral.gain, 2);
+    t.equal('actual exported triangle count', neutral.triangles, 599567);
+    t.ok('construction walls absent from exported geometry', await t.page.evaluate(z.boolean(), () => window.highland?.objects().every(o => o.kind !== 5) ?? false));
+    const projection = await t.page.evaluate(z.object({ a: z.array(z.number()), b: z.array(z.number()) }), () => ({ a: window.highland?.project([2, 0, 4], [-1, -1]), b: window.highland?.project([2, 0, 4], [1, 1]) }));
+    t.ok('screen plane remains fixed as the eye moves on both axes', projection.a.every((v, i) => Math.abs(v - (projection.b[i] ?? NaN)) < 1e-6), projection);
+    const observations: Record<string, unknown> = { neutral, projection };
+    for (const [name, x, y] of [['left', 0, .5], ['right', 1, .5], ['up', .5, 0], ['down', .5, 1]] satisfies readonly [string, number, number][]) {
+      const pose = await move(t, x, y);
+      t.ok(`${name} reaches the authored eye envelope`, Math.abs((pose.current[0] ?? NaN) - (2 * x - 1)) < .001 && Math.abs((pose.current[1] ?? NaN) - (1 - 2 * y)) < .001, pose);
+      observations[name] = { pose, visibility: await t.page.evaluate(visible, () => window.highland?.visibility()) };
+      await t.page.screenshot(name);
+    }
+    // The occlusion assertion reads the actual ID-buffer pixels, not projected centres.
+    const occlusion = await move(t, 0, .5).then(async () => t.page.evaluate(visible, () => window.highland?.visibility()));
+    const other = await move(t, 1, .5).then(async () => t.page.evaluate(visible, () => window.highland?.visibility()));
+    const reveals = occlusion.map(a => ({ name: a.name, left: a.pixels, right: other.find(b => b.id === a.id)?.pixels ?? 0 })).filter(o => /Reveal|Beyond/i.test(o.name));
+    t.ok('an actual foreground-hidden stone appears with eye displacement', reveals.some(o => Math.min(o.left, o.right) < 10 && Math.max(o.left, o.right) > 100), reveals);
+    observations.reveals = reveals;
+    await t.page.click('#recenter');
+    t.ok('Recenter restores neutral immediately', await t.page.evaluate(z.boolean(), () => window.highland?.snapshot().current.every(v => v === 0) ?? false));
+    const spring = await t.page.evaluate(z.array(z.number()), async () => {
+      const canvas = document.querySelector('canvas'); if (!(canvas instanceof HTMLCanvasElement)) throw new Error('No canvas');
+      const r = canvas.getBoundingClientRect();
+      canvas.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', clientX: r.right, clientY: r.y + r.height / 2 }));
+      const samples: number[] = [];
+      for (let i = 0; i < 12; i++) { await new Promise<void>(resolve => requestAnimationFrame(() => resolve())); samples.push(window.highland?.snapshot().current[0] ?? NaN); }
+      return samples;
+    });
+    t.ok('movement interpolates progressively between detector samples', spring[0] !== undefined && spring[0] < .5 && new Set(spring).size > 4 && spring.some(v => v > .1 && v < .95) && spring.every((v, i) => i === 0 || v >= (spring[i - 1] ?? Infinity)), spring);
+    observations.spring = spring;
+    await t.page.click('#recenter');
+    await t.page.evaluate(z.literal(true), () => { document.querySelector('canvas')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); return true; });
+    await settle(t);
+    const keyboard = await t.page.evaluate(snapshot, () => window.highland?.snapshot());
+    t.ok('arrow keyboard control moves the viewpoint', Math.abs((keyboard.current[0] ?? NaN) - .15) < .001, keyboard);
+    await t.page.click('#auto'); await settle(t, 3000);
+    const auto = await t.page.evaluate(snapshot, () => window.highland?.snapshot());
+    t.ok('automatic preview continuously renders frames', auto.auto && auto.frames > keyboard.frames + 20, auto);
+    observations.auto = auto;
+    await t.page.click('#auto');
+    await layout(t, 1440, 1000, 'desktop');
+    await layout(t, 1180, 820, 'tablet');
+    await layout(t, 390, 844, 'mobile');
+    // Cancel a pending frame, then restore the page as bfcache does.
+    await t.page.evaluate(z.literal(true), () => {
+      document.querySelector<HTMLButtonElement>('#auto')?.click();
+      window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+      window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      return true;
+    });
+    const restored = await move(t, .75, .5);
+    t.ok('restored page schedules motion after cancelling a pending frame', Math.abs((restored.current[0] ?? NaN) - .5) < .001, restored);
+    // Exercise actual browser Back as well, recording whether Chrome chose bfcache.
+    await t.page.evaluate(z.literal(true), () => { document.body.dataset.restorationProbe = 'present'; return true; });
+    await t.page.goto('/scene/away.html');
+    await t.page.evaluate(z.literal(true), () => { history.back(); return true; });
+    await t.page.waitFor('Back restores a working meadow', z.literal(true), () => location.pathname === '/scene/index.html' && window.highland?.snapshot().ready ? true : null, { timeoutMs: 30_000 });
+    const back = await move(t, .25, .5);
+    t.ok('actual browser Back retains working motion', Math.abs((back.current[0] ?? NaN) + .5) < .001, back);
+    observations.restoration = { restored, back, usedBfcache: await t.page.evaluate(z.boolean(), () => document.body.dataset.restorationProbe === 'present') };
+    await t.file('observations.json', JSON.stringify(observations, null, 2));
+  },
+}, {
+  id: 'bld4.highland-errors', title: 'GPU failure provides a source still, reason, reload and recovery', target: 'dev', covers: [], timeoutMs: 60_000,
+  async run(t) {
+    await t.page.goto('/scene/index.html');
+    await t.page.waitFor('geometry ready', z.literal(true), () => window.highland?.snapshot().ready ? true : null, { timeoutMs: 30_000 });
+    await t.page.evaluate(z.literal(true), () => { document.querySelector('canvas')?.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext(); return true; });
+    await t.page.waitFor('actionable graphics failure', z.literal(true), () => document.querySelector('#status')?.textContent?.includes('graphics context stopped') ? true : null);
+    t.ok('failure shows the still and an enabled recovery button', await t.page.evaluate(z.boolean(), () => {
+      const poster = document.querySelector('#poster'), reload = document.querySelector('#reload');
+      return poster instanceof HTMLImageElement && !poster.hidden && poster.naturalWidth === 1920 && reload instanceof HTMLButtonElement && !reload.hidden && !reload.disabled;
+    }));
+    await t.page.screenshot('context-loss');
+    await t.page.click('#reload');
+    await t.page.waitFor('reload restores the scene', z.literal(true), () => window.highland?.snapshot().ready ? true : null, { timeoutMs: 30_000 });
+    t.equal('reload restores the approved gain', await t.page.evaluate(z.number(), () => window.highland?.snapshot().gain), 2);
+  },
+}];

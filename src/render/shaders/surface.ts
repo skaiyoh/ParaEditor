@@ -178,3 +178,16 @@ void main() {
   uvec2 encoded = uvec2(round(clamp(uv,0.,1.) * 65535.));
   mappedSource = vec4(float(encoded.x >> 8u), float(encoded.x & 255u), float(encoded.y >> 8u), float(encoded.y & 255u)) / 255.;
 }`;
+
+/** Match the existing dominant-owner refraction lookup for the opaque scene's depth. */
+export const surfaceDepth = head + surfaceFields + `
+void main() {
+  ivec2 size = textureSize(src, 0);
+  Field field;
+  if (pattern == 0) field = bars(gl_FragCoord.xy, vec2(size));
+  else if (pattern == 1) field = cracks(gl_FragCoord.xy, vec2(size));
+  else field = scales(gl_FragCoord.xy, vec2(size));
+  vec2 position = gl_FragCoord.xy + refraction * .02 * float(max(size.x,size.y)) * relief * field.gradient;
+  ivec2 nearest = ivec2(floor(clamp(position, vec2(.5), vec2(size) - .5)));
+  o = texelFetch(src, nearest, 0);
+}`;

@@ -45,10 +45,7 @@ export const scenarios: readonly Scenario[] = [{
     await page.click('[data-testid="motion-enabled"]');
     await page.screenshot('motion-node-1440');
     const base = fiveClusterDocument();
-    // The bridge accepts JSON, whose members cannot be undefined. Materialize
-    // the optional selection-size field without weakening the document's types.
-    const fixture = { ...base, objects: base.objects.map((object) => ({ ...object, produced: { ...object.produced,
-      selection: { ...object.produced.selection, size: object.produced.selection.size ?? .5 } } })) };
+    const fixture = base;
     const result = await page.evaluate(metricsSchema, async (fixture) => {
       const demo = window.__noisyTest?.demo, renderer = window.__noisyTest?.session?.renderer();
       const probe = demo?.render;
@@ -67,11 +64,17 @@ export const scenarios: readonly Scenario[] = [{
       const master = await createImageBitmap(canvas);
       const first = fixture.objects[0], second = fixture.objects[1], plateRef = fixture.analysis.plate;
       if (first === undefined || second === undefined || plateRef === null) throw new Error('Incomplete fixture.');
-      const object = { ...first, recolor: { kind: 'none' } as const, motion: { kind: 'none' } as const, symbols: 'slider' as const,
+      const placement = { translate: { x: 0, y: 0 }, pivot: { x: 305, y: 256 }, scale: 1, rotation: 0 };
+      const object = { ...first, placement, home: placement, depthAttachment: first.depthAttachment.kind === 'source'
+          ? { ...first.depthAttachment, map: { ...first.depthAttachment.map, size } } : first.depthAttachment, recolor: { kind: 'none' } as const, motion: { kind: 'none' } as const, symbols: 'slider' as const,
         produced: { ...first.produced, bounds: { x: 190, y: 64, width: 230, height: 384 }, mask: { ...first.produced.mask, size } } };
+      const removal = fixture.removals.find((entry) => entry.ownership.kind === 'legacy-layer' && entry.ownership.layer === object.id);
+      if (removal === undefined) throw new Error('No linked fixture removal.');
       const doc = { ...fixture, frame: { ...fixture.frame, master: { ...fixture.frame.master, size } },
-        analysis: { ...fixture.analysis, colors: [{ lab: { L: 0, a: 0, b: 0 }, weight: .5 }, { lab: { L: 1, a: 0, b: 0 }, weight: .5 }] as const,
-          plate: { ...plateRef, image: { ...plateRef.image, size }, forMasks: [object.produced.mask.asset] } },
+        removals: [{ ...removal, mask: { plane: object.produced.mask, provenance: object.produced.provenance } }],
+        analysis: { ...fixture.analysis, depth: fixture.analysis.depth === null ? null : { ...fixture.analysis.depth, map: { ...fixture.analysis.depth.map, size } }, colors: [{ lab: { L: 0, a: 0, b: 0 }, weight: .5 }, { lab: { L: 1, a: 0, b: 0 }, weight: .5 }] as const,
+          plate: { ...plateRef, image: { ...plateRef.image, size }, backgroundDepth: { ...plateRef.backgroundDepth, size }, key: { ...plateRef.key, size, radius: 6,
+            purpose: { kind: 'loop' as const, parallax: 1, reach: 1 } } } },
         objects: [object], surface: { ...fixture.surface, enabled: false }, symbols: { enabled: false, cellSize: 12, amount: 0 },
         motion: { enabled: true, drift: { direction: 'circle', amount: 1 } as const, parallax: 1, loopSeconds: 4, focus: 0 },
         style: { ...fixture.style, simplify: 0, grain: 0, colorNoise: 0, outline: 0, crunch: 0, clipping: 0, saturation: 0,
@@ -156,9 +159,11 @@ export const scenarios: readonly Scenario[] = [{
         const value = symbolPixels[(y * 512 + x) * 4] ?? 0;
         if (rim(x, y, 2) && value > low && value < high) symbolsSoft = true;
       }
-      const overlap = { ...object, id: second.id, subject: false, produced: { ...object.produced, mask: second.produced.mask } };
+      const overlap = { ...object, id: second.id, subject: false, produced: { ...object.produced, mask: { ...second.produced.mask, size } } };
+      const overlapRemoval = fixture.removals.find((entry) => entry.ownership.kind === 'legacy-layer' && entry.ownership.layer === overlap.id);
+      if (overlapRemoval === undefined) throw new Error('No linked overlap removal.');
       renderer.setScene({ ...scene, masks: new Map([[object.id, mask], [overlap.id, makeMask(24)]]), doc: { ...doc,
-        objects: [object, overlap], analysis: { ...doc.analysis, plate: { ...doc.analysis.plate, forMasks: [object.produced.mask.asset, overlap.produced.mask.asset].sort() } } } });
+        objects: [object, overlap], removals: [...doc.removals, { ...overlapRemoval, mask: { plane: overlap.produced.mask, provenance: overlap.produced.provenance } }], analysis: { ...doc.analysis, plate: doc.analysis.plate } } });
       const overlapPixels = await capture(true);
       const overlapSoft = measure(overlapPixels).hard === 0;
       probe.setMotionFeather(true);

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#191919">
+  <title>Noisy - Prepared 3D scenes</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets-static/scenes.css">
+  <script type="module" src="%NOISY_SCENES%"></script>
+</head>
+<body>
+  <header>
+    <h1 class="visually-hidden">Prepared 3D scenes</h1>
+    <label class="visually-hidden" for="scene-choice">Scene</label>
+    <select id="scene-choice" aria-label="Scene"><option value="highland-field">Highland Field</option><option value="lantern-court">Lantern Court</option></select>
+    <nav aria-label="Demo navigation"><button id="gallery-toggle" type="button" aria-expanded="false" aria-controls="scene-gallery">Scenes</button><a class="showcase-back" href="/">Projects</a><a href="/gallery">Gallery</a><a id="source-image" href="/assets-static/scenes/highland-field/highland-field.png" download>Source image</a></nav>
+  </header>
+  <section id="scene-gallery" aria-label="3D scene gallery" hidden>
+    <div class="gallery-heading"><h2>3D scenes</h2><button id="upload" type="button">Upload scene</button><input id="scene-file" class="visually-hidden" type="file" accept=".noisyscene" aria-label="Upload a .noisyscene package"></div>
+    <p>Upload a .noisyscene package exported from Blender. Scenes stay on this device.</p>
+    <p id="upload-status" role="status" aria-live="polite"></p>
+    <div id="scene-list" class="scene-list"></div>
+  </section>
+  <main>
+    <div id="frame" class="scene-window">
+      <img id="poster" src="/assets-static/scenes/highland-field/highland-field.png" alt="An open alpine meadow with foreground stones and enormous mountain ridges.">
+      <canvas id="stage" data-testid="showcase-stage" tabindex="0" aria-label="Interactive 3D scene. Use arrow keys or drag to look around; Home recenters."></canvas>
+      <div id="loading" role="status">Opening Highland Field.</div>
+      <button id="fullscreen-exit" type="button" hidden>Exit full screen</button>
+    </div>
+  </main>
+  <footer>
+    <p id="hint">Move your pointer to look around. Drag on touch.</p>
+    <div class="controls" aria-label="View controls">
+      <button id="recenter" type="button">Recenter</button>
+      <button id="camera" type="button" aria-pressed="false" disabled>Head tracking</button>
+      <button id="tilt" type="button" aria-pressed="false">Tilt to look</button>
+      <button id="auto" type="button" aria-pressed="false">Auto move</button>
+      <button id="fullscreen" type="button">Full screen</button>
+    </div>
+    <label class="gain" for="gain">Head gain <input id="gain" type="range" min="1" max="6" step="0.5" value="2"><output id="gain-value" for="gain">2.0×</output></label>
+    <p id="kind">Prepared 3D scenes</p>
+    <p id="status" data-testid="showcase-status" role="status" aria-live="polite">Preparing the 3D scene.</p>
+    <button id="retry" type="button" hidden>Retry scene</button>
+  </footer>
+</body>
+</html>

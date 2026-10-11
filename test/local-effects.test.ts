@@ -161,7 +161,6 @@ import { clipLightness } from './src/render/clip.ts';
 import { clipGamut } from './src/render/gamut.ts';
 import { liveCoverage } from './src/core/live-coverage.ts';
 import { createPerspectiveGeometry } from './src/core/perspective.ts';
-import { migrateV4ToV5 } from './src/core/composition.ts';
 
 export async function run() {
   const original = ${JSON.stringify(doc)}, size=original.frame.master.size, {width,height}=size, split=${split};
@@ -175,7 +174,7 @@ export async function run() {
     mask.data[p]=fg?255:0;depth.data[p]=fg?.8:.2;plate.data.set([170+tone,95+tone,30+tone],p*3);
   }
   ctx.putImageData(image,0,0);const master=await createImageBitmap(source),renderer=createRenderer(canvas);
-  const shape={...original,analysis:{...original.analysis,depth:{...${JSON.stringify(template.analysis.depth)},map:{...${JSON.stringify(template.analysis.depth?.map)},size},stats:{p10:.2,median:.5,p90:.8}},plate:{...${JSON.stringify(template.analysis.plate)},image:{...${JSON.stringify(template.analysis.plate?.image)},size},forMasks:[original.objects[0].produced.mask.asset]}},motion:{...original.motion,enabled:true,focus:.5,drift:{direction:'circle',amount:.4}},style:{...original.style,grain:.12,colorNoise:.08}};
+  const shape={...original,analysis:{...original.analysis,depth:{...${JSON.stringify(template.analysis.depth)},map:{...${JSON.stringify(template.analysis.depth?.map)},size},stats:{p10:.2,median:.5,p90:.8}},plate:{...${JSON.stringify(template.analysis.plate)},image:{...${JSON.stringify(template.analysis.plate?.image)},size},key:{...${JSON.stringify(template.analysis.plate?.key)},size,radius:Math.ceil(Math.ceil(Math.max(width,height)/100)*original.motion.parallax),purpose:{kind:'loop',parallax:original.motion.parallax,reach:.4}}}},motion:{...original.motion,enabled:true,focus:.5,drift:{direction:'circle',amount:.4}},style:{...original.style,grain:.12,colorNoise:.08}};
   const geometry=createPerspectiveGeometry({aperture:{center:{x:.12,y:-.06},width:.8,height:.6},crop:.04,neutralDistance:1,nearFactor:1.1,farFactor:2});
   const coverage=liveCoverage(shape,geometry);
   if(coverage===null)throw new Error('No fixture perspective coverage.');
@@ -304,8 +303,7 @@ export async function run() {
     renderer.setScene(sceneFor('still'));renderer.renderStill();if(renderer.debug.localResources().textures!==0)throw new Error('Removed local masks retained GPU textures');
     const old=patch().after;let status='';try{renderer.setScene({...sceneFor('still'),compositing:'scene-depth'});}catch(error){status=error.message;}
     if(!status.includes('physical layer depth requires C3')||compare(patch().after,old)!==0)throw new Error('scene-depth did not refuse before mutation');
-    const migrated=migrateV4ToV5(shape);if(!migrated.ok)throw new Error('V5 refusal fixture migration failed '+JSON.stringify(migrated));
-    let docStatus='';try{renderer.setScene({...base,doc:{...migrated.value,compositing:'scene-depth'}});}catch(error){docStatus=error.message;}
+    let docStatus='';try{renderer.setScene({...base,doc:{...shape,compositing:'scene-depth'}});}catch(error){docStatus=error.message;}
     if(docStatus!==status)throw new Error('scene-depth document was not refused');
     // Invalid GPU-sized selections must refuse without invalidating the current draw.
     const gl=canvas.getContext('webgl2'),oversize=gl.getParameter(gl.MAX_TEXTURE_SIZE)+1;

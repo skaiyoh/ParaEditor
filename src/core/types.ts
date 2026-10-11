@@ -1,15 +1,12 @@
-// The scene document's types, every one inferred from core/schema.ts, which
-// owns the shape; nothing here is written by hand. The primitives the document
+// Scene types inferred from the active composition schema and the frozen
+// legacy schema; no document shape is written by hand. The primitives the document
 // is built from (Size, Rect, ImagePoint, Oklab, Oklch, PlaneRef, ImageRef) are
 // core/raster.ts's, and test/schema.test.ts checks that the document's fields
 // of those types equal them.
 // Pure: no browser global, no Node API, no I/O.
 
 import type {
-  analysisSchema,
   colorClusterSchema,
-  currentDocumentSchema,
-  depthProductSchema,
   depthStatsSchema,
   frameSchema,
   harmonySchema,
@@ -19,12 +16,9 @@ import type {
   motionSchema,
   objectColorSchema,
   objectMotionSchema,
-  objectProducedSchema,
   paletteTargetSchema,
-  plateProductSchema,
   recolorSchema,
   sceneDocumentSchema,
-  sceneObjectSchema,
   selectionSchema,
   sourceRefSchema,
   styleSchema,
@@ -35,19 +29,19 @@ import type {
 } from './schema.ts';
 import type { z } from './zod.ts';
 
-/** The document at the current version, SCENE_VERSION. */
-export type SceneDocument = z.infer<typeof currentDocumentSchema>;
+/** Version-preserving read documents expose the legacy Grain control values. */
+export type SceneDocument = FrozenCompositionDocument | import('./remix-schema.ts').RemixReadDocument;
 /** The document at version `V`, which a parse chain of `V` migrations yields. */
 export type SceneDocumentAt<V extends number> = z.infer<ReturnType<typeof sceneDocumentSchema<V>>>;
 
 export type Frame = z.infer<typeof frameSchema>;
 export type SourceRef = z.infer<typeof sourceRefSchema>;
-export type Analysis = z.infer<typeof analysisSchema>;
+export type Analysis = CompositionAnalysis;
 export type ColorCluster = z.infer<typeof colorClusterSchema>;
 export type ToneStats = z.infer<typeof toneStatsSchema>;
-export type DepthProduct = z.infer<typeof depthProductSchema>;
+export type DepthProduct = NonNullable<CompositionAnalysis['depth']>;
 export type DepthStats = z.infer<typeof depthStatsSchema>;
-export type PlateProduct = z.infer<typeof plateProductSchema>;
+export type PlateProduct = RepairProduct;
 export type Style = z.infer<typeof styleSchema>;
 export type HarmonyTemplate = z.infer<typeof harmonyTemplateSchema>;
 export type Harmony = z.infer<typeof harmonySchema>;
@@ -56,8 +50,8 @@ export type Symbols = z.infer<typeof symbolsSchema>;
 export type Surface = z.infer<typeof surfaceSchema>;
 export type Motion = z.infer<typeof motionSchema>;
 export type Lighting = z.infer<typeof lightingSchema>;
-export type SceneObject = z.infer<typeof sceneObjectSchema>;
-export type ObjectProduced = z.infer<typeof objectProducedSchema>;
+export type SceneObject = SceneLayer;
+export type ObjectProduced = LayerCoverage;
 /** Legacy producers may omit size; the versioned document parser supplies .5. */
 export type Selection = z.infer<typeof selectionSchema>;
 export type TapPoint = z.infer<typeof tapPointSchema>;
@@ -66,8 +60,17 @@ export type Recolor = z.infer<typeof recolorSchema>;
 export type ObjectMotion = z.infer<typeof objectMotionSchema>;
 export type Light = z.infer<typeof lightSchema>;
 
-// Staged v5 contracts. SceneDocument/SceneObject/SourceRef above remain v4.
-export type CompositionDocument = z.infer<typeof import('./composition-schema.ts').compositionDocumentShapeSchema>;
+/** Frozen v4 types used only by old envelopes and gallery manifest version 1. */
+export type LegacySceneDocument = z.infer<typeof import('./legacy-schema.ts').legacyV4DocumentSchema>;
+export type LegacySceneObject = LegacySceneDocument['objects'][number];
+export type LegacyObjectProduced = LegacySceneObject['produced'];
+export type LegacyAnalysis = LegacySceneDocument['analysis'];
+export type LegacyPlateProduct = NonNullable<LegacyAnalysis['plate']>;
+
+// Frozen v5 contracts, retained unchanged by the version-preserving reader.
+export type FrozenCompositionDocument = z.infer<typeof import('./composition-schema.ts').compositionDocumentShapeSchema>;
+/** Composition queries read the shared photo fields of either supported document. */
+export type CompositionDocument = SceneDocument;
 export type CompositionSourceRef = z.infer<typeof import('./composition-schema.ts').compositionSourceRefSchema>;
 export type RgbaRef = z.infer<typeof import('./composition-schema.ts').rgbaRefSchema>;
 export type RasterSource = z.infer<typeof import('./composition-schema.ts').rasterSourceSchema>;

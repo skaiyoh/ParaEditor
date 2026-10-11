@@ -5,7 +5,8 @@ import { sameValue } from './equal.ts';
 import type { AssetId, SourceId } from './ids.ts';
 import type { Size } from './raster.ts';
 import { err, ok, type Result } from './result.ts';
-import type { ActiveSelection, CompositionDocument, CompositionEdit, DepthAttachment, LocalEffect, RasterSource, RepairProduct, SceneLayer } from './types.ts';
+import type { ActiveSelection, CompositionEdit, DepthAttachment, LocalEffect, RasterSource, RepairProduct, SceneDocument, SceneLayer } from './types.ts';
+import type { RemixDocument } from './remix-schema.ts';
 
 export type CompositionAssetRef =
   | { readonly asset: AssetId; readonly kind: 'raster'; readonly format: 'u8' | 'f32' | 'rgba8-srgb-straight'; readonly size: Size; readonly byteLength: number }
@@ -14,7 +15,7 @@ export type CompositionAssetRef =
   | { readonly asset: AssetId; readonly kind: 'png'; readonly size: Size; readonly byteLength: null }
   | { readonly asset: AssetId; readonly kind: 'original'; readonly mediaType: string; readonly byteLength: number };
 export type CompositionAssetRoot =
-  | { readonly kind: 'document'; readonly document: CompositionDocument }
+  | { readonly kind: 'document'; readonly document: SceneDocument | RemixDocument }
   | { readonly kind: 'edits'; readonly edits: readonly CompositionEdit[] }
   | { readonly kind: 'selection'; readonly selection: ActiveSelection }
   | { readonly kind: 'repair'; readonly repair: RepairProduct }
@@ -99,6 +100,10 @@ export function collectCompositionAssets(roots: readonly CompositionAssetRoot[])
         doc.objects.forEach((value, i) => layer(value, ['objects', i]));
         doc.localEffects.forEach((value, i) => effect(value, ['localEffects', i]));
         doc.removals.forEach((value, i) => plane(value.mask.plane, ['removals', i, 'mask', 'plane']));
+        if (doc.version === 6) doc.paint.layers.forEach((layer, layerIndex) => layer.patches.forEach((patch, patchIndex) =>
+          patch.tiles.forEach((tile, tileIndex) => add({ asset: tile.rgba.asset, kind: 'raster', format: tile.rgba.encoding,
+            size: tile.rgba.size, byteLength: 16 + tile.rgba.size.width * tile.rgba.size.height * 4 },
+          ['paint', 'layers', layerIndex, 'patches', patchIndex, 'tiles', tileIndex, 'rgba']))));
         break;
       }
       case 'edits': root.edits.forEach((value, i) => edit(value, ['edits', i])); break;

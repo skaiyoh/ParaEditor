@@ -15,13 +15,20 @@ import '../src/core/legacy-schema.ts';
 import '../src/core/selection.ts';
 import '../src/core/authoring-view.ts';
 import '../src/core/mask-edit.ts';
+import '../src/core/math-definition.ts';
+import '../src/core/math-expression.ts';
+import '../src/core/math-graph.ts';
 import '../src/core/asset-codec.ts';
 import '../src/core/gallery.ts';
 import '../src/core/face-view.ts';
 import '../src/core/live-coverage.ts';
 import '../src/core/orientation.ts';
+import '../src/core/paint.ts';
 import '../src/core/perspective.ts';
 import '../src/core/placement.ts';
+import '../src/core/remix-schema.ts';
+import '../src/core/remix.ts';
+import '../src/core/remix-view.ts';
 import { srgbToOklab } from '../src/core/color.ts';
 import { defaultStyle } from '../src/core/defaults.ts';
 import { layers, NEED_OPS } from '../src/core/derive.ts';
@@ -69,9 +76,13 @@ const CORE_MODULES = [
   'legacy-schema.ts',
   'live-coverage.ts',
   'mask-edit.ts',
+  'math-definition.ts',
+  'math-expression.ts',
+  'math-graph.ts',
   'migrate.ts',
   'motion.ts',
   'orientation.ts',
+  'paint.ts',
   'percentile.ts',
   'perspective.ts',
   'placement.ts',
@@ -79,6 +90,9 @@ const CORE_MODULES = [
   'ranges.ts',
   'raster.ts',
   'reduce.ts',
+  'remix-schema.ts',
+  'remix-view.ts',
+  'remix.ts',
   'result.ts',
   'schema.ts',
   'selection.ts',

@@ -3,9 +3,12 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { createHandler } from '../tools/cloudflare/worker.ts';
 import type { GalleryEnv } from '../tools/cloudflare/gallery.ts';
-import { GALLERY_LIMITS, galleryCreatedSchema, galleryDraftSchema, galleryListSchema, galleryManifestSchema } from '../src/core/gallery.ts';
+import { GALLERY_LIMITS, galleryCreatedSchema, galleryDraftSchema, galleryCompositionDraftSchema, galleryListSchema, galleryManifestSchema } from '../src/core/gallery.ts';
+import { encodeRaster } from '../src/core/asset-codec.ts';
+import { compositionDocumentSchema } from '../src/core/composition-schema.ts';
 import { z } from '../src/core/zod.ts';
-import { fiveClusterDocument, minimalDocument, setAt, uuid } from './fixtures/documents.ts';
+import { DEPTH_MODEL, legacyFiveClusterDocument as fiveClusterDocument, legacyMinimalDocument as minimalDocument, setAt, uuid } from './fixtures/documents.ts';
+import { artworkLayer, localEffect, newComposition, rasterSource, repairProduct } from './fixtures/composition.ts';
 
 // Complete baseline JPEG: a single gray pixel, one quantizer and two Huffman tables.
 const jpeg = new Uint8Array([255,216,255,219,0,67,0,...Array<number>(64).fill(1),255,192,0,11,8,0,1,0,1,1,1,17,0,
@@ -257,4 +260,91 @@ test('concurrent publish writes preserve the first manifest and publication time
   const second = await h.publish(id, token); assert.equal(second.status, 200); const manifest = await second.json();
   release(); assert.deepEqual(await (await first).json(), manifest); assert.deepEqual(await (await h.request(`/api/gallery/${id}`)).json(), manifest);
   assert.equal([...h.objects.keys()].filter((key) => key.startsWith('gallery/index/')).length, 1);
+});
+
+function compositionFixture(invalid: 'png' | 'raster' | null = null) {
+  const original = newComposition(), size = { width: 2, height: 2 };
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR4nGP4zwAE/xnqQeR/bh7e/wAuSQWfwB0i9wAAAABJRU5ErkJggg==', 'base64'));
+  const rgba = encodeRaster({ format: 'rgba8-srgb-straight', size: { width: 13, height: 7 }, data: Uint8Array.from({ length: 364 }, (_, i) => i % 256) });
+  const coverage = encodeRaster({ format: 'u8', size: { width: 1, height: 1 }, data: new Uint8Array([127]) });
+  const depth = encodeRaster({ format: 'f32', size: { width: 1, height: 1 }, data: new Float32Array([.25]) });
+  const union = encodeRaster({ format: 'u8', size, data: new Uint8Array([0, 127, 128, 255]) });
+  const hole = encodeRaster({ format: 'u8', size, data: new Uint8Array([0, 255, 255, 255]) });
+  if (invalid === 'png') png[30] = (png[30] ?? 0) ^ 1;
+  if (invalid === 'raster') coverage[6] = 1;
+  const masterId = hash(png), rgbaId = hash(rgba), maskId = hash(coverage), depthId = hash(depth), unionId = hash(union), holeId = hash(hole);
+  const layer = artworkLayer(), raster = rasterSource(), effect = localEffect();
+  const partial = compositionDocumentSchema.parse({ ...original, compositing: 'legacy-order', frame: { ...original.frame,
+    master: { asset: masterId, size }, source: { asset: source.id, mediaType: 'image/jpeg', byteLength: jpeg.length },
+    original: { name: 'gray.jpg', mediaType: 'image/jpeg', size: source.size } },
+    sources: [{ ...raster, image: { ...raster.image, asset: rgbaId } }],
+    objects: [{ ...layer, produced: { ...layer.produced, mask: { ...layer.produced.mask, asset: maskId } },
+      depthAttachment: { kind: 'source', model: DEPTH_MODEL, offset: .1, map: { asset: depthId, format: 'f32', size: { width: 1, height: 1 } } } }],
+    localEffects: [{ ...effect, scope: { kind: 'mask', mask: { plane: { asset: maskId, format: 'u8', size: { width: 1, height: 1 } }, provenance: { kind: 'manual', operation: 'rectangle' } } },
+      operation: { kind: 'recolor', color: { l: .63, c: .18, h: 241 } } }] });
+  const template = repairProduct(partial);
+  const document = compositionDocumentSchema.parse({ ...partial, analysis: { ...partial.analysis, plate: { ...template,
+    key: { ...template.key, removalUnion: unionId, hole: holeId, depth: depthId }, image: partial.frame.master,
+    backgroundDepth: { asset: depthId, format: 'f32', size: { width: 1, height: 1 } } } } });
+  const draft = galleryCompositionDraftSchema.parse({ version: 2, document, assets: [source,
+    { kind: 'png', id: masterId, mediaType: 'image/png', size, byteLength: png.length },
+    { kind: 'raster', id: rgbaId, format: 'rgba8-srgb-straight', size: raster.image.size, byteLength: rgba.length },
+    { kind: 'raster', id: maskId, format: 'u8', size: { width: 1, height: 1 }, byteLength: coverage.length },
+    { kind: 'raster', id: depthId, format: 'f32', size: { width: 1, height: 1 }, byteLength: depth.length },
+    { kind: 'raster', id: unionId, format: 'u8', size, byteLength: union.length },
+    { kind: 'raster', id: holeId, format: 'u8', size, byteLength: hole.length },
+  ], poster: { ...source, kind: 'poster' } });
+  return { draft, bytes: new Map([[source.id, jpeg], [masterId, png], [rgbaId, rgba], [maskId, coverage], [depthId, depth], [unionId, union], [holeId, hole]]), invalidId: invalid === 'png' ? masterId : maskId };
+}
+
+test('v2 Worker publishes the full encoded composition closure and local Recolor while v1 remains raw', async () => {
+  const h = harness(), fixture = compositionFixture(), { id, token } = await h.create(fixture.draft), base = `/api/gallery/${id}`;
+  try {
+    await failure(await h.publish(id, token), 409, 'The gallery assets are missing or incomplete.');
+    for (const asset of fixture.draft.assets) {
+      const bytes = fixture.bytes.get(asset.id); assert.ok(bytes);
+      await ack(await h.request(`${base}/assets/${asset.id}`, { method: 'PUT', headers: { ...h.auth(token),
+        'Content-Type': 'mediaType' in asset ? asset.mediaType : 'application/octet-stream' }, body: bytes }));
+      await failure(await h.request(`${base}/assets/${asset.id}`), 404);
+    }
+    await ack(await h.upload(id, token, 'poster'));
+    const response = await h.publish(id, token); assert.equal(response.status, 200, await response.clone().text());
+    const manifest = galleryManifestSchema.parse(await response.json());
+    assert.equal(manifest.version, 2);
+    assert.ok(manifest.version === 2);
+    assert.deepEqual(manifest.document, fixture.draft.document);
+    assert.deepEqual(manifest.assets, fixture.draft.assets);
+    assert.equal(manifest.document.localEffects[0]?.operation.kind, 'recolor');
+    assert.deepEqual(await (await h.request(base)).json(), manifest);
+    for (const asset of fixture.draft.assets) {
+      const response = await h.request(`${base}/assets/${asset.id}`);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('Content-Type'), 'mediaType' in asset ? asset.mediaType : 'application/octet-stream');
+      assert.equal(response.headers.get('ETag'), `"${asset.id}"`);
+      assert.deepEqual(new Uint8Array(await response.arrayBuffer()), fixture.bytes.get(asset.id));
+    }
+  } finally { await ack(await h.remove(id, token)); }
+});
+
+test('v2 Worker checks PNG CRC and NSRA headers even when the descriptor, byte length and hash agree', async () => {
+  for (const invalid of ['png', 'raster'] satisfies ('png' | 'raster')[]) {
+    const h = harness(), fixture = compositionFixture(invalid), { id, token } = await h.create(fixture.draft), base = `/api/gallery/${id}`;
+    try {
+      for (const asset of fixture.draft.assets) {
+        const bytes = fixture.bytes.get(asset.id); assert.ok(bytes);
+        const type = 'mediaType' in asset ? asset.mediaType : 'application/octet-stream';
+        const response = await h.request(`${base}/assets/${asset.id}`, { method: 'PUT', headers: { ...h.auth(token), 'Content-Type': type }, body: bytes });
+        if (asset.id === fixture.invalidId) {
+          await failure(response, 400, 'The gallery composition asset is invalid.');
+          assert.ok(!h.objects.has(`gallery/pieces/${id}/assets/${asset.id}`));
+          // A corrupted store still cannot make a malformed encoded asset public.
+          h.objects.set(`gallery/pieces/${id}/assets/${asset.id}`, { bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), contentType: type });
+        } else await ack(response);
+      }
+      await ack(await h.upload(id, token, 'poster'));
+      await failure(await h.publish(id, token), 409, 'The gallery composition asset is invalid.');
+      assert.ok(!h.objects.has(`gallery/pieces/${id}/manifest`));
+      assert.ok(!galleryListSchema.parse(await (await h.request('/api/gallery')).json()).pieces.some((piece) => piece.id === id));
+    } finally { await ack(await h.remove(id, token)); }
+  }
 });

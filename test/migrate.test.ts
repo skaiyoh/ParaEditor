@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseDocument } from '../src/core/schema.ts';
 import { applyEdit, applyEdits } from '../src/core/reduce.ts';
-import { minimalDocument } from './fixtures/documents.ts';
+import { legacyMinimalDocument, minimalDocument } from './fixtures/documents.ts';
 
 test('legacy orbit migrates to Circle at its exact amount through every old version', () => {
-  const current = minimalDocument();
+  const current = legacyMinimalDocument();
   for (const version of [0, 1, 2, 3]) for (const amount of [0, .17, .6, 1]) {
     const { drift: _drift, parallax, ...motion } = current.motion;
     const { surface, ...rest } = current;
@@ -22,7 +22,7 @@ test('legacy orbit migrates to Circle at its exact amount through every old vers
 });
 
 test('malformed legacy or current drift is refused, never silently defaulted', () => {
-  const current = minimalDocument();
+  const current = legacyMinimalDocument();
   const { drift: _drift, ...motion } = current.motion;
   for (const orbit of [-.01, 1.01, NaN, Infinity, '0.6', null, undefined]) {
     const parsed = parseDocument({ ...current, version: 3, motion: { ...motion, orbit } });

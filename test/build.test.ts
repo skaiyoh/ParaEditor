@@ -6,18 +6,20 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { readFile, rm, stat, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { after, before, test } from 'node:test';
 import { parseLock } from '../src/analysis/lock.ts';
 import { z } from 'zod';
+import { landscapeSchema, parseLandscapeMesh } from '../src/app/showcase/landscape.ts';
 import { REPO, runTool, tempDir, writeTree } from './support/cli.ts';
 
 const BuildMeta = z.object({
   mode: z.enum(['dev', 'production']),
   buildId: z.string(),
   app: z.string(),
+  scenes: z.string().optional(),
   workers: z.object({ sequence: z.string(), decode: z.string(), gif: z.string(), face: z.string() }),
   devPages: z.record(z.string(), z.string()),
   devWorkers: z.record(z.string(), z.string()),
@@ -207,6 +209,18 @@ test('the build refuses to replace a directory that is not a build output, or a 
 
 const sha256 = async (file: string): Promise<string> => createHash('sha256').update(await readFile(file)).digest('hex');
 
+test('an oversized shipped file fails before replacing an existing build', async () => {
+  const src = await probeTree('oversized-asset', 'export {};\n', { 'assets/oversized.bin': '' });
+  const outdir = path.join(scratch, 'oversized-output');
+  await build(['--mode', 'production', '--src', src], outdir);
+  const previous = await readFile(path.join(outdir, 'build.json'), 'utf8');
+  await truncate(path.join(src, 'assets/oversized.bin'), 25 * 1024 * 1024 + 1);
+  const run = await runTool('tools/build.mjs', ['--mode', 'production', '--src', src, '--outdir', outdir]);
+  assert.equal(run.code, 1);
+  assert.match(run.stderr, /assets-static\/oversized\.bin exceeds the 25 MiB hosted file limit/);
+  assert.equal(await readFile(path.join(outdir, 'build.json'), 'utf8'), previous);
+});
+
 test('both builds copy exactly the plain wasm runtime files, byte for byte, and only a dev build writes /dev/ pages', async () => {
   const { version } = z.object({ version: z.string() }).parse(JSON.parse(await readFile(path.join(REPO, 'node_modules/onnxruntime-web/package.json'), 'utf8')));
   for (const mode of ['dev', 'production'] as const) {
@@ -219,15 +233,42 @@ test('both builds copy exactly the plain wasm runtime files, byte for byte, and 
       const pinned = await sha256(path.join(REPO, 'node_modules/onnxruntime-web/dist', file));
       assert.equal(await sha256(path.join(outdir, 'vendor/ort', version, file)), pinned, `${mode} ${file}`);
     }
+    assert.ok(meta.scenes !== undefined && meta.files.includes(meta.scenes.slice(1)), 'both builds include the canonical viewer');
+    assert.match(await readFile(path.join(outdir, 'scenes.html'), 'utf8'), /Scene.*|scene-choice/);
+    const sceneDir = path.join(outdir, 'assets-static/scenes/highland-field');
+    assert.equal(existsSync(path.join(sceneDir, 'field.mesh')), false, 'the oversized source mesh does not ship');
+    const chunks = z.object({ version: z.literal(1), bytes: z.number().int().positive(), sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      parts: z.array(z.string().regex(/^field\.mesh\.\d+$/)).min(1),
+    }).strict().parse(JSON.parse(await readFile(path.join(sceneDir, 'field.chunks.json'), 'utf8')));
+    const parts = await Promise.all(chunks.parts.map(name => readFile(path.join(sceneDir, name))));
+    assert.deepEqual(chunks.parts, parts.map((_, i) => `field.mesh.${i}`));
+    for (const [i, part] of parts.entries()) {
+      assert.equal(part.byteLength, Math.min(16 * 1024 * 1024, chunks.bytes - i * 16 * 1024 * 1024));
+    }
+    const joined = Buffer.concat(parts);
+    const hash = createHash('sha256').update(joined).digest('hex');
+    assert.equal(joined.byteLength, chunks.bytes);
+    assert.equal(hash, chunks.sha256);
+    assert.equal(hash, await sha256(path.join(REPO, 'assets/scenes/highland-field/field.mesh')), 'reassembled approved landscape bytes are unchanged');
+    assert.equal(await sha256(path.join(sceneDir, 'field.json')), await sha256(path.join(REPO, 'assets/scenes/highland-field/field.json')), 'current metadata ships unchanged');
+    const field = landscapeSchema.parse(JSON.parse(await readFile(path.join(sceneDir, 'field.json'), 'utf8')));
+    const geometry = parseLandscapeMesh(field, new Uint8Array(joined).buffer);
+    assert.equal(joined.byteLength, field.meshBytes);
+    assert.equal(geometry.vertices.length, field.vertexCount * field.strideBytes / 4);
+    assert.equal(geometry.indices.length, field.triangleCount * 3);
+    assert.equal(await sha256(path.join(outdir, 'assets-static/scenes/lantern-court/geometry.bin')),
+      await sha256(path.join(REPO, 'src/dev/assets/lantern-court/geometry.bin')), 'courtyard bytes are unchanged');
+    assert.equal(meta.files.some(file => /\.blend(?:\d+)?$|\.py$|(?:tracking(?:\.entry)?|viewer)\.js$|(?:serve|build_tracking)\.mjs$/.test(file)), false, 'authoring and standalone runtime do not ship');
+    for (const file of meta.files) assert.ok((await stat(path.join(outdir, file))).size <= 25 * 1024 * 1024, file);
     const devFiles = meta.files.filter((f) => f.startsWith('dev/'));
     if (mode === 'production') {
       assert.deepEqual(devFiles, [], 'a production build writes no dev page');
       assert.deepEqual([meta.devPages, meta.devWorkers], [{}, {}]);
       continue;
     }
-    assert.deepEqual(devFiles, ['dev/checklist.html', 'dev/decoder.html', 'dev/harness/memory.html', 'dev/models.html', 'dev/sequence.html', 'dev/service.html', 'dev/store.html', 'dev/threads.html']);
+    assert.deepEqual(devFiles, ['dev/checklist.html', 'dev/decoder.html', 'dev/harness/memory.html', 'dev/models.html', 'dev/sequence.html', 'dev/service.html', 'dev/showcase.html', 'dev/store.html', 'dev/threads.html'].sort());
     const scripts: Record<string, string> = {};
-    for (const name of ['checklist', 'decoder', 'harness/memory', 'models', 'sequence', 'service', 'store', 'threads']) {
+    for (const name of ['checklist', 'decoder', 'harness/memory', 'models', 'sequence', 'service', 'showcase', 'store', 'threads']) {
       assert.equal(meta.devPages[name], `/dev/${name}.html`);
       const html = await readFile(path.join(outdir, `dev/${name}.html`), 'utf8');
       const bundle = path.basename(name);

@@ -16,7 +16,13 @@ function Thumbnail({ scene, bounds }: {
     const side = Math.max(bounds.width, bounds.height);
     const x = bounds.x + (bounds.width - side) / 2, y = bounds.y + (bounds.height - side) / 2;
     context.clearRect(0, 0, 48, 48);
-    context.drawImage(scene.master, x, y, side, side, 0, 0, 48, 48);
+    // WebKit draws nothing for a source rect that runs past the image (F17), so crop to the photo and place that part.
+    const left = Math.max(0, x), top = Math.max(0, y);
+    const width = Math.min(scene.master.width, x + side) - left, height = Math.min(scene.master.height, y + side) - top;
+    if (side <= 0 || width <= 0 || height <= 0) return;
+    const scale = 48 / side;
+    try { context.drawImage(scene.master, left, top, width, height, (left - x) * scale, (top - y) * scale, width * scale, height * scale); }
+    catch { /* A master closed by a project switch leaves the well empty until the next scene renders. */ }
   }, [scene.master, bounds.x, bounds.y, bounds.width, bounds.height]);
   return <canvas ref={canvas} class="layer-thumbnail" width="48" height="48" aria-hidden="true" />;
 }
@@ -137,6 +143,7 @@ export function Layers({ scene, session, full = false }: { readonly scene: DemoS
       </button>
       {scene.doc.objects.map((object) => <ObjectRow key={object.id} object={object} scene={scene} session={session} full={full} />)}
     </div>}
+    {scene !== null && <p class="layer-overlap" data-testid="layers-overlap">{session.overlapPolicy() === 'legacy-order' ? 'Layers overlap in saved order' : session.overlapPolicy() === 'scene-depth' ? 'Layers overlap by scene depth' : ''}</p>}
     {scene !== null && scene.doc.objects.length === 0 && <p class="layer-hint">Tap the picture to add a layer</p>}
   </section>;
 }

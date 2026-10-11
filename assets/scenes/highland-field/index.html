@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#191919">
+  <title>Highland field - perspective window</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="viewer.css">
+  <script type="module" src="viewer.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Highland field</h1>
+    <nav aria-label="Scene files">
+      <a href="highland-field.png" download>Source image</a>
+      <a href="highland-field.blend" download>Blender file</a>
+    </nav>
+  </header>
+  <main>
+    <div id="window" class="scene-window">
+      <img id="poster" src="highland-field.png" alt="An open alpine meadow, close weathered stones, and enormous mountain ridges.">
+      <canvas id="scene" tabindex="0" aria-label="Interactive mountain meadow. Use arrow keys to move your viewpoint; press Home to recenter."></canvas>
+      <div id="loading" role="status">Opening the meadow.</div>
+    </div>
+  </main>
+  <footer>
+    <p id="hint">Move your pointer to look around. Drag on touch.</p>
+    <div class="controls" aria-label="View controls">
+      <button id="recenter" type="button">Recenter</button>
+      <button id="head" type="button" aria-pressed="false">Head tracking</button>
+      <button id="tilt" type="button" aria-pressed="false">Tilt to look</button>
+      <button id="auto" type="button" aria-pressed="false">Auto move</button>
+      <button id="fullscreen" type="button">Full screen</button>
+    </div>
+    <label class="gain" for="gain">Head gain <input id="gain" type="range" min="1" max="6" step="0.5" value="2"><output id="gain-value" for="gain">2.0×</output></label>
+    <p id="status" role="status" aria-live="polite">Original 3D scene. The source image can be opened in Noisy.</p>
+    <button id="reload" type="button" hidden>Reload scene</button>
+  </footer>
+</body>
+</html>

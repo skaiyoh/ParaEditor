@@ -1,0 +1,53 @@
+{
+  "blender": "5.2.2 LTS",
+  "objects": 99,
+  "externalImages": [],
+  "hiddenReferenceWalls": [
+    "Near wall / left deep reveal",
+    "Near wall / right deep reveal",
+    "Near wall / lower sill",
+    "Near wall / upper reveal"
+  ],
+  "cameraRotationFixed": [
+    [
+      1.5707963705062866,
+      0.0,
+      0.0
+    ],
+    [
+      1.5707963705062866,
+      0.0,
+      0.0
+    ],
+    [
+      1.5707963705062866,
+      0.0,
+      0.0
+    ]
+  ],
+  "screenPlaneProjection": [
+    [
+      0.7307692170143127,
+      0.6846153140068054
+    ],
+    [
+      0.730769157409668,
+      0.6846153140068054
+    ],
+    [
+      0.7307692766189575,
+      0.6846153140068054
+    ]
+  ],
+  "screenPlaneMaximumError": 5.960464477539063e-08,
+  "vertices": 516944,
+  "triangles": 599567,
+  "meshBytes": 29940356,
+  "sourcePNG": {
+    "width": 1920,
+    "height": 1440,
+    "bitDepth": 8,
+    "colorType": 2,
+    "opaque": true
+  }
+}

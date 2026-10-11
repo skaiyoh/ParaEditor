@@ -6,7 +6,8 @@ import path from 'node:path';
 import { DOMAIN, ROOT, STATE, prepare } from './prepare.mjs';
 
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'This entry point requires GitHub Actions.');
-assert.equal(process.env.GITHUB_REPOSITORY, 'skaiyoh/noisy-demo');
+// The repository is being renamed to ParaEditor; either name may deploy until the rename settles.
+assert.ok(['skaiyoh/noisy-demo', 'skaiyoh/ParaEditor'].includes(process.env.GITHUB_REPOSITORY ?? ''), 'This repository cannot deploy.');
 assert.equal(process.env.GITHUB_REF, 'refs/heads/main', 'Only main can deploy.');
 assert.ok(['push', 'workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME), 'This event cannot deploy.');
 assert.match(process.env.GITHUB_SHA ?? '', /^[a-f0-9]{40}$/);

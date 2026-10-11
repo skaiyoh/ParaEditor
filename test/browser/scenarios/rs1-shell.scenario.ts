@@ -305,9 +305,11 @@ async function runShell(t: ScenarioContext): Promise<void> {
   if (await page.evaluate(z.boolean(), () => document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') !== 'true')) await touch(t, '.sheet-handle');
   await expand(t, 'Motion');
   await capture(t, 'phone-selected-adjustments');
+  await touch(t, '[data-testid="tool-actions"]');
   await touch(t, '[data-testid="projects-toggle"]');
   await capture(t, 'phone-projects');
   await touch(t, '[data-testid="projects-return"]');
+  await touch(t, '[data-testid="tool-adjust"]');
   await touch(t, '[data-testid="export-gif"]');
   await page.waitFor('compact GIF export notice', z.literal(true), () => document.querySelector('[data-testid="preparing"]')?.textContent?.startsWith('Exporting:') ? true : null, { timeoutMs: 30_000 });
   await capture(t, 'phone-export-adjustments');

@@ -1,5 +1,5 @@
 import { z } from '../../src/core/zod.ts';
-import { deserializeProjectEnvelope } from '../../src/projects/serialize.ts';
+import { deserializeProjectEnvelope, serializeDocument, PROJECTS_TRANSPORT_VERSION } from '../../src/projects/serialize.ts';
 
 import { compositionAssetLimit, compositionAssetPath, readAssetBody, validateCompositionAssets, validateGenericAsset, MAX_ASSET_BYTES } from '../../src/projects/assets.ts';
 import { isAssetId } from '../../src/core/ids.ts';
@@ -139,8 +139,8 @@ export async function handleProjects(request: Request, pathname: string, env: Pr
         const rows = await neonSql(env.NEON_DATABASE_URL, { query: 'SELECT scene, masks, revision::text FROM projects WHERE id = $1', params: [id] });
         if (rows.length === 0) return missing();
         const row = rowSchema.parse(rows[0]);
-        const v5 = typeof row.scene === 'object' && row.scene !== null && 'version' in row.scene && row.scene.version === 5;
-        return reply(v5 ? { transportVersion: 2, document: row.scene, revision: row.revision } : { document: row.scene, masks: row.masks, revision: row.revision });
+        const composition = typeof row.scene === 'object' && row.scene !== null && 'version' in row.scene && (row.scene.version === 5 || row.scene.version === 6);
+        return reply(composition ? { transportVersion: PROJECTS_TRANSPORT_VERSION, document: row.scene, revision: row.revision } : { document: row.scene, masks: row.masks, revision: row.revision });
       }
       const object = await env.PROJECTS.get(key);
       if (object === null) return missing();
@@ -177,7 +177,7 @@ export async function handleProjects(request: Request, pathname: string, env: Pr
         if (info !== null && info.size !== size.width * size.height) return bad('The project mask size does not match its bytes.');
       }
       const result = statusSchema.parse((await neonSql(env.NEON_DATABASE_URL, [lock(id),
-        upsert(id, scene.document.title, JSON.stringify(scene.document), JSON.stringify(masks), scene.revision)]))[0]);
+        upsert(id, scene.document.title, JSON.stringify(envelope.kind === 'composition' ? serializeDocument(envelope.scene.document) : scene.document), JSON.stringify(masks), scene.revision)]))[0]);
       return result.status === 'deleted' ? deleted() : result.status === 'conflict' ? error(409, 'The project scene revision must increase.') : reply({ ok: true });
     }
     if (resource === 'assets') {

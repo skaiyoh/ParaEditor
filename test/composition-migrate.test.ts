@@ -4,7 +4,7 @@ import { applyCompositionEdit, migrateV4ToV5, parseCompositionDocument } from '.
 import { legacyV4DocumentSchema } from '../src/core/legacy-schema.ts';
 import { SCENE_VERSION } from '../src/core/migrate.ts';
 import { parseDocument } from '../src/core/schema.ts';
-import { fiveClusterDocument, invalidVariants, minimalDocument, setAt, withValues } from './fixtures/documents.ts';
+import { legacyFiveClusterDocument as fiveClusterDocument, invalidVariants, minimalDocument, setAt, withValues } from './fixtures/documents.ts';
 import { legacyComposition, newComposition } from './fixtures/composition.ts';
 
 const stamp = '2026-10-10T23:00:00.000Z';
@@ -94,9 +94,9 @@ test('legacy 0, 1, 2, 3 walk existing migrations then strict 4-to-5 with frozen 
 });
 
 test('migration never implicitly changes overlap; only the explicit reversible edit does', () => {
-  assert.equal(SCENE_VERSION, 4);
+  assert.equal(SCENE_VERSION, 6);
   assert.equal(parseDocument(minimalDocument()).ok, true);
-  assert.equal(parseDocument(newComposition()).ok, false);
+  assert.equal(parseDocument(newComposition()).ok, true);
   assert.equal(newComposition().compositing, 'scene-depth');
   const doc = legacyComposition(), layer = doc.objects[0]; assert.ok(layer);
   const opacity = applyCompositionEdit(doc, { kind: 'layer.opacity', id: layer.id, opacity: .6 }, stamp);

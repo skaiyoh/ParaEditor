@@ -8,17 +8,40 @@ import { EnableSwitch, GestureRange, Node, RangeControl } from './controls.tsx';
 import { ContextBar, Layers } from './layers.tsx';
 import { MotionControls, MotionExport, ParallaxNode, PhoneFrame } from './phone.tsx';
 import { Projects } from './projects.tsx';
+import { remixModel } from './remix-adapter.ts';
+import { paintModel } from './paint-adapter.ts';
+import type { PaintModel } from './paint-model.ts';
+import { PaintBar, PaintSize, PaintTools } from './paint-tools.tsx';
+import { RemixContainer, type RemixFocus } from './remix-container.tsx';
+import type { RemixModel } from './remix-model.ts';
 import { Share } from './share.tsx';
 import { Icon } from './icons.tsx';
 import { installKeyTexture } from './key-texture.ts';
 import { ColorPicker, displayColor, useColorPalette, type PendingColor } from './color-picker.tsx';
-import { CompareControls, CompareHold, CompareNotice } from './target.tsx';
+import { TargetReadout, CompareControls, CompareHold, CompareNotice } from './target.tsx';
 import type { InputColor } from '../core/color.ts';
 import type { Oklch } from '../core/raster.ts';
 
+import { SelectionTools, SelectionOutline, isSelectionTool, selectionSpace, selectionResult, type SelectionMode, type SelectionTool } from './selection-tools.tsx';
+
 const PHONE_QUERY = '(width < 744px), (max-height: 500px)';
-type ActiveTool = 'select' | 'sample';
-type PanelName = 'actions' | 'adjust' | 'layers' | 'projects' | 'color';
+type ActiveTool = ReturnType<DemoSession['authoringState']>['tool'];
+type PanelName = 'actions' | 'adjust' | 'layers' | 'projects' | 'color' | 'remix';
+
+export function formatStatusLine({ status, timing }: {
+  readonly status: string;
+  readonly timing: ReturnType<DemoSession['snapshot']>['analysisTiming'];
+}): string {
+  // Only analysis progress owns these timings. Recovery copy and other work
+  // must stay intact even when a previous stage has just finished.
+  const progress = /^(Ready(?: to tap)?|Warming decoder|Analyzing: (depth|encoder)|preparing|Fetching models \d+%|Waiting to analyze|Models ready - drop a photo|Parallax: (calibrating|tracking face))( - preparing)?$/.test(status);
+  return NOISY_DEV && progress && timing !== null ? `${status} (${timing.stage}: ${Math.round(timing.ms)} ms)` : status;
+}
+
+/** Raw validation output (a JSON list of issues) never reaches the status line; the person gets a sentence they can act on. */
+function plainStatus(text: string): string {
+  return /^\s*\[\s*\{[\s\S]*"(code|message)"\s*:/.test(text) ? 'Saved data could not be read. Open another project or start a new photo.' : text;
+}
 
 function usePhoneFrame(): boolean {
   const [query] = useState(() => window.matchMedia(PHONE_QUERY));
@@ -33,13 +56,15 @@ function usePhoneFrame(): boolean {
 }
 
 /** A fresh node, never given a 2D context. The session owns its renderer. */
-function Stage({ scene, session, onFit, refinementSize, contained = false, visible = true, notice, activeTool = 'select', onColorSample, onTap }: {
+function Stage({ scene, session, paint, onFit, refinementSize, contained = false, visible = true, notice, activeTool = 'select', selectionMode, onColorSample, onTap }: {
   readonly scene: DemoScene | null; readonly session: DemoSession; readonly onFit: (percent: number) => void;
+  readonly paint: PaintModel | null;
   readonly refinementSize: number | null;
   readonly contained?: boolean;
   readonly visible?: boolean;
   readonly notice?: string | null;
   readonly activeTool?: ActiveTool;
+  readonly selectionMode: SelectionMode;
   readonly onColorSample: (color: InputColor) => void;
   /** Compact frame handles the completion of its own selection action. */
   readonly onTap?: DemoSession['tap'];
@@ -50,7 +75,20 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
     phase: 'holding' | 'refining' | 'moved'; timer: number | null;
   };
   const gesture = useRef<Gesture | null>(null);
-  const pointers = useRef(new Set<number>());
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const selectionGesture = useRef<{ token: symbol; pointer: number } | null>(null);
+  const stroke = useRef<{ token: symbol; pointer: number; pen: boolean; model: PaintModel } | null>(null);
+  const latestPaint = useRef(paint);
+  latestPaint.current = paint;
+  // Include presses outside the canvas when deciding whether a stroke may start.
+  const paintPointers = useRef(new Set<number>());
+  const painting = paint !== null && paint.tool !== null;
+  const stageTool = painting ? 'select' : activeTool;
+  const interruptPaint = (reason: 'second-touch' | 'lost-capture'): void => {
+    const current = stroke.current; stroke.current = null;
+    if (current !== null) { suppressClick.current = true; current.model.interrupt(reason); }
+  };
+  const pinching = useRef(false);
   const suppressClick = useRef(false);
   const [refining, setRefining] = useState(false);
   const meterSize = useRef(0);
@@ -65,11 +103,17 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
     const y = (clientY - aperture.y) / aperture.height;
     return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? { x, y } : null;
   };
-  const clearGesture = (): void => {
+  const clearSelectionGesture = (): boolean => {
+    const current = selectionGesture.current; selectionGesture.current = null;
+    if (current === null) return false;
+    session.cancelSelection(current.token); return true;
+  };
+  const sourceAt = (x: number, y: number) => session.selectionToSource({ kind: 'css', x, y });
+  const clearGesture = (release = true): void => {
     const current = gesture.current;
     gesture.current = null;
     if (current?.timer !== null && current?.timer !== undefined) clearTimeout(current.timer);
-    if (current !== null && current.node.hasPointerCapture(current.pointer)) current.node.releasePointerCapture(current.pointer);
+    if (release && current !== null && current.node.hasPointerCapture(current.pointer)) current.node.releasePointerCapture(current.pointer);
     setRefining(false);
   };
   useLayoutEffect(() => {
@@ -79,43 +123,80 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
     const node = canvas.current;
     if (node === null || scene === null) return;
     const observer = new ResizeObserver(() => {
+      const transform = node.style.transform;
+      node.style.transform = '';
       const box = node.getBoundingClientRect();
+      node.style.transform = transform;
       if (box.width <= 0 || box.height <= 0 || node.width <= 0 || node.height <= 0) return;
+      session.setAuthoringLayout({ source: scene.doc.frame.master.size, viewport: { x: box.x, y: box.y, width: box.width, height: box.height }, dpr: window.devicePixelRatio });
       onFit(Math.round(100 * containedImageRect(box, { width: node.width, height: node.height }).width / scene.master.width));
     });
     observer.observe(node);
     return () => observer.disconnect();
   }, [scene?.master, onFit]);
   useLayoutEffect(() => {
-    const ended = (event: PointerEvent): void => { pointers.current.delete(event.pointerId); };
     const second = (event: PointerEvent): void => {
-      if (gesture.current !== null && event.pointerId !== gesture.current.pointer) {
-        pointers.current.add(event.pointerId);
-        suppressClick.current = true; clearGesture(); session.cancelRefinement();
+      if (latestPaint.current !== null && latestPaint.current.tool !== null) {
+        // Palm rejection: a touch while the Pencil (or mouse) draws is a resting hand, never a second pointer.
+        if (stroke.current?.pen === true && event.pointerType === 'touch') return;
+        paintPointers.current.add(event.pointerId);
+        if (stroke.current !== null && stroke.current.pointer !== event.pointerId) interruptPaint('second-touch');
+      }
+      if (pointers.current.size > 0 && !pointers.current.has(event.pointerId)) {
+        suppressClick.current = true; clearSelectionGesture(); clearGesture(false); session.cancelRefinement();
       }
     };
     const escape = (event: KeyboardEvent): void => {
-      if (!event.defaultPrevented && event.key === 'Escape' && gesture.current !== null) {
+      if (latestPaint.current !== null && latestPaint.current.tool !== null && event.key === 'Escape' && stroke.current !== null) {
+        const current = stroke.current; stroke.current = null;
+        event.preventDefault(); event.stopImmediatePropagation(); suppressClick.current = true;
+        current.model.cancel(current.token); return;
+      }
+      if (selectionGesture.current !== null && ['+', '=', '-', '0'].includes(event.key)) { event.preventDefault(); return; }
+      if (event.defaultPrevented || event.key !== 'Escape') return;
+      if (clearSelectionGesture() || session.selectionState().pending) {
+        event.preventDefault(); session.cancelSelection(); suppressClick.current = true;
+      } else if (gesture.current !== null) {
         if (gesture.current.phase === 'refining') event.preventDefault();
         suppressClick.current = true; clearGesture(); session.cancelRefinement();
       }
     };
-    window.addEventListener('keydown', escape);
+    // A pointer released or cancelled outside the canvas never reaches its handlers; drop it here (bubble phase, after the canvas)
+    // so a stale entry cannot turn the next touch into a pinch.
+    const ended = (event: PointerEvent): void => {
+      if (latestPaint.current !== null && latestPaint.current.tool !== null) {
+        paintPointers.current.delete(event.pointerId);
+        if (stroke.current?.pointer === event.pointerId) {
+          if (event.type === 'pointercancel') interruptPaint('lost-capture');
+          else { const current = stroke.current; stroke.current = null; current.model.end(current.token); }
+        }
+      }
+      pointers.current.delete(event.pointerId);
+      if (pointers.current.size === 0) pinching.current = false;
+    };
+    window.addEventListener('keydown', escape, true);
     window.addEventListener('pointerdown', second, true);
+    // Capture phase: panels such as Remix stop pointerup propagation, which left stale stage pointers that blocked painting.
     window.addEventListener('pointerup', ended, true);
     window.addEventListener('pointercancel', ended, true);
     const unsubscribe = session.subscribe((next) => {
       if (gesture.current?.phase === 'refining' && next.refiningObject === null) { suppressClick.current = true; clearGesture(); }
     });
     return () => {
-      window.removeEventListener('keydown', escape); window.removeEventListener('pointerdown', second, true);
+      window.removeEventListener('keydown', escape, true); window.removeEventListener('pointerdown', second, true);
       window.removeEventListener('pointerup', ended, true); window.removeEventListener('pointercancel', ended, true);
-      unsubscribe(); clearGesture(); session.cancelRefinement(); pointers.current.clear();
+      if (latestPaint.current !== null && latestPaint.current.tool !== null) interruptPaint('lost-capture');
+      paintPointers.current.clear();
+      unsubscribe(); clearSelectionGesture(); clearGesture(); session.cancelRefinement(); pointers.current.clear();
     };
   }, [session]);
   useLayoutEffect(() => {
+    // Tool changes are interrupted by the session; forget the old token before another input can end it.
+    if (paint !== null) { stroke.current = null; paintPointers.current.clear(); }
+  }, [paint?.tool]);
+  useLayoutEffect(() => {
     // Imports and Reset abandon a hold even before its timer has fired.
-    clearGesture();
+    clearSelectionGesture(); clearGesture(); pointers.current.clear(); pinching.current = false;
   }, [scene?.doc.id, scene?.doc.frame.master.asset, scene?.doc.objects.length]);
   const meter = <div class="selection-meter" data-testid="selection-meter" data-active={meterActive} aria-hidden={!meterActive}
     role="meter" aria-label="Selection" aria-valuemin={0} aria-valuemax={100} aria-valuenow={meterSize.current}
@@ -125,16 +206,42 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
   return <><canvas key="webgl-stage" ref={canvas} data-testid="stage" class={`stage-canvas${refining ? ' is-refining' : ''}`} hidden={scene === null || !visible} aria-label="Rendered photo"
     onPointerDown={(event) => {
       if (event.button !== 0) return;
-      pointers.current.add(event.pointerId);
-      if (pointers.current.size > 1) { suppressClick.current = true; clearGesture(); session.cancelRefinement(); return; }
-      clearGesture(); suppressClick.current = false;
+      const penPaint = paint !== null && paint.tool !== null && (event.pointerType === 'pen' || event.pointerType === 'mouse');
+      // A resting palm never reaches the stage while the Pencil draws.
+      if (paint !== null && paint.tool !== null && stroke.current?.pen === true && event.pointerType === 'touch') return;
+      if (penPaint) {
+        // The Pencil takes over from any resting palm: its touches and their gestures are dropped, not pinched.
+        for (const id of [...pointers.current.keys()]) if (id !== event.pointerId) { pointers.current.delete(id); paintPointers.current.delete(id); }
+        pinching.current = false; clearSelectionGesture(); clearGesture(false); session.cancelRefinement();
+      }
       const node = event.currentTarget;
-      // Synthesized events have no native active pointer; real input is captured.
-      try { node.setPointerCapture(event.pointerId); } catch { /* No native pointer to capture. */ }
+      pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      try { node.setPointerCapture(event.pointerId); } catch { /* Synthetic input has no native capture. */ }
+      if (pointers.current.size > 1) {
+        pinching.current = true; suppressClick.current = true; clearSelectionGesture(); clearGesture(false); session.cancelRefinement(); return;
+      }
+      if (pinching.current) return;
+      clearGesture(); suppressClick.current = false;
+      if (paint !== null && paint.tool !== null && (event.pointerType === 'pen' || event.pointerType === 'mouse' || (event.pointerType === 'touch' && paint.fingerDraw))) {
+        suppressClick.current = true;
+        if (!event.isPrimary || (!penPaint && paintPointers.current.size > 1)) return;
+        const token = paint.begin(event.pointerType === 'touch' ? 'finger' : 'pen', {
+          at: sourceAt(event.clientX, event.clientY), pressure: event.pointerType === 'pen' ? event.pressure : null,
+        });
+        if (token !== null) stroke.current = { token, pointer: event.pointerId, pen: penPaint, model: paint };
+        return;
+      }
+      if (isSelectionTool(stageTool)) {
+        suppressClick.current = true;
+        const began = session.beginSelection({ space: selectionSpace(session), pointerId: event.pointerId, kind: 'shape', tool: stageTool, mode: selectionMode, at: sourceAt(event.clientX, event.clientY) });
+        if (began.ok) selectionGesture.current = { token: began.value, pointer: event.pointerId };
+        else session.reportError(new Error(began.error));
+        return;
+      }
       const current: Gesture = { pointer: event.pointerId, x: event.clientX, y: event.clientY, node, phase: 'holding', timer: null };
       gesture.current = current;
       const point = pointAt(node, event.clientX, event.clientY);
-      const id = point === null || activeTool === 'sample' ? null : session.objectAt(point);
+      const id = point === null || stageTool !== 'select' ? null : session.objectAt(point);
       if (id !== null) current.timer = window.setTimeout(() => {
         current.timer = null;
         if (gesture.current !== current || current.phase !== 'holding') return;
@@ -142,8 +249,35 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
       }, 350);
     }}
     onPointerMove={(event) => {
+      const previous = pointers.current.get(event.pointerId);
+      if (previous === undefined) return;
+      const pairBefore = [...pointers.current.values()].slice(0, 2);
+      pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (paint !== null && paint.tool !== null && stroke.current?.pointer === event.pointerId) {
+        const coalesced = event.getCoalescedEvents?.() ?? [];
+        stroke.current.model.extend(stroke.current.token, (coalesced.length === 0 ? [event] : coalesced).map(sample => ({
+          at: sourceAt(sample.clientX, sample.clientY), pressure: event.pointerType === 'pen' ? sample.pressure : null,
+        })));
+        return;
+      }
+      if (pinching.current) {
+        const [a, b] = pairBefore, [c, d] = [...pointers.current.values()];
+        if (a !== undefined && b !== undefined && c !== undefined && d !== undefined) {
+          const distance = Math.hypot(b.x - a.x, b.y - a.y), nextDistance = Math.hypot(d.x - c.x, d.y - c.y);
+          const from = { kind: 'css', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } satisfies Parameters<DemoSession['selectionToSource']>[0];
+          const to = { ...from, x: (c.x + d.x) / 2, y: (c.y + d.y) / 2 };
+          if (distance > 0 && Math.abs(nextDistance - distance) > .01) session.pinchAuthoring({ from, to, factor: nextDistance / distance });
+          else session.panAuthoring({ x: to.x - from.x, y: to.y - from.y });
+        }
+        return;
+      }
+      const selection = selectionGesture.current;
+      if (selection?.pointer === event.pointerId) {
+        selectionResult(session, session.extendSelection({ token: selection.token, pointerId: event.pointerId, kind: 'shape', at: sourceAt(event.clientX, event.clientY) })); return;
+      }
       const current = gesture.current;
       if (current === null || current.pointer !== event.pointerId) return;
+      if (stageTool === 'navigate') { suppressClick.current = true; session.panAuthoring({ x: event.clientX - previous.x, y: event.clientY - previous.y }); return; }
       const travel = event.clientX - current.x;
       if (current.phase === 'refining') { session.moveRefinement(travel); return; }
       if (Math.hypot(travel, event.clientY - current.y) > 8) {
@@ -153,31 +287,53 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
     }}
     onPointerUp={(event) => {
       pointers.current.delete(event.pointerId);
+      if (paint !== null && paint.tool !== null && stroke.current?.pointer === event.pointerId) {
+        const current = stroke.current; stroke.current = null; current.model.end(current.token); return;
+      }
+      if (pinching.current) { if (pointers.current.size === 0) pinching.current = false; return; }
+      const selection = selectionGesture.current;
+      if (selection?.pointer === event.pointerId) {
+        selectionGesture.current = null;
+        session.extendSelection({ token: selection.token, pointerId: event.pointerId, kind: 'shape', at: sourceAt(event.clientX, event.clientY) });
+        void session.endSelection({ token: selection.token, pointerId: event.pointerId }).then(result => {
+          selectionResult(session, result);
+          if (result.kind === 'applied') session.setTarget({ kind: 'selection' });
+        });
+      }
       const current = gesture.current;
-      if (current === null || current.pointer !== event.pointerId) return;
-      if (current.phase === 'refining') { session.moveRefinement(event.clientX - current.x); void session.commitRefinement(); }
-      clearGesture();
+      if (current?.pointer === event.pointerId) {
+        if (current.phase === 'refining') { session.moveRefinement(event.clientX - current.x); void session.commitRefinement(); }
+        clearGesture();
+      }
     }}
     onPointerCancel={(event) => {
-      pointers.current.delete(event.pointerId);
-      if (gesture.current?.pointer === event.pointerId) { suppressClick.current = true; clearGesture(); session.cancelRefinement(); }
+      if (paint !== null && paint.tool !== null && stroke.current?.pointer === event.pointerId) interruptPaint('lost-capture');
+      pointers.current.delete(event.pointerId); suppressClick.current = true; clearSelectionGesture(); clearGesture(); session.cancelRefinement();
+      if (pointers.current.size === 0) pinching.current = false;
     }}
     onLostPointerCapture={(event) => {
-      if (gesture.current?.pointer === event.pointerId) { suppressClick.current = true; clearGesture(); session.cancelRefinement(); }
+      if (paint !== null && paint.tool !== null && stroke.current?.pointer === event.pointerId) interruptPaint('lost-capture');
+      if (selectionGesture.current?.pointer === event.pointerId || gesture.current?.pointer === event.pointerId) {
+        suppressClick.current = true; clearSelectionGesture(); clearGesture(); session.cancelRefinement();
+      }
+      pointers.current.delete(event.pointerId);
+      if (pointers.current.size === 0) pinching.current = false;
     }}
     onContextMenu={(event) => event.preventDefault()}
     onClick={(event) => {
       if (suppressClick.current) { suppressClick.current = false; return; }
+      if (isSelectionTool(stageTool) || stageTool === 'navigate') return;
       const point = pointAt(event.currentTarget, event.clientX, event.clientY);
       if (point === null) return;
-      if (activeTool === 'sample') {
+      if (stageTool === 'sample') {
         const sampled = session.sampleColor(point);
         if (sampled.kind === 'sampled') onColorSample(sampled.color);
       } else void (onTap ?? session.tap)(point);
     }} />
+    {visible && <SelectionOutline session={session} />}
     <div class="notice-slot" data-testid="notice">
       {meter}
-      {notice != null && <p class="preparing" data-testid="preparing">{notice}</p>}
+      {session.selectionState().pending ? <p class="preparing" data-testid="selection-pending" role="status">Selecting…</p> : notice != null && <p class="preparing" data-testid="preparing">{notice}</p>}
       <CompareNotice session={session} />
       {activeTool === 'sample' && <div class="sample-notice"><span>Sampling: {session.authoringState().sampleMode === 'edited' ? 'Edited' : 'Source'}</span>
         <button type="button" onClick={() => session.setTool('select')}>Cancel</button></div>}
@@ -286,8 +442,9 @@ const surfaceControls = [
   { field: 'scale', label: 'Scale' },
 ] satisfies readonly { field: keyof Omit<SceneDocument['surface'], 'enabled' | 'pattern'>; label: string }[];
 
-function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, debug, onDebug, portrait = false }: {
+function Inspector({ scene, session, remix, onRemixGrain, parallaxEnabled, modelsReady, onParallax, debug, onDebug, portrait = false }: {
   readonly scene: DemoScene | null; readonly session: DemoSession;
+  readonly remix: RemixModel | null; readonly onRemixGrain: (block: string) => void;
   readonly parallaxEnabled: boolean; readonly modelsReady: boolean; readonly onParallax: () => void;
   readonly debug: boolean; readonly onDebug: () => void;
   readonly portrait?: boolean;
@@ -302,6 +459,7 @@ function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, d
     if (portrait && motionEnabled) setExpanded((current) => current.Motion ? current : { ...current, Motion: true });
   }, [portrait, motionEnabled, scene?.doc.id]);
   const expand = (name: NodeName): void => setExpanded((current) => ({ ...current, [name]: !current[name] }));
+  const grainBlock = remix?.grainBlock ?? null;
   return <aside class={portrait ? 'sheet-inspector' : 'inspector'} aria-label="Inspector">
     {scene !== null && <div class="node-stack">
       <section class="scene-nodes" aria-label="Scene effects">
@@ -333,8 +491,29 @@ function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, d
           session={session} valueFor={(value) => ({ kind: 'surface', patch: { [field]: value } })} />)}
       </Node>
       {(['Palette', 'Camera'] satisfies readonly NodeName[]).map((name) => <Node key={name} name={name} expanded={expanded[name]} onExpand={() => expand(name)}>
-        {controls.filter((control) => control.group === name).map(({ field, label, min, max, step }) =>
-          <RangeControl key={field} id={`style-${field}`} label={label} min={min} max={max} step={step} value={scene.doc.style[field]} session={session} valueFor={(value) => ({ kind: 'style', patch: { [field]: value } })} />)}
+        {name === 'Camera' && grainBlock !== null && <button class="remix-add" type="button" data-testid="remix-grain"
+          onClick={() => onRemixGrain(grainBlock)}><Icon name="remix" />Remix Grain</button>}
+        {controls.filter((control) => control.group === name).map(({ field, label, min, max, step }, index, group) => {
+          const refusal = (control: typeof field): string | null => {
+            const binding = control === 'grain' || control === 'colorNoise' || control === 'grainSize' ? remix?.grainControl(control) : undefined;
+            return binding?.kind === 'unavailable' ? binding.reason : null;
+          };
+          const reason = refusal(field);
+          // Consecutive controls refused for the same reason say it once, under the last of them.
+          let last = index;
+          while (reason !== null && group[last + 1] !== undefined && refusal(group[last + 1]!.field) === reason) last += 1;
+          if (reason !== null) return <div key={field}>
+            <label class="range-row" for={`style-${field}`}>
+              <span class="range-label">{label}</span>
+              <input type="range" id={`style-${field}`} data-testid={`style-${field}`} min={min} max={max} step={step}
+                value={scene.doc.style[field]} disabled aria-describedby={`style-${group[last]!.field}-reason`}
+                style={{ '--fill': `${100 * (scene.doc.style[field] - min) / (max - min)}%` }} />
+              <output class="range-value" data-testid={`value-${field}`} for={`style-${field}`}>{scene.doc.style[field]}</output>
+            </label>
+            {last === index && <p class="remix-note" id={`style-${field}-reason`}>{reason}</p>}
+          </div>;
+          return <RangeControl key={field} id={`style-${field}`} label={label} min={min} max={max} step={step} value={scene.doc.style[field]} session={session} valueFor={(value) => ({ kind: 'style', patch: { [field]: value } })} />;
+        })}
       </Node>)}
       </section>
     </div>}
@@ -350,17 +529,31 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   const [shareNotice, setShareNotice] = useState<string | null>(null);
   const [shareStatus, setShareStatus] = useState<string | null>(null);
   const [panel, setPanel] = useState<PanelName | null>(null);
+  const remix = remixModel(session);
+  const paint = paintModel(session);
+  const [remixFocus, setRemixFocus] = useState<RemixFocus | null>(null);
+  const [remixRequest, setRemixRequest] = useState(0);
+  const [colorRequest, setColorRequest] = useState(0);
+  const remixOpener = useRef<HTMLButtonElement | null>(null);
+  const fryReason = remix?.fry.kind === 'unavailable' ? remix.fry.reason : undefined;
   const projectsOpen = panel === 'projects';
-  const activeTool = state.authoring.tool;
+  const activeTool: ActiveTool = state.authoring.tool;
+  const [selectionMode, setSelectionMode] = useState<SelectionMode>('replace');
+  const lastShape = useRef<SelectionTool>('rectangle');
+  const changeShape = (tool: SelectionTool): void => { lastShape.current = tool; session.setTool(tool); };
+  const selectionActive = isSelectionTool(activeTool);
+  const toggleSelection = (): void => { session.setTool(selectionActive ? 'select' : lastShape.current); };
+  const selectionBar = selectionActive ? <SelectionTools session={session} tool={activeTool} mode={selectionMode} onMode={setSelectionMode} onTool={changeShape} /> : null;
   const palette = useColorPalette();
   const [pendingColor, setPendingColor] = useState<PendingColor>(null);
   useLayoutEffect(() => { setPendingColor(null); }, [state.scene?.doc.id, state.scene?.selected]);
   const onColorApplied = (color: Oklch | null): void => { setPendingColor(null); if (color !== null) palette.remember(color); };
   const onColorSample = (color: InputColor): void => {
     const selected = session.snapshot().scene?.selected;
-    if (selected != null) setPendingColor({ layer: selected, color });
+    if (session.authoringState().target.kind === 'selection') setPendingColor({ layer: 'selection', color });
+    else if (selected != null) setPendingColor({ layer: selected, color });
   };
-  const colorPanel = (active: boolean) => <ColorPicker session={session} palette={palette} pending={pendingColor} clearPending={() => setPendingColor(null)} active={active} />;
+  const colorPanel = (active: boolean) => <ColorPicker session={session} paint={paint} palette={palette} pending={pendingColor} clearPending={() => setPendingColor(null)} active={active} />;
   const panelOpener = useRef<HTMLButtonElement | null>(null);
   const togglePanel = (name: PanelName, opener: HTMLButtonElement): void => {
     panelOpener.current = opener;
@@ -368,11 +561,32 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
     setPanel((current) => current === name ? null : name);
   };
   const closePanel = (): void => { setPanel(null); panelOpener.current?.focus(); };
+  const paintBar = paint !== null && paint.tool !== null ? <PaintBar paint={paint}
+    onColor={(opener) => {
+      if (phone) setColorRequest(request => request + 1);
+      else { panelOpener.current = opener; setPanel('color'); }
+    }}
+    onRemix={remix !== null && remix.targets.includes('brush') ? (opener) => {
+      remix.setTarget('brush'); setRemixFocus(null);
+      if (phone) setRemixRequest(request => request + 1);
+      else { panelOpener.current = opener; setPanel('remix'); }
+    } : null} /> : null;
+  const openRemixGrain = (block: string): void => {
+    remix?.setTarget('photo');
+    setRemixFocus({ block, level: 'functions' });
+    if (phone) setRemixRequest((request) => request + 1);
+    else {
+      panelOpener.current = remixOpener.current;
+      remixOpener.current?.focus({ preventScroll: true });
+      setPanel('remix');
+    }
+  };
   useLayoutEffect(() => { installKeyTexture(); }, []);
   useLayoutEffect(() => {
     const close = (event: KeyboardEvent): void => {
       if (phone || panel === null || event.key !== 'Escape' || event.defaultPrevented || document.querySelector('dialog[open]') !== null) return;
-      if (session.authoringState().gesture !== null) return;
+      if (event.target instanceof HTMLTextAreaElement && event.target.closest('.panel-remix') !== null) return;
+      if (session.authoringState().gesture !== null || isSelectionTool(session.authoringState().tool)) return;
       event.preventDefault();
       // Cancel an inline edit before hiding the panel can trigger its blur.
       if (event.target instanceof HTMLInputElement) event.target.dispatchEvent(new Event('cancel'));
@@ -396,7 +610,9 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
       timingCache.current.stages.set(timing.stage, timing.ms);
     }
     observedTiming.current = timing;
-    setState(next);
+    // Remix editing and Projects acknowledgements can change without replacing
+    // DemoState. Every session notification must refresh their UI read models.
+    setState({ ...next });
   }), [session]);
   useLayoutEffect(() => {
     const escape = (event: KeyboardEvent): void => {
@@ -408,8 +624,14 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
         event.preventDefault();
         if (event.shiftKey) session.redo(); else session.undo();
       } else if (event.key === 'Escape') {
-        if (session.authoringState().tool === 'sample') session.setTool('select');
+        if (session.authoringState().tool !== 'select') { event.preventDefault(); session.cancelSelection(); session.setTool('select'); }
         else if (!session.cancelRefinement()) session.select(null);
+      } else if (!event.metaKey && !event.ctrlKey && !event.altKey && ['+', '=', '-', '0'].includes(event.key)) {
+        if (session.selectionState().pending) return;
+        event.preventDefault();
+        if (event.key === '0') session.fitAuthoring();
+        else { const view = session.selectionState().view, box = view.layout.viewport;
+          session.zoomAuthoring({ zoom: view.zoom * (event.key === '-' ? 1 / 1.25 : 1.25), anchor: { kind: 'css', x: box.x + box.width / 2, y: box.y + box.height / 2 } }); }
       }
     };
     window.addEventListener('keydown', escape);
@@ -431,11 +653,20 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   const busy = state.status === 'Importing…';
   const tapUnavailable = state.analysisStatus.startsWith('Tapping ');
   const touch = navigator.maxTouchPoints > 0;
-  const status = bootError ?? shareStatus ?? (phone && scene === null && state.status === 'Drop a photo' && !state.analysisStatus.startsWith('Models unavailable:') ?
+  const selection = session.selectionState();
+  const zoomed = selection.neutral && selection.view.zoom !== 1;
+  const status = plainStatus(bootError ?? shareStatus ?? (phone && scene === null && state.status === 'Drop a photo' && !state.analysisStatus.startsWith('Models unavailable:') ?
     touch ? 'Take a photo or try a sample' : 'Open a photo or try a sample'
     : state.parallaxEnabled && state.analysisStatus === 'preparing' ? `${state.status} - preparing` :
-    tapUnavailable || state.status === 'Ready' || state.status === 'Drop a photo' ? state.analysisStatus : state.status);
-  const preparing = shareNotice ?? state.exportProgress ?? (scene === null ? null : tapUnavailable ? state.analysisStatus
+    selectionActive && state.status === 'Ready' && (state.analysisStatus === 'Ready to tap' || state.analysisStatus === 'Ready') ?
+      state.exportProgress ?? (selection.pending ? 'Selecting…' : selectionMode === 'replace' ? 'Drag to select' : selectionMode === 'add' ? 'Drag to add' : 'Drag to remove') :
+    // A tapped object teaches the refine gesture where the status would only repeat Ready to tap.
+    !selectionActive && scene?.selected != null && state.status === 'Ready' && state.analysisStatus === 'Ready to tap' ? 'Hold, then drag sideways to refine' :
+    tapUnavailable || state.status === 'Ready' || state.status === 'Drop a photo' ? state.analysisStatus : state.status));
+  // An invalid remix draft never replaces the picture: say which revision the stage and an export are showing.
+  const lastWorking = remix?.status.lastWorkingPreview === true;
+  const exportNotice = state.exportProgress === null ? null : lastWorking ? `${state.exportProgress} (last working version)` : state.exportProgress;
+  const preparing = shareNotice ?? exportNotice ?? (scene !== null && lastWorking ? 'Preview: last working version' : null) ?? (scene === null ? null : tapUnavailable ? state.analysisStatus
     : state.analysisStatus.startsWith('Analyzing: ') ? state.analysisStatus.replace('Analyzing: ', 'Preparing: ')
     : state.analysisStatus === 'preparing' ? 'Preparing: background'
     : state.analysisStatus === 'Warming decoder' ? state.analysisStatus
@@ -444,10 +675,15 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   const toggleSymbols = (): void => { if (scene !== null) session.setSymbols({ enabled: !scene.doc.symbols.enabled }); };
   const toggleParallax = (): void => { void session.setParallax(!state.parallaxEnabled); };
   const toggleDebug = (): void => setDebug((shown) => !shown);
-  if (phone) return <main class={`editor phone-editor${scene === null ? '' : ' has-photo'}`} aria-label="Photo editor"
+  if (phone) return <main class={`editor phone-editor${scene === null ? '' : ' has-photo'}${zoomed ? ' is-zoomed' : ''}`} aria-label="Photo editor"
     onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'; }}
     onDrop={(event) => { event.preventDefault(); open(event.dataTransfer?.files[0]); }}>
-    <PhoneFrame state={{ ...state, scene }} session={session} status={status} preparing={preparing} busy={busy} touch={touch} modelsReady={analysis.modelsReady}
+    <PhoneFrame paint={paint} paintBar={paintBar} selectionBar={selectionBar} selectionActive={selectionActive} onSelection={toggleSelection} fit={fit} state={{ ...state, scene }} session={session} status={status} preparing={preparing} busy={busy} touch={touch} modelsReady={analysis.modelsReady}
+      {...(remix === null ? {} : {
+        remix: <RemixContainer session={session} model={remix} focus={remixFocus} onOpenColor={() => setColorRequest((request) => request + 1)} />,
+        remixRequest, fry: remix.fry,
+      })}
+      {...(paint === null && remix === null ? {} : { colorRequest })}
       projectsOpen={projectsOpen} onProjects={() => setPanel((current) => current === 'projects' ? null : 'projects')}
       projects={(onImport) => <Projects session={session} onOpened={() => setPanel(null)} onImport={onImport} onSample={sample}
         importLabel={touch ? 'Take a photo' : 'Open'} status={status} />}
@@ -463,15 +699,15 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
         <div><dt>Analysis</dt><dd data-testid="analysis-backend">{scene === null ? 'No photo' : analysis.backend.kind === 'gpu' ? `GPU · ${analysis.backend.name}` : 'on device'}</dd></div>
         <div><dt>Master</dt><dd>{scene === null ? 'No photo' : `${scene.master.width} × ${scene.master.height}`}</dd></div>
         <div><dt>Depth</dt><dd>{scene?.depth != null ? 'Ready' : 'Pending'} {elapsed('depth')}</dd></div>
-        <div><dt>Encoder</dt><dd>{analysis.decoderReady ? 'Ready' : 'Pending'} {elapsed('encode')}</dd></div>
+        <div><dt>Encoder</dt><dd>{analysis.embeddings ? 'Ready' : 'Pending'} {elapsed('encode')}</dd></div>
         <div><dt>Plate</dt><dd>{scene?.plate != null ? 'Ready' : 'Not prepared'} {elapsed('inpaint')}</dd></div>
       </dl><span class="local-models">{session.analysis.modelCount()} models local</span>
       <h3 class="panel-heading">Build</h3><div class="build-meta"><small data-testid="isolation">isolated: {isolated ? 'yes' : 'no'}</small><small data-testid="build-id">build {buildId}</small></div></>}
-      inspector={<Inspector scene={scene} session={session} portrait parallaxEnabled={state.parallaxEnabled} modelsReady={analysis.modelsReady}
+      inspector={<Inspector scene={scene} session={session} remix={remix} onRemixGrain={openRemixGrain} portrait parallaxEnabled={state.parallaxEnabled} modelsReady={analysis.modelsReady}
         onParallax={toggleParallax} debug={debug} onDebug={toggleDebug} color={colorPanel} onColorApplied={onColorApplied} />}
       onOpen={open} onSample={sample} onDownload={() => { void download(); }}
       onMotion={toggleMotion} onSymbols={toggleSymbols} onParallax={toggleParallax}>
-      {(onTap) => <><Stage scene={scene} session={session} onFit={setFit} refinementSize={state.refinementSize} contained visible={!projectsOpen} activeTool={activeTool} onColorSample={onColorSample} onTap={onTap} />
+      {(onTap) => <><Stage scene={scene} session={session} paint={paint} onFit={setFit} refinementSize={state.refinementSize} contained visible={!projectsOpen} activeTool={activeTool} selectionMode={selectionMode} onColorSample={onColorSample} onTap={onTap} />
       {debug && scene !== null && !projectsOpen && <ParallaxDebug session={session} />}</>}
     </PhoneFrame>
   </main>;
@@ -482,7 +718,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
       <div class="floating-panel-body">{children}</div>
     </section>;
   return (
-    <main class={`editor full-editor${scene === null ? '' : ' has-photo'}`} aria-label="Photo editor" onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'; }}
+    <main class={`editor full-editor${scene === null ? '' : ' has-photo'}${zoomed ? ' is-zoomed' : ''}`} aria-label="Photo editor" onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'; }}
       onDrop={(event) => { event.preventDefault(); open(event.dataTransfer?.files[0]); }}>
       <header class="top-bar">
         <div class="tool-cluster">
@@ -502,18 +738,18 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
               <button type="button" disabled={scene === null || busy} onClick={() => session.reset()}><Icon name="reset" />Reset</button>
             </div>
             <CompareControls session={session} />
+            <Share session={session} onNotice={setShareNotice} onStatus={setShareStatus} />
             <section class="scene-info" aria-labelledby="scene-heading">
               <h3 id="scene-heading" class="panel-heading">Scene</h3>
               <dl class="scene-facts">
                 <div><dt>Analysis</dt><dd data-testid="analysis-backend">{scene === null ? 'No photo' : analysis.backend.kind === 'gpu' ? `GPU · ${analysis.backend.name}` : 'on device'}</dd></div>
                 <div><dt>Master</dt><dd>{scene === null ? 'No photo' : `${scene.master.width} × ${scene.master.height}`}</dd></div>
                 <div><dt>Depth</dt><dd class={scene?.depth != null ? 'fact-ready' : ''}>{scene === null ? 'No photo' : scene.depth != null ? 'Ready' : 'Pending'}<span class="fact-time">{elapsed('depth')}</span></dd></div>
-                <div><dt>Encoder</dt><dd class={analysis.decoderReady ? 'fact-ready' : ''}>{scene === null ? 'No photo' : analysis.decoderReady ? 'Ready' : 'Pending'}<span class="fact-time">{elapsed('encode')}</span></dd></div>
+                <div><dt>Encoder</dt><dd class={analysis.embeddings ? 'fact-ready' : ''}>{scene === null ? 'No photo' : analysis.embeddings ? 'Ready' : 'Pending'}<span class="fact-time">{elapsed('encode')}</span></dd></div>
                 <div><dt>Plate</dt><dd class={scene?.plate != null ? 'fact-ready' : ''}>{scene === null ? 'No photo' : scene.plate != null ? 'Ready' : 'Not prepared'}<span class="fact-time">{elapsed('inpaint')}</span></dd></div>
               </dl>
               <span class="local-models">{session.analysis.modelCount()} models local</span>
             </section>
-            <Share session={session} onNotice={setShareNotice} onStatus={setShareStatus} />
             <h3 class="panel-heading">Build</h3>
             <div class="build-meta"><small data-testid="isolation" title="Cross-origin isolation">{isolated ? 'isolated: yes' : 'isolated: no'}</small><small data-testid="build-id">build {buildId}</small></div>
           </>)}
@@ -521,15 +757,20 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
             onClick={(event) => togglePanel('adjust', event.currentTarget)}><Icon name="adjust" /></button>
           {floatingPanel('adjust', 'Adjustments', <>
             <div class="panel-title"><h2>Adjustments</h2><span>Scene</span></div>
-            <Inspector scene={scene} session={session} parallaxEnabled={state.parallaxEnabled} modelsReady={analysis.modelsReady}
+            <Inspector scene={scene} session={session} remix={remix} onRemixGrain={openRemixGrain} parallaxEnabled={state.parallaxEnabled} modelsReady={analysis.modelsReady}
               onParallax={toggleParallax} debug={debug} onDebug={toggleDebug} color={colorPanel} onColorApplied={onColorApplied} />
           </>)}
+          {remix !== null && <>
+            <button ref={remixOpener} class="icon-button" type="button" data-testid="tool-remix" aria-label="Remix" title="Remix"
+              aria-expanded={panel === 'remix'} aria-controls="panel-remix" disabled={scene === null}
+              onClick={(event) => togglePanel('remix', event.currentTarget)}><Icon name="remix" /></button>
+            {floatingPanel('remix', 'Remix', <RemixContainer session={session} model={remix} focus={remixFocus} onOpenColor={() => setPanel('color')} />)}
+          </>}
+          <button class="icon-button" type="button" data-testid="tool-selection" aria-label="Selection" title="Selection" aria-pressed={selectionActive} disabled={scene === null} onClick={toggleSelection}><Icon name="selection" /></button>
         </div>
-        <p class="photo-name" title={scene?.doc.frame.original.name}>
-          <span>{scene?.doc.frame.original.name ?? 'No photo open'}{selected === undefined ? '' : ` / ${selected.name}`}</span>
-          {scene !== null && <span class="fit-readout">Fit {fit}%</span>}
-        </p>
+        <TargetReadout session={session} fit={fit} />
         <div class="tool-cluster tool-cluster-right">
+          {paint !== null && <PaintTools paint={paint} disabled={scene === null} />}
           <button class="icon-button" type="button" data-testid="tool-layers" aria-label="Layers" title="Layers" aria-expanded={panel === 'layers'} aria-controls="panel-layers"
             onClick={(event) => togglePanel('layers', event.currentTarget)}><Icon name="layers" /></button>
           {floatingPanel('layers', 'Layers', <Layers scene={scene} session={session} full />)}
@@ -542,7 +783,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
           </button>
           {floatingPanel('color', 'Color', colorPanel(panel === 'color'))}
           <span class="tool-separator" />
-          <button class="primary-action" type="button" disabled={scene === null || busy} onClick={() => { void download(); }}><Icon name="download" />Download</button>
+          <button class={selectionActive ? undefined : "primary-action"} type="button" disabled={scene === null || busy} onClick={() => { void download(); }}><Icon name="download" />Download</button>
         </div>
         <input ref={input} type="file" accept="image/jpeg,image/png" hidden onChange={(event) => {
           open(event.currentTarget.files?.[0]); event.currentTarget.value = '';
@@ -553,26 +794,30 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
       </header>
       <section class="viewer" aria-label="Photo viewer">
         <div class="stage-area" aria-busy={busy}>
-          <Stage scene={scene} session={session} onFit={setFit} refinementSize={state.refinementSize} contained notice={preparing} activeTool={activeTool} onColorSample={onColorSample} />
+          <Stage scene={scene} session={session} paint={paint} onFit={setFit} refinementSize={state.refinementSize} contained notice={preparing} activeTool={activeTool} selectionMode={selectionMode} onColorSample={onColorSample} />
           {debug && scene !== null && <ParallaxDebug session={session} />}
           {scene === null && <div class="empty-stage"><p>Drop a photo</p><div class="empty-actions">
             <button class="primary-action" type="button" onClick={() => (touch ? cameraInput : input).current?.click()}><Icon name={touch ? 'camera' : 'open'} />{touch ? 'Take a photo' : 'Open'}</button>
+            {touch && <button type="button" data-testid="empty-open" onClick={() => input.current?.click()}><Icon name="open" />Open</button>}
             <button type="button" onClick={sample}><Icon name="sample" />Try a sample</button>
           </div></div>}
         </div>
       </section>
-      <aside class="fry-rail" data-testid="fry-rail" aria-label="Fry">
+      <aside class="fry-rail" data-testid="fry-rail" aria-label="Fry" title={fryReason}>
         <label for="style-fry">Fry</label>
-        <GestureRange session={session} valueFor={(fry) => ({ kind: 'fry', fry })} id="style-fry" data-testid="style-fry" min="0" max="1" step="0.01" value={scene?.doc.style.fry ?? 0.6} disabled={scene === null}
+        <GestureRange session={session} valueFor={(fry) => ({ kind: 'fry', fry })} id="style-fry" data-testid="style-fry" min="0" max="1" step="0.01" value={scene?.doc.style.fry ?? 0.6} disabled={scene === null || fryReason !== undefined}
+          aria-describedby={fryReason === undefined ? undefined : 'style-fry-reason'}
           style={{ '--fill': `${(scene?.doc.style.fry ?? 0.6) * 100}%` }} />
         <output for="style-fry" data-testid="value-fry">{(scene?.doc.style.fry ?? 0.6).toFixed(2)}</output>
+        {fryReason !== undefined && <span class="visually-hidden" id="style-fry-reason">{fryReason}</span>}
+        {paint !== null && paint.tool !== null && <PaintSize paint={paint} />}
         <span class="rail-rule" />
         <button class="icon-button" type="button" data-testid="history-undo" aria-label="Undo" title="Undo" disabled={!history.canUndo} onClick={() => session.undo()}><Icon name="undo" /></button>
         <button class="icon-button" type="button" data-testid="history-redo" aria-label="Redo" title="Redo" disabled={!history.canRedo} onClick={() => session.redo()}><Icon name="redo" /></button>
         <CompareHold session={session} />
       </aside>
-      {scene !== null && selected !== undefined && <ContextBar key={selected.id} scene={scene} object={selected} session={session} onColorApplied={onColorApplied} />}
-      <p class="status-line full-status" data-testid="status" role="status">{status}{NOISY_DEV && state.analysisTiming !== null ? ` (${state.analysisTiming.stage}: ${Math.round(state.analysisTiming.ms)} ms)` : ''}</p>
+      {scene !== null && (selectionBar ?? paintBar ?? (selected !== undefined && <ContextBar key={selected.id} scene={scene} object={selected} session={session} onColorApplied={onColorApplied} />))}
+      <p class="status-line full-status" data-testid="status" role="status">{formatStatusLine({ status, timing: state.analysisTiming })}</p>
       {scene !== null && <div class="mode-rail mode-pill" data-testid="mode-pill" role="group" aria-label="Viewer modes">
         <button type="button" aria-pressed={scene.doc.motion.enabled} onClick={toggleMotion}><Icon name="motion" />Motion</button>
         <button type="button" aria-pressed={scene.doc.symbols.enabled} onClick={toggleSymbols}><Icon name="symbols" />Symbols</button>

@@ -10,6 +10,7 @@
 // build id, the compile-time constants, the vendored runtime, and dev pages.
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { copyFile, cp, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -27,6 +28,9 @@ const WORKERS = {
 const APP = 'main.tsx';
 const GALLERY = 'gallery.ts';
 const GALLERY_FIXTURE = 'dev/gallery-fixture.ts';
+const SCENES = 'app/scenes.ts';
+const MESH_PART_BYTES = 16 * 1024 * 1024;
+const HOST_FILE_BYTES = 25 * 1024 * 1024;
 const STATIC = ['manifest.webmanifest', 'icon.svg'];
 const MIGRATE = 'core/migrate.ts';
 /** The directory under --src whose pages and workers only a dev build writes. */
@@ -320,7 +324,8 @@ async function main() {
     // --src probe trees may omit the optional second page; the real source carries both files.
     const hasGallery = existsSync(path.join(flags.src, GALLERY));
     const hasFixture = hasGallery && flags.mode === 'dev' && existsSync(path.join(flags.src, GALLERY_FIXTURE));
-    const extraEntries = [...(hasGallery ? [GALLERY] : []), ...(hasFixture ? [GALLERY_FIXTURE] : [])];
+    const hasScenes = existsSync(path.join(flags.src, SCENES));
+    const extraEntries = [...(hasGallery ? [GALLERY] : []), ...(hasFixture ? [GALLERY_FIXTURE] : []), ...(hasScenes ? [SCENES] : [])];
     const entryNames = [APP, ...extraEntries, ...Object.values(WORKERS), ...dev.pages.map((p) => p.entry), ...dev.workers.map((w) => w.entry)].map((f) => path.basename(f));
     const repeated = entryNames.find((n, i) => entryNames.indexOf(n) !== i);
     if (repeated !== undefined) throw new Error(`two entries share the file name ${repeated}, so their URLs cannot be told apart.`);
@@ -357,9 +362,47 @@ async function main() {
       const fixture = hasFixture ? `<script type="module" src="${appOut[path.basename(GALLERY_FIXTURE)]}"></script>` : '';
       await writeFile(path.join(staging, 'gallery.html'), html.replaceAll('%NOISY_GALLERY%', appOut[GALLERY]).replaceAll('%NOISY_GALLERY_FIXTURE%', fixture));
     }
+    if (hasScenes) {
+      const html = await readFile(path.join(flags.src, 'scenes.html'), 'utf8');
+      if (!html.includes('%NOISY_SCENES%')) throw new Error('scenes.html is missing its entry placeholder.');
+      await writeFile(path.join(staging, 'scenes.html'), html.replaceAll('%NOISY_SCENES%', appOut[path.basename(SCENES)]));
+    }
     for (const file of STATIC) await cp(path.join(flags.src, file), path.join(staging, file));
     const assets = path.join(flags.src, 'assets');
-    if (existsSync(assets)) await cp(assets, path.join(staging, 'assets-static'), { recursive: true });
+    if (existsSync(assets)) await cp(assets, path.join(staging, 'assets-static'), {
+      recursive: true,
+      // Scene assets have their own closed inventory below.
+      filter: file => file !== path.join(assets, 'scenes'),
+    });
+    if (hasScenes) {
+      // Closed authored assets only: no blend files, standalone server or tracking bundle.
+      const lantern = ['geometry.bin', 'scene.json', ...['neutral', 'left', 'right', 'up', 'down'].flatMap(name => [`${name}.webp`, `${name}.webp.json`])];
+      for (const [name, input, files] of [
+        ['highland-field', path.join(REPO, 'assets/scenes/highland-field'), ['field.mesh', 'field.json', 'highland-field.png']],
+        ['lantern-court', path.join(flags.src, 'dev/assets/lantern-court'), lantern],
+      ]) {
+        const destination = path.join(staging, 'assets-static/scenes', name);
+        await mkdir(destination, { recursive: true });
+        for (const file of files) {
+          const bytes = await readFile(path.join(input, file));
+          if (file === 'field.mesh') {
+            const parts = [];
+            for (let start = 0; start < bytes.byteLength; start += MESH_PART_BYTES) {
+              const part = `field.mesh.${parts.length}`;
+              await writeFile(path.join(destination, part), bytes.subarray(start, start + MESH_PART_BYTES));
+              parts.push(part);
+            }
+            const sha256 = createHash('sha256').update(bytes).digest('hex');
+            await writeFile(path.join(destination, 'field.chunks.json'), `${JSON.stringify({ version: 1, bytes: bytes.byteLength, sha256, parts }, null, 2)}\n`);
+          } else {
+            await writeFile(path.join(destination, file), bytes);
+          }
+        }
+        if (name === 'lantern-court') await copyFile(path.join(REPO, 'assets/scenes/lantern-court/lantern-court.png'), path.join(destination, 'lantern-court.png'));
+        const poster = `${name}.png.json`;
+        await copyFile(path.join(assets, 'scenes', name, poster), path.join(destination, poster));
+      }
+    }
     const devPages = {};
     for (const page of dev.pages) {
       const html = await readFile(page.html, 'utf8');
@@ -382,6 +425,7 @@ async function main() {
       buildId: id,
       app: appUrl,
       ...(hasGallery ? { gallery: appOut[GALLERY] } : {}),
+      ...(hasScenes ? { scenes: appOut[path.basename(SCENES)] } : {}),
       workers: workerUrls,
       devPages,
       devWorkers: devWorkerUrls,
@@ -390,6 +434,11 @@ async function main() {
       files: [...files, META].sort(),
     };
     await writeFile(path.join(staging, META), `${JSON.stringify(meta, null, 2)}\n`);
+    for (const file of meta.files) {
+      if ((await stat(path.join(staging, file))).size > HOST_FILE_BYTES) {
+        throw new Error(`${file} exceeds the 25 MiB hosted file limit.`);
+      }
+    }
 
     await mkdir(path.dirname(flags.outdir), { recursive: true });
     await rm(flags.outdir, { recursive: true, force: true });

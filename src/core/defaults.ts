@@ -5,7 +5,7 @@
 // Pure: no browser global, no Node API, no I/O.
 
 import type { BuildId, LightId, ObjectId, SceneId } from './ids.ts';
-import { SCENE_VERSION } from './migrate.ts';
+import { LEGACY_COMPOSITING_POLICY } from './composition-ranges.ts';
 import type { ImagePoint } from './raster.ts';
 import type { Analysis, Frame, Light, Lighting, Motion, ObjectProduced, SceneDocument, SceneObject, Style, Symbols, Surface } from './types.ts';
 
@@ -68,14 +68,16 @@ export type NewDocumentInput = {
 };
 
 /**
- * A new scene at the current version, with the default style, symbols,
+ * A new baseline scene, with the default style, symbols,
  * motion, and lighting, and no objects or lights. It is not validated here;
  * the caller's parse is what checks it.
  */
 export function newDocument(input: NewDocumentInput): SceneDocument {
   return {
     format: 'noisy-scene',
-    version: SCENE_VERSION,
+    // Remix activation upgrades on write; opening/importing a photo preserves
+    // the frozen composition path until its session integration is activated.
+    version: 5,
     id: input.id,
     title: input.title,
     createdAt: input.now,
@@ -89,6 +91,10 @@ export function newDocument(input: NewDocumentInput): SceneDocument {
     motion: defaultMotion(),
     lighting: defaultLighting(),
     objects: [],
+    sources: [],
+    removals: [],
+    localEffects: [],
+    compositing: LEGACY_COMPOSITING_POLICY,
     lights: [],
     provenance: { writer: input.writer, importedOn: input.importedOn },
   };
@@ -108,6 +114,8 @@ export function nextObjectName(existing: readonly Pick<SceneObject, 'name'>[]): 
  * subject when the scene has none is left to the edit that adds it.
  */
 export function newObject(input: { readonly id: ObjectId; readonly produced: ObjectProduced; readonly existing: readonly SceneObject[] }): SceneObject {
+  const bounds = input.produced.bounds;
+  const placement = { translate: { x: 0, y: 0 }, pivot: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }, scale: 1, rotation: 0 };
   return {
     id: input.id,
     name: nextObjectName(input.existing),
@@ -118,6 +126,12 @@ export function newObject(input: { readonly id: ObjectId; readonly produced: Obj
     motion: { kind: 'none' },
     thickness: 0.3,
     produced: input.produced,
+    content: { kind: 'source', source: { kind: 'photo' } },
+    origin: { kind: 'photo-region' },
+    placement,
+    home: placement,
+    opacity: 1,
+    depthAttachment: { kind: 'plane', disparity: input.produced.depth?.median ?? .5 },
   };
 }
 

@@ -9,8 +9,11 @@
 import type { Produce, ProduceResult } from './edits.ts';
 import { sameValue } from './equal.ts';
 import type { AssetId } from './ids.ts';
-import { depthProductSchema, describeIssues, objectProducedSchema, plateProductSchema, sceneObjectSchema } from './schema.ts';
-import type { Analysis, SceneDocument } from './types.ts';
+import { compositionAnalysisSchema, compositionDocumentSchema, layerCoverageSchema, repairProductSchema, repairRequestKeySchema, sceneLayerSchema } from './composition-schema.ts';
+import { linkedRemoval } from './reduce.ts';
+import { remixDocumentSchema, serializeRemixDocument } from './remix-schema.ts';
+import { describeIssues } from './schema.ts';
+import type { Analysis, LegacySceneDocument, SceneDocument } from './types.ts';
 import type { z } from './zod.ts';
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -25,7 +28,7 @@ function check<T>(schema: z.ZodType<T>, value: unknown, at: string): Checked<T> 
 }
 
 /** The mask asset of every object, sorted as a plate's `forMasks` is. */
-export function sortedMasks(doc: SceneDocument): readonly AssetId[] {
+export function sortedMasks(doc: SceneDocument | LegacySceneDocument): readonly AssetId[] {
   return doc.objects.map((object) => object.produced.mask.asset).sort();
 }
 
@@ -33,8 +36,8 @@ export function sortedMasks(doc: SceneDocument): readonly AssetId[] {
  * Applies one analysis product. `now` is the time as ISO 8601 in UTC, as
  * `applyEdit` takes it.
  * - `depth` replaces `analysis.depth`, whatever it held.
- * - `plate` replaces `analysis.plate` when its `forMasks` equals the current
- *   objects' mask ids, sorted; a plate made for another set of masks is
+ * - `plate` replaces `analysis.plate` only for the exact required repair key,
+ *   current source extent, and depth map; a late repair for another basis is
  *   unchanged.
  * - `object.depth` replaces the depth statistics of the object with its id,
  *   whatever they held; for an id no object has it is unchanged.
@@ -48,8 +51,12 @@ export function sortedMasks(doc: SceneDocument): readonly AssetId[] {
 export function applyProduce(doc: SceneDocument, product: Produce, now: string): ProduceResult {
   const next = produce(doc, product);
   switch (next.kind) {
-    case 'changed':
+    case 'changed': {
+      // Validate against the document's own version; a v6 read document is checked in its serialized form.
+      const checked = next.doc.version === 6 ? check(remixDocumentSchema, serializeRemixDocument(next.doc), 'document') : check(compositionDocumentSchema, next.doc, 'document');
+      if (!checked.ok) return { kind: 'refused', doc, detail: checked.detail };
       return { kind: 'applied', doc: { ...next.doc, updatedAt: now } };
+    }
     case 'unchanged':
       return { kind: 'unchanged', doc };
     case 'refused':
@@ -71,15 +78,21 @@ const UNCHANGED: Produced = { kind: 'unchanged' };
 function produce(doc: SceneDocument, product: Produce): Produced {
   switch (product.kind) {
     case 'depth': {
-      const depth = check(depthProductSchema, product.depth, 'analysis.depth');
+      const depth = check(compositionAnalysisSchema.unwrap().shape.depth.unwrap(), product.depth, 'analysis.depth');
       if (!depth.ok) return { kind: 'refused', detail: depth.detail };
       if (sameValue(depth.value, doc.analysis.depth)) return UNCHANGED;
-      return { kind: 'changed', doc: { ...doc, analysis: { ...doc.analysis, depth: depth.value } } };
+      return { kind: 'changed', doc: { ...doc, analysis: { ...doc.analysis, depth: depth.value,
+        plate: doc.analysis.plate?.key.depth === depth.value.map.asset ? doc.analysis.plate : null } } };
     }
     case 'plate': {
-      const plate = check(plateProductSchema, product.plate, 'analysis.plate');
+      const plate = check(repairProductSchema, product.plate, 'analysis.plate');
       if (!plate.ok) return { kind: 'refused', detail: plate.detail };
-      if (!sameValue(plate.value.forMasks, sortedMasks(doc))) return UNCHANGED;
+      const required = check(repairRequestKeySchema, product.required, 'required');
+      if (!required.ok) return { kind: 'refused', detail: required.detail };
+      if (!sameValue(plate.value.key, required.value) || plate.value.key.source !== doc.frame.master.asset
+        || !sameValue(plate.value.key.size, doc.frame.master.size) || !sameValue(plate.value.image.size, doc.frame.master.size)
+        || !sameValue(plate.value.backgroundDepth.size, doc.analysis.depth?.map.size ?? doc.frame.master.size)
+        || plate.value.key.depth !== (doc.analysis.depth?.map.asset ?? null)) return UNCHANGED;
       if (sameValue(plate.value, doc.analysis.plate)) return UNCHANGED;
       return { kind: 'changed', doc: { ...doc, analysis: { ...doc.analysis, plate: plate.value } } };
     }
@@ -87,7 +100,7 @@ function produce(doc: SceneDocument, product: Produce): Produced {
       const index = doc.objects.findIndex((object) => object.id === product.id);
       const object = doc.objects[index];
       if (object === undefined) return UNCHANGED;
-      const produced = check(objectProducedSchema, { ...object.produced, depth: product.depth }, `objects[${index}].produced`);
+      const produced = check(layerCoverageSchema, { ...object.produced, depth: product.depth }, `objects[${index}].produced`);
       if (!produced.ok) return { kind: 'refused', detail: produced.detail };
       if (sameValue(produced.value.depth, object.produced.depth)) return UNCHANGED;
       const objects = doc.objects.map((existing, i) => (i === index ? { ...object, produced: { ...object.produced, depth: produced.value.depth } } : existing));
@@ -97,9 +110,10 @@ function produce(doc: SceneDocument, product: Produce): Produced {
       if (doc.analysis.autoSubject === 'done') return UNCHANGED;
       const analysis: Analysis = { ...doc.analysis, autoSubject: 'done' };
       if (product.found === null || doc.objects.length > 0) return { kind: 'changed', doc: { ...doc, analysis } };
-      const found = check(sceneObjectSchema, { ...product.found, subject: true }, 'objects[0]');
+      const found = check(sceneLayerSchema, { ...product.found, subject: true }, 'objects[0]');
       if (!found.ok) return { kind: 'refused', detail: found.detail };
-      return { kind: 'changed', doc: { ...doc, analysis, objects: [found.value] } };
+      return { kind: 'changed', doc: { ...doc, analysis, objects: [found.value],
+        removals: found.value.origin.kind === 'photo-region' ? [...doc.removals, linkedRemoval(found.value)] : doc.removals } };
     }
     default: {
       const unhandled: never = product;

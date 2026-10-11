@@ -1,5 +1,7 @@
 import { GALLERY_LIMITS, galleryDraftSchema, galleryManifestSchema, galleryListItemSchema, isGalleryId,
-  type GalleryAsset, type GalleryPoster, type GalleryManifest } from '../../src/core/gallery.ts';
+  type GalleryAsset, type GalleryPoster, type GalleryManifest, type GalleryDraft } from '../../src/core/gallery.ts';
+import { collectCompositionAssets } from '../../src/core/asset-refs.ts';
+import { validateCompositionAsset } from '../../src/projects/assets.ts';
 import { isAssetId } from '../../src/core/ids.ts';
 import { z } from '../../src/core/zod.ts';
 import type { ProjectsEnv } from './projects.ts';
@@ -105,6 +107,28 @@ function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
     offset += length;
   }
   return null;
+}
+
+/** Frozen v1 planes stay raw; v2/v3 bytes use the same strict codec as Projects. */
+async function validCompositionAsset(draft: GalleryDraft, asset: GalleryAsset, bytes: ArrayBuffer): Promise<boolean> {
+  if (!('version' in draft)) return true;
+  try {
+    const inventory = collectCompositionAssets([{ kind: 'document', document: draft.document }]);
+    if (!inventory.ok) return false;
+    const refs = inventory.value.get(asset.id);
+    if (refs === undefined) return false;
+    await validateCompositionAsset(new Uint8Array(bytes), asset.id, refs);
+    for (const layer of draft.document.objects) {
+      const depth = layer.depthAttachment;
+      if (depth.kind !== 'source' || depth.map.asset !== asset.id) continue;
+      const view = new DataView(bytes);
+      for (let offset = 16; offset < bytes.byteLength; offset += 4) {
+        const sample = view.getFloat32(offset, true) + depth.offset;
+        if (!Number.isFinite(sample) || sample < 0 || sample > 1) return false;
+      }
+    }
+    return true;
+  } catch { return false; }
 }
 
 export async function handleGallery(request: Request, pathname: string, env: GalleryEnv,
@@ -227,8 +251,10 @@ export async function handleGallery(request: Request, pathname: string, env: Gal
         const bytes = await readBody(new Response(object.body), descriptor.byteLength);
         if (bytes === null || bytes.byteLength !== descriptor.byteLength) return error(409, 'The gallery assets are missing or incomplete.');
         if (await digest(bytes) !== descriptor.id) return error(409, 'The gallery asset bytes do not match their id.');
+        if (descriptor.kind !== 'poster' && !await validCompositionAsset(current.draft, descriptor, bytes)) return error(409, 'The gallery composition asset is invalid.');
       }
-      const manifest: GalleryManifest = galleryManifestSchema.parse({ ...current.draft, version: 1, id, publishedAt: new Date().toISOString() });
+      const version = 'version' in current.draft ? current.draft.version : 1;
+      const manifest: GalleryManifest = galleryManifestSchema.parse({ ...current.draft, version, id, publishedAt: new Date().toISOString() });
       await bucket.put(`${prefix}manifest`, jsonBytes(manifest), { httpMetadata: { contentType: 'application/json' }, onlyIf: { etagDoesNotMatch: '*' } });
       if (await afterWrite()) return deleted();
       const raw = await jsonObject(bucket, `${prefix}manifest`);
@@ -252,7 +278,7 @@ export async function handleGallery(request: Request, pathname: string, env: Gal
     if (descriptor.kind === 'poster') {
       const size = jpegSize(new Uint8Array(bytes));
       if (size === null || size.width !== descriptor.size.width || size.height !== descriptor.size.height || Math.max(size.width, size.height) > 1280) return error(400, 'The gallery poster must be a JPEG no larger than 1280 pixels.');
-    }
+    } else if (!await validCompositionAsset(current.draft, descriptor, bytes)) return error(400, 'The gallery composition asset is invalid.');
     await bucket.put(`${prefix}${resource === 'poster' ? 'poster' : `assets/${asset}`}`, bytes, { httpMetadata: { contentType: type } });
     if (await afterWrite()) return deleted();
     return reply({ ok: true });

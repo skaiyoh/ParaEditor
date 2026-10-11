@@ -8,9 +8,9 @@ import { test } from 'node:test';
 import type { Produce, ProduceResult } from '../src/core/edits.ts';
 import { applyProduce, dropSource, sortedMasks } from '../src/core/produce.ts';
 import { applyEdit } from '../src/core/reduce.ts';
-import { parseDocument } from '../src/core/schema.ts';
+import { parseDocument, parseLegacyDocument } from '../src/core/schema.ts';
 import type { SceneDocument } from '../src/core/types.ts';
-import { assetId, fiveClusterDocument, minimalDocument, OBJECT_IDS } from './fixtures/documents.ts';
+import { assetId, fiveClusterDocument, legacyFiveClusterDocument, minimalDocument, OBJECT_IDS } from './fixtures/documents.ts';
 import { minimalWithObject, objectId, tappedObject } from './fixtures/edits.ts';
 import { depthProduct, plateProduct } from './fixtures/products.ts';
 
@@ -128,7 +128,7 @@ test('a plate made for the current sorted mask set replaces the plate', () => {
   const before = fiveClusterDocument();
   assert.deepEqual(sortedMasks(before), [assetId(0x31), assetId(0x32)]);
   const plate = plateProduct(1, sortedMasks(before));
-  const after = applied(applyProduce(before, { kind: 'plate', plate }, NOW));
+  const after = applied(applyProduce(before, { kind: 'plate', plate, required: plate.key }, NOW));
   assert.deepEqual(after.analysis.plate, plate);
   assert.equal(after.analysis.depth, before.analysis.depth);
   assert.equal(after.objects, before.objects);
@@ -141,24 +141,30 @@ test('a stale plate, made for another mask set, changes nothing', () => {
     ['one mask more', [assetId(0x31), assetId(0x32), assetId(0x33)]],
     ['none', []],
   ] as const) {
-    assertUnchanged(before, { kind: 'plate', plate: plateProduct(1, forMasks) }, label);
+    assertUnchanged(before, { kind: 'plate', plate: plateProduct(1, forMasks), required: plateProduct(0, sortedMasks(before), before).key }, label);
   }
   // An object added while the inpaint ran: the plate made for the masks before it is dropped.
   const asked = sortedMasks(before);
   const added = applyEdit(before, { kind: 'object.add', object: { ...tappedObject(objectId(0)), produced: { ...tappedObject(objectId(0)).produced, mask: { asset: assetId(0x30), format: 'u8', size: { width: 1024, height: 768 } } } } }, NOW);
   assert.equal(added.kind, 'applied');
-  assertUnchanged(added.doc, { kind: 'plate', plate: plateProduct(2, asked) }, 'made before an object was added');
-  applied(applyProduce(added.doc, { kind: 'plate', plate: plateProduct(2, sortedMasks(added.doc)) }, NOW), 'made after');
+  assertUnchanged(added.doc, { kind: 'plate', plate: plateProduct(2, asked), required: plateProduct(0, sortedMasks(added.doc), added.doc).key }, 'made before an object was added');
+  applied(applyProduce(added.doc, { kind: 'plate', plate: plateProduct(2, sortedMasks(added.doc), added.doc), required: plateProduct(0, sortedMasks(added.doc), added.doc).key }, NOW), 'made after');
 });
 
-test('a plate for a mask set with a repeated id applies when the objects repeat it, and an unsorted forMasks is refused', () => {
+test('a plate for repeated masks applies, and malformed typed repair keys are refused', () => {
   const twins = { ...minimalWithObject(), objects: [tappedObject(objectId(0)), tappedObject(objectId(1))] };
   assert.deepEqual(sortedMasks(twins), [assetId(0x31), assetId(0x31)]);
-  applied(applyProduce(twins, { kind: 'plate', plate: plateProduct(0, [assetId(0x31), assetId(0x31)]) }, NOW));
+  applied(applyProduce(twins, { kind: 'plate', plate: plateProduct(0, [assetId(0x31), assetId(0x31)], twins), required: plateProduct(0, sortedMasks(twins), twins).key }, NOW));
   const five = fiveClusterDocument();
-  // Unsorted, whether the set is current or stale.
+  const legacy = legacyFiveClusterDocument();
+  assert.ok(legacy.analysis.plate);
+  // The frozen reader keeps the legacy sorted-list guard; v5 uses a typed basis.
   for (const forMasks of [[assetId(0x32), assetId(0x31)], [assetId(0x99), assetId(0x31)]]) {
-    const result = applyProduce(five, { kind: 'plate', plate: plateProduct(0, forMasks) }, NOW);
+    const old = parseLegacyDocument({ ...legacy, analysis: { ...legacy.analysis, plate: { ...legacy.analysis.plate, forMasks } } });
+    assert.equal(old.ok, false, 'an unsorted legacy mask list is still refused');
+    if (!old.ok) { assert.equal(old.error.kind, 'invalid'); assert.ok(old.error.kind === 'invalid' && /analysis.plate.forMasks/.test(old.error.detail)); }
+    const candidate = plateProduct(0, forMasks);
+    const result = applyProduce(five, { kind: 'plate', plate: { ...candidate, key: { ...candidate.key, radius: -1 } }, required: plateProduct(0, sortedMasks(five), five).key }, NOW);
     assert.equal(result.kind, 'refused');
     assert.equal(result.doc, five);
   }
@@ -167,14 +173,14 @@ test('a plate for a mask set with a repeated id applies when the objects repeat 
 test('a plate equal to the one stored is unchanged', () => {
   const before = fiveClusterDocument();
   assert.ok(before.analysis.plate !== null);
-  assertUnchanged(before, { kind: 'plate', plate: { ...before.analysis.plate } }, 'the stored plate');
+  assertUnchanged(before, { kind: 'plate', plate: { ...before.analysis.plate }, required: before.analysis.plate.key }, 'the stored plate');
 });
 
 test('depth replaces the depth product, sets it where there was none, and the same depth again is unchanged', () => {
   const five = fiveClusterDocument();
   const replaced = applied(applyProduce(five, { kind: 'depth', depth: depthProduct(1) }, NOW));
   assert.deepEqual(replaced.analysis.depth, depthProduct(1));
-  assert.equal(replaced.analysis.plate, five.analysis.plate);
+  assert.equal(replaced.analysis.plate, null, 'a changed source depth invalidates the repair basis');
   const set = applied(applyProduce(minimalDocument(), { kind: 'depth', depth: depthProduct(2) }, NOW));
   assert.deepEqual(set.analysis.depth, depthProduct(2));
   assertUnchanged(set, { kind: 'depth', depth: depthProduct(2) }, 'the same depth');
@@ -186,7 +192,7 @@ test('depth replaces the depth product, sets it where there was none, and the sa
 test('no product writes to its input document', () => {
   const products: readonly Produce[] = [
     { kind: 'depth', depth: depthProduct(1) },
-    { kind: 'plate', plate: plateProduct(1, [assetId(0x31), assetId(0x32)]) },
+    { kind: 'plate', plate: plateProduct(1, [assetId(0x31), assetId(0x32)]), required: plateProduct(0, [assetId(0x31), assetId(0x32)]).key },
     { kind: 'object.depth', id: SUBJECT, depth: { p10: 0.1, median: 0.2, p90: 0.3 } },
     { kind: 'auto-subject', found: tappedObject(objectId(9)) },
   ];

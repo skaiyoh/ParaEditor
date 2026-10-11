@@ -9,6 +9,17 @@ export interface EmbeddingCache {
   put(master: AssetId, embeddings: SamEmbeddings): Promise<void>;
 }
 
+/** Optional cache values cross the same boundary as worker-produced tensors. */
+export async function readCachedEmbeddings(cache: EmbeddingCache, master: AssetId, model: ModelId): Promise<SamEmbeddings | null> {
+  try {
+    const embeddings = await cache.get(master, model);
+    if (embeddings === null) return null;
+    const parsed = parseSequenceReply({ type: 'embeddings', embeddings, timings: { sessionMs: 0, inferMs: 0, wasmHighWaterBytes: 0 } });
+    if (!parsed.ok || parsed.value.type !== 'embeddings') return null;
+    return decoderEmbeddings(parsed.value.embeddings, model).ok ? parsed.value.embeddings : null;
+  } catch { return null; }
+}
+
 type Storage = { open(name: string): Promise<Pick<Cache, 'match' | 'put'>> };
 type MemoryEntry = { master: AssetId; embeddings: SamEmbeddings };
 type Write = MemoryEntry & { finish(): void };

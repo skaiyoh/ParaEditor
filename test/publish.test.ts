@@ -3,10 +3,11 @@ import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { createPublishSession, type PublishInput, type PublishProgress } from '../src/session/publish.ts';
-import { createProducts, productAsset } from '../src/session/products.ts';
-import { galleryDraftSchema, galleryIdSchema, type GalleryDraft } from '../src/core/gallery.ts';
+import { createProducts } from '../src/session/products.ts';
+import { decodeRaster } from '../src/core/asset-codec.ts';
+import { GALLERY_LIMITS, galleryDraftSchema, galleryIdSchema, type GalleryDraft } from '../src/core/gallery.ts';
 import { currentDocumentSchema } from '../src/core/schema.ts';
-import { sortedMasks } from '../src/core/produce.ts';
+import { holeRadius, repairHole, sourceRemovalUnion } from '../src/core/derive.ts';
 import * as client from '../src/projects/gallery.ts';
 import { createGalleryTokenStore } from '../src/projects/gallery-tokens.ts';
 import { createGalleryDevice } from '../src/projects/gallery-device.ts';
@@ -45,28 +46,39 @@ function value<T>(result: client.GalleryResult<T>): T { assert.ok(result.ok, res
 async function fixture(type = 'image/jpeg') {
   requests = []; drafts = []; fault = async () => null;
   const products = createProducts(), base = minimalDocument(), rich = fiveClusterDocument();
-  const source = new File([jpeg], 'source.jpg', { type }), sourceId = await productAsset(jpeg);
+  const source = new Uint8Array(jpeg), sourceId = await products.admitBytes(source);
   const size = { width: 2, height: 2 };
   // Nonzero offsets expose accidental copies of the whole backing buffer.
   const mask = new Uint8Array([99, 255, 0, 255, 0, 88]).subarray(1, 5);
   const depth = new Float32Array([99, .1, .3, .7, .9, 88]).subarray(1, 5);
   const plate = new Uint8Array([99, 8, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 88]).subarray(1, 13);
-  const [maskId, depthId, plateId] = await Promise.all([productAsset(mask), productAsset(depth), productAsset(plate)]);
-  products.putMask(maskId, { format: 'u8', size, data: mask });
+  const [maskId, depthId, plateId, masterId] = await Promise.all([
+    products.admitPlane({ format: 'u8', size, data: mask }), products.admitPlane({ format: 'f32', size, data: depth }),
+    products.admitRgb({ size, data: plate }), products.admitRgb({ size, data: new Uint8Array(12).fill(64) }),
+  ]);
   products.putMask(assetId(900), { format: 'u8', size, data: new Uint8Array(4) });
-  products.putDepth(depthId, { format: 'f32', size, data: depth });
-  products.putPlate(plateId, { size, data: plate });
   const objects = rich.objects.map((object) => ({ ...object, produced: { ...object.produced,
-    mask: { asset: maskId, format: 'u8', size }, bounds: { x: 0, y: 0, ...size } } }));
-  const document = currentDocumentSchema.parse({ ...base, objects,
-    frame: { ...base.frame, source: { asset: sourceId, mediaType: type, byteLength: source.size }, original: { name: source.name, mediaType: type, size: { width: 2, height: 1 } } },
+    mask: { asset: maskId, format: 'u8', size }, bounds: { x: 0, y: 0, ...size } },
+    placement: { ...object.placement, pivot: { x: 1, y: 1 } }, home: { ...object.home, pivot: { x: 1, y: 1 } },
+    depthAttachment: { kind: 'source', map: { asset: depthId, format: 'f32', size }, model: DEPTH_MODEL, offset: 0 } }));
+  const unprepared = currentDocumentSchema.parse({ ...base, objects,
+    removals: objects.map((object) => ({ id: object.id, source: { kind: 'photo' }, mask: { plane: object.produced.mask, provenance: object.produced.provenance },
+      threshold: 128, ownership: { kind: 'legacy-layer', layer: object.id } })),
+    frame: { ...base.frame, master: { asset: masterId, size }, source: { asset: sourceId, mediaType: type, byteLength: source.byteLength }, original: { name: 'source.jpg', mediaType: type, size: { width: 2, height: 1 } } },
     analysis: { ...base.analysis, autoSubject: 'done', depth: { model: DEPTH_MODEL, map: { asset: depthId, format: 'f32', size }, stats: { p10: .1, median: .5, p90: .9 } },
-      plate: { model: INPAINT_MODEL, image: { asset: plateId, size }, forMasks: [maskId, maskId] } } });
+      plate: null } });
+  const union = sourceRemovalUnion(unprepared, products.masks), hole = repairHole(unprepared, union);
+  const [removalUnion, holeId] = await Promise.all([products.admitPlane(union), products.admitPlane(hole)]);
+  const document = currentDocumentSchema.parse({ ...unprepared, analysis: { ...unprepared.analysis,
+    plate: { key: { algorithm: 'photo-repair-v2', source: masterId, size, removalUnion, hole: holeId, depth: depthId,
+      radius: holeRadius(unprepared, size), purpose: { kind: 'still' }, model: INPAINT_MODEL }, image: { asset: plateId, size },
+      backgroundDepth: { asset: depthId, format: 'f32', size } } } });
   const store = new MemoryStorage();
-  let input: PublishInput = { document, source, products, gesture: false, exporting: false };
+  let input: PublishInput = { document, products, gesture: false, exporting: false };
   const captures: typeof document[] = [];
   const tokens = createGalleryTokenStore(() => store);
   const host = { read: () => input, tokens,
+    async prepareBackground(_signal: AbortSignal) { throw new Error('Fixture background unavailable.'); },
     renderStill(doc: typeof document) { captures.push(doc); return Promise.resolve(new Blob([jpeg], { type: 'image/jpeg' })); },
     async encodePoster(still: Promise<Blob>) { return { blob: await still, size: { width: 2, height: 1 } }; } };
   return { host, session: createPublishSession(host), store, tokens, document, products, source, captures, mask, depth, plate,
@@ -77,25 +89,25 @@ async function assertGone(id: Parameters<typeof client.manifest>[0]['id']) {
   assert.ok(!value(await client.list()).some((piece) => piece.id === id));
 }
 
-test('readiness distinguishes no photo, gesture, export, missing depth/masks and missing or stale plate even with Motion off', async () => {
+test('readiness permits background preparation but still refuses missing photo, depth, masks, gestures and exports', async () => {
   const f = await fixture();
   assert.deepEqual(f.session.canPublish(), { kind: 'ready' });
   const reason = (expected: string) => { const state = f.session.canPublish(); assert.equal(state.kind, 'unavailable'); if (state.kind === 'unavailable') { assert.equal(state.reason, expected); assert.ok(state.sentence.length > 15); } };
-  f.set({ document: null }); reason('no-photo'); f.set({ document: f.document, source: null }); reason('no-photo');
-  f.set({ source: f.source, gesture: true }); reason('gesture');
+  f.set({ document: null }); reason('no-photo'); f.set({ document: f.document, products: { ...f.products, assets: new Map() } }); reason('no-photo');
+  f.set({ products: f.products, gesture: true }); reason('gesture');
   f.set({ gesture: false, exporting: true }); reason('export'); f.set({ exporting: false });
   f.set({ document: { ...f.document, analysis: { ...f.document.analysis, depth: null } } }); reason('depth');
-  f.set({ document: { ...f.document, analysis: { ...f.document.analysis, plate: null } } }); reason('plate');
+  f.set({ document: { ...f.document, analysis: { ...f.document.analysis, plate: null } } }); assert.deepEqual(f.session.canPublish(), { kind: 'ready' });
   const plate = f.document.analysis.plate; assert.ok(plate);
-  f.set({ document: { ...f.document, analysis: { ...f.document.analysis, plate: { ...plate, forMasks: [assetId(4)] } } } }); reason('plate');
+  f.set({ document: { ...f.document, analysis: { ...f.document.analysis, plate: { ...plate, key: { ...plate.key, removalUnion: assetId(4) } } } } }); assert.deepEqual(f.session.canPublish(), { kind: 'ready' });
   f.set({ document: f.document });
   const mask = f.document.objects[0]?.produced.mask.asset; assert.ok(mask); f.products.dropMask(mask); reason('masks');
   const refused = await f.session.publish(); assert.equal(refused.kind, 'failed'); assert.equal(requests.length, 0);
 });
 
-test('zero-object readiness requires depth but no plate; objects still require a resident, matching plate', async () => {
+test('zero-object readiness requires depth but no plate; missing object plates are prepared by Publish', async () => {
   const f = await fixture();
-  const empty = { ...f.document, objects: [], analysis: { ...f.document.analysis, plate: null } };
+  const empty = { ...f.document, objects: [], removals: [], analysis: { ...f.document.analysis, plate: null } };
   f.set({ document: empty }); assert.deepEqual(f.session.canPublish(), { kind: 'ready' });
   f.set({ document: { ...empty, motion: { ...empty.motion, enabled: true } } });
   assert.deepEqual(f.session.canPublish(), { kind: 'ready' });
@@ -107,31 +119,89 @@ test('zero-object readiness requires depth but no plate; objects still require a
   const unavailable = f.session.canPublish(); assert.ok(unavailable.kind === 'unavailable'); assert.equal(unavailable.reason, 'depth');
   f.set({ document: f.document, products: { ...f.products, plates: new Map() } });
   const plate = f.document.analysis.plate; assert.ok(plate);
-  const missing = f.session.canPublish(); assert.ok(missing.kind === 'unavailable'); assert.equal(missing.reason, 'plate');
+  assert.deepEqual(f.session.canPublish(), { kind: 'ready' });
   assert.equal((await f.session.publish()).kind, 'failed'); assert.deepEqual(requests, []);
 });
 
-test('zero-object snapshot keeps its null plate and uploads only source, depth and poster', async () => {
+for (const missing of ['plate', 'pixels', 'stale'] as const) test(`Publish prepares ${missing} background with Motion off before snapshot or network`, async () => {
+  const f = await fixture(), progress: PublishProgress[] = [], prepared = Promise.withResolvers<void>();
+  const plate = f.document.analysis.plate; assert.ok(plate);
+  assert.equal(f.document.motion.enabled, false);
+  f.set(missing === 'pixels' ? { products: { ...f.products, plates: new Map() } } : {
+    document: { ...f.document, analysis: { ...f.document.analysis, plate: missing === 'plate' ? null
+      : { ...plate, key: { ...plate.key, hole: assetId(42) } } } },
+  });
+  let calls = 0;
+  const session = createPublishSession({ ...f.host, async prepareBackground(signal) {
+    calls++; assert.equal(signal.aborted, false); await prepared.promise;
+    f.set({ document: f.document, products: f.products });
+  } });
+  const pending = session.publish({ onProgress: p => progress.push(p) });
+  assert.equal(calls, 1); assert.deepEqual(requests, []); assert.deepEqual(f.captures, []);
+  assert.deepEqual(progress, [{ phase: 'preparing', completed: 0, total: 1, sentence: 'Preparing the background.' }]);
+  assert.equal(session.canPublish().kind, 'unavailable');
+  assert.equal((await session.publish()).kind, 'failed');
+  prepared.resolve(); const result = await pending; assert.ok(result.kind === 'published', JSON.stringify(result));
+  try {
+    assert.equal(progress[1]?.phase, 'snapshot'); assert.deepEqual(f.captures, [f.document]);
+    assert.equal(value(await client.manifest({ id: result.id })).document.motion.enabled, false);
+  } finally { await session.unpublish(result.id); }
+});
+
+test('background cancellation reaches preparation and never captures or creates a draft, including late completion', async () => {
+  const f = await fixture(), prepared = Promise.withResolvers<void>(), controller = new AbortController();
+  f.set({ document: { ...f.document, analysis: { ...f.document.analysis, plate: null } } });
+  let aborted = false;
+  const session = createPublishSession({ ...f.host, async prepareBackground(signal) {
+    signal.addEventListener('abort', () => { aborted = true; }, { once: true });
+    await prepared.promise; f.set({ document: f.document });
+  } });
+  const pending = session.publish({ signal: controller.signal }); controller.abort();
+  assert.deepEqual(await pending, { kind: 'failed', sentence: 'Publishing was cancelled.' });
+  assert.equal(aborted, true); prepared.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(requests, []); assert.deepEqual(f.captures, []);
+});
+
+test('background failure is plain, retryable and does not expose inference diagnostics', async () => {
+  const f = await fixture();
+  f.set({ document: { ...f.document, analysis: { ...f.document.analysis, plate: null } } });
+  const result = await f.session.publish();
+  assert.deepEqual(result, { kind: 'failed', sentence: 'The background could not be prepared. Please try publishing again.' });
+  assert.deepEqual(f.session.canPublish(), { kind: 'ready' }); assert.deepEqual(requests, []);
+});
+
+test('an edit during preparation requires another Publish instead of publishing the changed photo', async () => {
+  const f = await fixture();
+  f.set({ document: { ...f.document, analysis: { ...f.document.analysis, plate: null } } });
+  const session = createPublishSession({ ...f.host, async prepareBackground() {
+    f.set({ document: { ...f.document, title: 'Changed while preparing' } });
+  } });
+  assert.deepEqual(await session.publish(), { kind: 'failed', sentence: 'The photo changed while preparing the background. Please publish again.' });
+  assert.deepEqual(requests, []); assert.deepEqual(f.captures, []);
+});
+
+test('zero-object snapshot keeps its null plate and uploads only original, master, depth and poster', async () => {
   const f = await fixture(), progress: PublishProgress[] = [];
-  const empty = { ...f.document, objects: [], motion: { ...f.document.motion, enabled: true }, analysis: { ...f.document.analysis, plate: null } };
+  const empty = { ...f.document, objects: [], removals: [], motion: { ...f.document.motion, enabled: true }, analysis: { ...f.document.analysis, plate: null } };
   f.set({ document: empty });
   const result = await f.session.publish({ onProgress: (p) => progress.push(p) }); assert.ok(result.kind === 'published');
   try {
     const manifest = value(await client.manifest({ id: result.id }));
     assert.deepEqual(manifest.document, empty); assert.equal(manifest.document.analysis.plate, null);
-    assert.deepEqual(manifest.assets.map((asset) => asset.kind), ['source', 'depth']);
-    assert.equal(requests.filter((r) => r.method === 'PUT').length, 3);
+    assert.equal(manifest.version, 2);
+    assert.deepEqual(manifest.assets.map((asset) => asset.kind), ['source', 'png', 'raster']);
+    assert.equal(requests.filter((r) => r.method === 'PUT').length, 4);
     assert.ok(!requests.some((r) => r.path.endsWith(f.document.analysis.plate?.image.asset ?? 'invalid')));
-    assert.deepEqual(progress.map((p) => p.phase), ['snapshot', 'creating', 'uploading', 'uploading', 'uploading', 'publishing', 'published']);
-    assert.ok(progress.every((p) => p.total === 3)); assert.deepEqual(f.captures, [empty]);
+    assert.deepEqual(progress.map((p) => p.phase), ['snapshot', 'creating', 'uploading', 'uploading', 'uploading', 'uploading', 'publishing', 'published']);
+    assert.ok(progress.every((p) => p.total === 4)); assert.deepEqual(f.captures, [empty]);
     const content = await loadGallery(result.url, new AbortController().signal); assert.ok(content);
     const piece = await content.loadPiece(new AbortController().signal);
-    assert.equal(piece.planes.size, 1); assert.deepEqual(piece.document, empty);
+    assert.ok('assets' in piece); assert.equal(piece.assets.size, 3); assert.deepEqual(piece.document, empty);
   } finally { await f.session.unpublish(result.id); }
 });
 
 test('zero-object documents retaining a plate are refused without normalizing the committed document', async () => {
-  const f = await fixture(), empty = { ...f.document, objects: [] };
+  const f = await fixture(), empty = { ...f.document, objects: [], removals: [] };
   f.set({ document: empty });
   const state = f.session.canPublish(); assert.ok(state.kind === 'unavailable');
   assert.equal(state.reason, 'plate'); assert.match(state.sentence, /retains a background plate/);
@@ -139,29 +209,30 @@ test('zero-object documents retaining a plate are refused without normalizing th
   assert.equal(empty.analysis.plate, f.document.analysis.plate);
 });
 
-test('publish freezes committed document, original File and exact referenced bytes before callbacks; progress is ordered and tokens survive a new session', async () => {
+test('publish freezes committed document, original asset and exact encoded referenced bytes before callbacks; progress is ordered and tokens survive a new session', async () => {
   const f = await fixture(), progress: PublishProgress[] = [];
-  const expectedMask = f.mask.slice(), expectedDepth = new Uint8Array(f.depth.buffer, f.depth.byteOffset, f.depth.byteLength).slice(), expectedPlate = f.plate.slice();
+  const expectedBytes = new Map([...f.products.assets].map(([id, bytes]) => [id, bytes.slice()]));
   const result = await f.session.publish({ onProgress(update) {
     progress.push(update);
     if (update.phase === 'snapshot') {
       assert.equal(f.session.canPublish().kind, 'unavailable');
       f.mask.fill(1); f.depth.fill(0); f.plate.fill(2);
-      f.set({ document: { ...f.document, title: 'Edited after publish', style: { ...f.document.style, fry: .9 } }, source: new File(['next'], 'next.jpg') });
+      for (const bytes of f.products.assets.values()) bytes.fill(3);
+      f.set({ document: { ...f.document, title: 'Edited after publish', style: { ...f.document.style, fry: .9 } }, products: createProducts() });
     }
   } });
   assert.equal(result.kind, 'published'); assert.ok(result.kind === 'published');
   try {
     assert.equal(result.device, 'persistent'); assert.equal(result.url, `/gallery/${result.id}`);
-    assert.deepEqual(progress.map((p) => p.phase), ['snapshot', 'creating', 'uploading', 'uploading', 'uploading', 'uploading', 'uploading', 'publishing', 'published']);
-    assert.deepEqual(progress.filter((p) => p.phase === 'uploading').map((p) => p.completed), [1, 2, 3, 4, 5]);
-    assert.ok(progress.every((p) => p.total === 5));
+    assert.deepEqual(progress.map((p) => p.phase), ['snapshot', 'creating', ...Array<string>(7).fill('uploading'), 'publishing', 'published']);
+    assert.deepEqual(progress.filter((p) => p.phase === 'uploading').map((p) => p.completed), [1, 2, 3, 4, 5, 6, 7]);
+    assert.ok(progress.every((p) => p.total === 7));
     assert.deepEqual(f.captures, [f.document]); assert.notEqual(f.captures[0], f.document);
     const manifest = value(await client.manifest({ id: result.id }));
-    assert.deepEqual(manifest.document, f.document); assert.deepEqual(manifest.assets.map((a) => a.kind), ['source', 'mask', 'depth', 'plate']);
-    assert.deepEqual(manifest.document.analysis.plate?.forMasks, sortedMasks(f.document));
-    const bytes = new Map([['source', jpeg], ['mask', expectedMask], ['depth', expectedDepth], ['plate', expectedPlate]]);
-    for (const asset of manifest.assets) { const expected = bytes.get(asset.kind); assert.ok(expected); assert.deepEqual(new Uint8Array(await (await fetch(value(client.assetUrl({ id: result.id, asset: asset.id })))).arrayBuffer()), new Uint8Array(expected)); }
+    assert.deepEqual(manifest.document, f.document); assert.deepEqual(manifest.assets.map((a) => a.kind), ['source', 'png', 'raster', 'png', 'raster', 'raster']);
+    assert.equal(manifest.version, 2); assert.ok(manifest.version === 2);
+    assert.deepEqual(manifest.document.analysis.plate?.key, f.document.analysis.plate?.key);
+    for (const asset of manifest.assets) { const expected = expectedBytes.get(asset.id); assert.ok(expected); assert.deepEqual(new Uint8Array(await (await fetch(value(client.assetUrl({ id: result.id, asset: asset.id })))).arrayBuffer()), new Uint8Array(expected)); }
     assert.deepEqual(new Uint8Array(await (await fetch(`/api/gallery/${result.id}/poster`)).arrayBuffer()), new Uint8Array(jpeg));
     const reloaded = createPublishSession({ ...f.host, tokens: createGalleryTokenStore(() => f.store) });
     assert.deepEqual(reloaded.publishedHere(), [result.id]);
@@ -169,6 +240,24 @@ test('publish freezes committed document, original File and exact referenced byt
     assert.deepEqual(await reloaded.unpublish(result.id), { kind: 'unpublished', id: result.id });
     assert.deepEqual(reloaded.publishedHere(), []); assert.equal(f.store.length, 0); await assertGone(result.id);
   } finally { await f.session.unpublish(result.id); }
+});
+
+test('gallery schema failure gives recovery wording without blaming snapshot size', async () => {
+  const f = await fixture(), source = f.document.frame.source; assert.ok(source);
+  f.set({ document: { ...f.document, frame: { ...f.document.frame, source: { ...source, byteLength: source.byteLength + 1 } } } });
+  assert.deepEqual(await f.session.publish(), {
+    kind: 'failed', sentence: 'This project could not be prepared for the gallery. Save it and try again.',
+  });
+  assert.equal(f.captures.length, 1); assert.deepEqual(requests, []);
+});
+
+test('encoded asset size limits retain the gallery snapshot requirements wording', async () => {
+  const f = await fixture(), source = f.document.frame.source; assert.ok(source);
+  const assets = new Map(f.products.assets);
+  assets.set(source.asset, new Uint8Array(GALLERY_LIMITS.piece));
+  f.set({ products: { ...f.products, assets } });
+  assert.deepEqual(await f.session.publish(), { kind: 'failed', sentence: 'This photo cannot fit the gallery snapshot requirements.' });
+  assert.deepEqual(f.captures, []); assert.deepEqual(requests, []);
 });
 
 test('empty source MIME is normalized consistently without changing original bytes', async () => {
@@ -194,8 +283,34 @@ test('abort while poster encoding is pending returns without creating a draft', 
   const result = session.publish({ signal: controller.signal }); controller.abort();
   assert.deepEqual(await result, { kind: 'failed', sentence: 'Publishing was cancelled.' });
   assert.deepEqual(requests, []);
+  const draining = session.canPublish(); assert.equal(draining.kind, 'unavailable');
+  if (draining.kind === 'unavailable') assert.equal(draining.reason, 'publishing');
   encoding.reject(new Error('A late encoder failure is observed.'));
+  await Promise.allSettled([encoding.promise]);
   assert.deepEqual(session.canPublish(), { kind: 'ready' });
+});
+
+test('cancelled publication retains one capture slot until both native jobs settle', async () => {
+  const f = await fixture(), controller = new AbortController();
+  const still = Promise.withResolvers<Blob>(), encoding = Promise.withResolvers<{ blob: Blob; size: { width: number; height: number } }>();
+  let captures = 0, drainNotifications = 0;
+  const session = createPublishSession({ ...f.host,
+    renderStill: () => { captures++; return still.promise; }, encodePoster: () => encoding.promise,
+    onReadinessChanged: () => { drainNotifications++; } });
+  const cancelled = session.publish({ signal: controller.signal }); controller.abort();
+  assert.deepEqual(await cancelled, { kind: 'failed', sentence: 'Publishing was cancelled.' });
+  for (let i = 0; i < 6; i++) assert.equal((await session.publish()).kind, 'failed');
+  assert.equal(captures, 1); assert.deepEqual(requests, []);
+  encoding.resolve({ blob: new Blob(['poster'], { type: 'image/jpeg' }), size: { width: 2, height: 1 } });
+  await encoding.promise;
+  assert.equal(session.canPublish().kind, 'unavailable');
+  assert.equal(drainNotifications, 0);
+  assert.equal((await session.publish()).kind, 'failed'); assert.equal(captures, 1);
+  still.resolve(new Blob(['still'], { type: 'image/png' }));
+  await Promise.allSettled([still.promise, encoding.promise]);
+  assert.deepEqual(session.canPublish(), { kind: 'ready' });
+  assert.equal(drainNotifications, 1);
+  assert.equal(captures, 1); assert.deepEqual(requests, []);
 });
 
 for (const mode of ['abort', 'upload-failure', 'lost-publish-response'] as const) test(`${mode} cleans up its private or uncertain draft without leaving a published piece`, async () => {
@@ -282,7 +397,7 @@ test('blocked storage length and stale entries after blocked removal cannot expo
   assert.equal(f.tokens.tokenFor(published.id), null); assert.deepEqual(f.tokens.publishedHere(), []); await assertGone(published.id);
 });
 
-test('manifest loader returns exact source and little-endian planes; list and missing/corrupt asset failures retain poster metadata', async () => {
+test('manifest loader returns exact original and NSRA little-endian planes; list and missing/corrupt asset failures retain poster metadata', async () => {
   const f = await fixture(), result = await f.session.publish(); assert.ok(result.kind === 'published');
   const signal = new AbortController().signal;
   try {
@@ -291,9 +406,12 @@ test('manifest loader returns exact source and little-endian planes; list and mi
     const piece = await content.loadPiece(signal); assert.deepEqual(piece.document, f.document);
     const cancelled = new AbortController(); cancelled.abort();
     await assert.rejects(content.loadPiece(cancelled.signal), (e: unknown) => e instanceof GalleryLoadError && e.failure.kind === 'aborted');
-    assert.deepEqual(new Uint8Array(await piece.source.arrayBuffer()), new Uint8Array(jpeg));
+    assert.ok('assets' in piece);
+    const original = f.document.frame.source; assert.ok(original);
+    assert.deepEqual(piece.assets.get(original.asset), new Uint8Array(jpeg));
     const depth = f.document.analysis.depth; assert.ok(depth);
-    assert.deepEqual(piece.planes.get(depth.map.asset)?.data, f.depth);
+    const bytes = piece.assets.get(depth.map.asset); assert.ok(bytes);
+    assert.deepEqual(decodeRaster(bytes, depth.map).data, f.depth);
     assert.ok(value(await listGallery()).some((p) => p.id === result.id));
     fault = async (url) => url.includes('/assets/') ? new Response('missing', { status: 404 }) : null;
     await assert.rejects(content.loadPiece(signal), (e: unknown) => e instanceof GalleryLoadError && e.failure.kind === 'missing-asset');

@@ -10,25 +10,27 @@
 // Pure: no browser global, no Node API, no I/O, no clock.
 
 import type { Edit, EditResult, LightPatch, ObjectPatch, Refusal, Restore, StylePatch } from './edits.ts';
+import { applyCompositionEdit, applyCompositionEdits } from './composition.ts';
+import { compositionDocumentSchema, layerCoverageSchema, removalIdSchema, sceneLayerSchema } from './composition-schema.ts';
+import { COMPOSITION_LIMITS } from './composition-ranges.ts';
 import { sameValue } from './equal.ts';
-import { FRIED_FIELDS, fryCurve } from './fry.ts';
+import { fryCurve } from './fry.ts';
 import type { NonEmpty } from './ids.ts';
 import { clampToRange, LENGTHS, type ClampPath } from './ranges.ts';
 import { err, ok, type Result } from './result.ts';
+import { grainBinding, remixDocumentSchema, serializeRemixDocument, withDerivedGrainStyle, type GrainControl, type RemixReadDocument } from './remix-schema.ts';
 import {
   describeIssues,
   lightingSchema,
   lightSchema,
   motionSchema,
-  objectProducedSchema,
   paletteTargetSchema,
-  sceneObjectSchema,
   styleSchema,
   symbolsSchema,
   surfaceSchema,
   titleSchema,
 } from './schema.ts';
-import type { Lighting, Motion, SceneDocument, Symbols, Surface } from './types.ts';
+import type { CompositionDocument, CompositionEdit, FrozenCompositionDocument, Lighting, Motion, SceneDocument, SceneObject, SourceRemoval, Symbols, Surface } from './types.ts';
 import type { z } from './zod.ts';
 
 // ---------------------------------------------------------------------------
@@ -238,8 +240,60 @@ function findIndexById<T extends { readonly id: string }>(items: readonly T[], i
   return item === undefined ? err({ reason: 'unknown-id', detail: `no ${what} has the id ${String(id)}` }) : ok({ index, item });
 }
 
-/** The keys of the style a `fry` edit rewrites: `fry` and the eight fried fields. */
-const FRY_KEYS = ['fry', ...FRIED_FIELDS] as const;
+const GRAIN_CONTROLS: readonly GrainControl[] = ['grain', 'colorNoise', 'grainSize', 'grainHold'];
+
+/** Legacy controls and Fry write the instance and remaining style as one edit. */
+function reduceStyle(doc: SceneDocument, patch: StylePatch): Result<Reduced, Refusal> {
+  const view = withDerivedGrainStyle(doc);
+  const patched = applyPatch({ current: view.style, patch, coercers: STYLE, schema: styleSchema, at: 'style' });
+  if (!patched.ok) return patched;
+  let instances = view.version === 6 ? view.remix.instances : null;
+  for (const control of GRAIN_CONTROLS) {
+    if (view.version !== 6 || !patched.value.keys.includes(control)) continue;
+    const binding = grainBinding(view, control);
+    if (binding.kind === 'unavailable') return err({ reason: 'invalid', detail: binding.reason });
+    instances = instances?.map((instance) => instance.id === binding.instance
+      ? { ...instance, parameters: { ...instance.parameters, [binding.parameter]: patched.value.next[control] } } : instance) ?? null;
+  }
+  if (!patched.value.changed) return UNCHANGED;
+  const next: SceneDocument = view.version === 6 && instances !== null
+    ? withDerivedGrainStyle({ ...view, style: patched.value.next, remix: { ...view.remix, instances } })
+    : { ...view, style: patched.value.next };
+  return reduced(next, [{ kind: 'style', patch: patched.value.previous }]);
+}
+
+/** Frozen v5 composition transactions operate on common fields only. */
+function compositionView(doc: SceneDocument): FrozenCompositionDocument {
+  if (doc.version === 5) return doc;
+  const { remix: _remix, paint: _paint, policyTransition: _transition, ...common } = doc;
+  return { ...common, version: 5 };
+}
+
+function keepRemix(doc: SceneDocument, changed: CompositionDocument): SceneDocument {
+  return doc.version === 5 ? changed : { ...changed, version: 6, remix: doc.remix, paint: doc.paint, policyTransition: doc.policyTransition };
+}
+
+/** Undo restores readable legacy layers without admitting a new creation. */
+function compositionInverse(doc: SceneDocument, inverse: NonEmpty<CompositionEdit>): NonEmpty<Edit> {
+  if (doc.version === 5) return inverse;
+  const restore = (edit: CompositionEdit): Edit => edit.kind === 'layer.add'
+    ? { kind: 'object.add', object: edit.layer, restore: { index: edit.index } } : edit;
+  const [first, ...rest] = inverse;
+  return [restore(first), ...rest.map(restore)];
+}
+
+/** Paint and photo layers share the editor's creation budget. */
+function preflightLayerAdds(doc: SceneDocument, edits: readonly CompositionEdit[]): Result<null, Refusal> {
+  if (doc.version !== 6) return ok(null);
+  let count = doc.objects.length + doc.paint.layers.length;
+  for (const edit of edits) {
+    if (edit.kind === 'layer.remove') count--;
+    if (edit.kind === 'layer.add' && ++count > COMPOSITION_LIMITS.createdLayers) {
+      return err({ reason: 'limit', detail: 'Create at most eight top-level layers in this editor.' });
+    }
+  }
+  return ok(null);
+}
 
 function reduce(doc: SceneDocument, edit: Edit): Result<Reduced, Refusal> {
   switch (edit.kind) {
@@ -250,10 +304,7 @@ function reduce(doc: SceneDocument, edit: Edit): Result<Reduced, Refusal> {
       return reduced({ ...doc, title: title.value }, [{ kind: 'title', title: doc.title }]);
     }
     case 'style': {
-      const patched = applyPatch({ current: doc.style, patch: edit.patch, coercers: STYLE, schema: styleSchema, at: 'style' });
-      if (!patched.ok) return patched;
-      if (!patched.value.changed) return UNCHANGED;
-      return reduced({ ...doc, style: patched.value.next }, [{ kind: 'style', patch: patched.value.previous }]);
+      return reduceStyle(doc, edit.patch);
     }
     case 'fry': {
       const coerced = num('style.fry')(edit.fry, 'fry');
@@ -261,9 +312,7 @@ function reduce(doc: SceneDocument, edit: Edit): Result<Reduced, Refusal> {
       if (typeof coerced.value !== 'number') return err({ reason: 'invalid', detail: 'fry is not a number' });
       const fry = coerced.value;
       const fried = fryCurve(fry);
-      if (Object.is(doc.style.fry, fry) && FRIED_FIELDS.every((field) => Object.is(doc.style[field], fried[field]))) return UNCHANGED;
-      const style = { ...doc.style, fry, ...fried };
-      return reduced({ ...doc, style }, [{ kind: 'style', patch: pick(doc.style, FRY_KEYS) }]);
+      return reduceStyle(doc, { fry, ...fried });
     }
     case 'symbols': {
       const patched = applyPatch({ current: doc.symbols, patch: edit.patch, coercers: SYMBOLS, schema: symbolsSchema, at: 'symbols' });
@@ -298,7 +347,7 @@ function reduce(doc: SceneDocument, edit: Edit): Result<Reduced, Refusal> {
       if (!found.ok) return found;
       const { index, item } = found.value;
       if (typeof edit.name !== 'string' || edit.name.trim().length === 0) return err({ reason: 'invalid', detail: 'Enter a layer name.' });
-      const checked = parseWith(sceneObjectSchema, { ...item, name: edit.name }, `objects[${index}]`);
+      const checked = parseWith(sceneLayerSchema, { ...item, name: edit.name }, `objects[${index}]`);
       if (!checked.ok) return checked;
       if (checked.value.name === item.name) return UNCHANGED;
       return reduced({ ...doc, objects: replaceAt(doc.objects, index, { ...item, name: checked.value.name }) }, [{ kind: 'object.set', id: item.id, patch: { name: item.name } }]);
@@ -316,7 +365,7 @@ function reduce(doc: SceneDocument, edit: Edit): Result<Reduced, Refusal> {
       const found = findIndexById(doc.objects, edit.id, 'object');
       if (!found.ok) return found;
       const { index, item } = found.value;
-      const patched = applyPatch({ current: item, patch: edit.patch, coercers: OBJECT, schema: sceneObjectSchema, at: `objects[${index}]` });
+      const patched = applyPatch({ current: item, patch: edit.patch, coercers: OBJECT, schema: sceneLayerSchema, at: `objects[${index}]` });
       if (!patched.ok) return patched;
       const { next, keys, previous, changed } = patched.value;
       const objects = replaceAt(doc.objects, index, next);
@@ -338,17 +387,35 @@ function reduce(doc: SceneDocument, edit: Edit): Result<Reduced, Refusal> {
       const found = findIndexById(doc.objects, edit.id, 'object');
       if (!found.ok) return found;
       const { index, item } = found.value;
-      const produced = parseWith(objectProducedSchema, edit.produced, `objects[${index}].produced`);
+      const produced = parseWith(layerCoverageSchema, edit.produced, `objects[${index}].produced`);
       if (!produced.ok) return produced;
       if (sameValue(produced.value, item.produced)) return UNCHANGED;
       const objects = replaceAt(doc.objects, index, { ...item, produced: produced.value });
-      return reduced({ ...doc, objects }, [{ kind: 'object.refine', id: item.id, produced: item.produced }]);
+      const inverse: [Edit, ...Edit[]] = [{ kind: 'object.refine', id: item.id, produced: item.produced }];
+      const removals = doc.removals.map((removal, removalIndex) => {
+        if (removal.ownership.kind !== 'legacy-layer' || removal.ownership.layer !== item.id) return removal;
+        inverse.push({ kind: 'removal.set', id: removal.id, value: removal, index: removalIndex });
+        return { ...removal, mask: { plane: produced.value.mask, provenance: produced.value.provenance },
+          threshold: produced.value.sampling === 'legacy-threshold' ? 128 : 1 } satisfies SourceRemoval;
+      });
+      return reduced({ ...doc, objects, removals }, inverse);
     }
     case 'object.remove': {
       const found = findIndexById(doc.objects, edit.id, 'object');
       if (!found.ok) return found;
       const { index, item } = found.value;
-      return reduced({ ...doc, objects: removeAt(doc.objects, index) }, [{ kind: 'object.add', object: item, restore: { index } }]);
+      const inverse: [Edit, ...Edit[]] = [{ kind: 'object.add', object: item, restore: { index } }];
+      const localEffects = doc.localEffects.filter((effect, effectIndex) => {
+        if (effect.owner.kind !== 'layer' || effect.owner.id !== item.id) return true;
+        inverse.push({ kind: 'effect.set', id: effect.id, value: effect, index: effectIndex });
+        return false;
+      });
+      const removals = doc.removals.filter((removal, removalIndex) => {
+        if (removal.ownership.kind !== 'legacy-layer' || removal.ownership.layer !== item.id) return true;
+        inverse.push({ kind: 'removal.set', id: removal.id, value: removal, index: removalIndex });
+        return false;
+      });
+      return reduced({ ...doc, objects: removeAt(doc.objects, index), localEffects, removals }, inverse);
     }
     case 'light.add':
       return reduceLightAdd(doc, edit);
@@ -367,6 +434,14 @@ function reduce(doc: SceneDocument, edit: Edit): Result<Reduced, Refusal> {
       if (!found.ok) return found;
       const { index, item } = found.value;
       return reduced({ ...doc, lights: removeAt(doc.lights, index) }, [{ kind: 'light.add', light: item, restore: { index } }]);
+    }
+    case 'layer.add': case 'layer.remove': case 'layer.placement': case 'layer.opacity': case 'layer.coverage': case 'layer.depth':
+    case 'source.add': case 'source.remove': case 'removal.set': case 'effect.set': case 'compositing': {
+      const admission = preflightLayerAdds(doc, [edit]);
+      if (!admission.ok) return admission;
+      const result = applyCompositionEdit(compositionView(doc), edit, doc.updatedAt);
+      if (result.kind === 'refused') return err({ reason: result.reason, detail: result.detail });
+      return result.kind === 'unchanged' ? UNCHANGED : reduced(keepRemix(doc, result.doc), compositionInverse(doc, result.inverse));
     }
     default: {
       const unhandled: never = edit;
@@ -412,17 +487,32 @@ function reducePaletteTarget(doc: SceneDocument, edit: Extract<Edit, { kind: 'pa
  */
 function reduceObjectAdd(doc: SceneDocument, edit: Extract<Edit, { kind: 'object.add' }>): Result<Reduced, Refusal> {
   if (doc.objects.length >= LENGTHS.objects.max) return err({ reason: 'limit', detail: `the scene already has ${LENGTHS.objects.max} objects` });
+  if (doc.version === 6 && edit.restore === undefined && doc.objects.length + doc.paint.layers.length >= COMPOSITION_LIMITS.createdLayers) {
+    return err({ reason: 'limit', detail: 'Create at most eight top-level layers in this editor.' });
+  }
   const index = restoreIndex(edit.restore, doc.objects.length);
   if (!index.ok) return index;
   const coerced = fields(OBJECT)(edit.object, 'object');
   if (!coerced.ok) return coerced;
-  const object = parseWith(sceneObjectSchema, coerced.value, 'object');
+  const object = parseWith(sceneLayerSchema, coerced.value, 'object');
   if (!object.ok) return object;
   const added = object.value;
   if (doc.objects.some((existing) => existing.id === added.id)) return err({ reason: 'duplicate-id', detail: `an object has the id ${added.id}` });
   const first = index.value === null && !added.subject && !doc.objects.some((existing) => existing.subject);
   const objects = insertAt(doc.objects, index.value, first ? { ...added, subject: true } : added);
-  return reduced({ ...doc, objects }, [{ kind: 'object.remove', id: added.id }]);
+  const removal = edit.restore === undefined && added.origin.kind === 'photo-region' ? linkedRemoval(added) : null;
+  if (removal !== null && doc.removals.some((existing) => existing.id === removal.id)) {
+    return err({ reason: 'duplicate-id', detail: `a removal has the id ${removal.id}` });
+  }
+  return reduced({ ...doc, objects, removals: removal === null ? doc.removals : [...doc.removals, removal] }, [{ kind: 'object.remove', id: added.id }]);
+}
+
+/** A region's original photo footprint follows its coverage, independently of its visibility. */
+export function linkedRemoval(layer: SceneObject): SourceRemoval {
+  return { id: removalIdSchema.parse(layer.id), source: { kind: 'photo' },
+    mask: { plane: layer.produced.mask, provenance: layer.produced.provenance },
+    threshold: layer.produced.sampling === 'legacy-threshold' ? 128 : 1,
+    ownership: { kind: 'legacy-layer', layer: layer.id } };
 }
 
 /** Adds a light: appended, or put back at its index by a restoring add. */
@@ -453,11 +543,13 @@ function reduceLightAdd(doc: SceneDocument, edit: Extract<Edit, { kind: 'light.a
  * document's schema requires; it is not checked here.
  */
 export function applyEdit(doc: SceneDocument, edit: Edit, now: string): EditResult {
-  const result = reduce(doc, edit);
-  if (!result.ok) return { kind: 'refused', doc, ...result.error };
-  const value = result.value;
-  if (value.kind === 'unchanged') return { kind: 'unchanged', doc };
-  return { kind: 'applied', doc: { ...value.doc, updatedAt: now }, inverse: value.inverse };
+  return applyEdits(doc, [edit], now);
+}
+
+function isCompositionEdit(edit: Edit): edit is CompositionEdit {
+  return edit.kind === 'layer.add' || edit.kind === 'layer.remove' || edit.kind === 'layer.placement' || edit.kind === 'layer.opacity'
+    || edit.kind === 'layer.coverage' || edit.kind === 'layer.depth' || edit.kind === 'source.add' || edit.kind === 'source.remove'
+    || edit.kind === 'removal.set' || edit.kind === 'effect.set' || edit.kind === 'compositing';
 }
 
 /**
@@ -471,10 +563,24 @@ export function applyEdit(doc: SceneDocument, edit: Edit, now: string): EditResu
  */
 export function applyEdits(doc: SceneDocument, edits: NonEmpty<Edit>, now: string): EditResult {
   if (edits.length === 0) return { kind: 'refused', doc, reason: 'invalid', detail: 'the list of edits is empty' };
+  const composition = edits.filter(isCompositionEdit);
+  const [firstComposition, ...restComposition] = composition;
+  if (composition.length === edits.length && firstComposition !== undefined) {
+    const admission = preflightLayerAdds(doc, composition);
+    if (!admission.ok) return { kind: 'refused', doc, ...admission.error };
+    const result = applyCompositionEdits(compositionView(doc), [firstComposition, ...restComposition], now);
+    if (result.kind !== 'applied') return { ...result, doc };
+    const next = keepRemix(doc, result.doc);
+    const checked = checkDocument(next);
+    return checked.ok ? { kind: 'applied', doc: next, inverse: compositionInverse(doc, result.inverse) } : { kind: 'refused', doc, ...checked.error };
+  }
   let current = doc;
   let inverse: NonEmpty<Edit> | null = null;
   for (const [i, edit] of edits.entries()) {
-    const result = applyEdit(current, edit, now);
+    const reduced = reduce(current, edit);
+    const result: EditResult = !reduced.ok ? { kind: 'refused', doc: current, ...reduced.error }
+      : reduced.value.kind === 'unchanged' ? { kind: 'unchanged', doc: current }
+        : { kind: 'applied', doc: { ...reduced.value.doc, updatedAt: now }, inverse: reduced.value.inverse };
     switch (result.kind) {
       case 'refused':
         return { kind: 'refused', doc, reason: result.reason, detail: `edit ${i}: ${result.detail}` };
@@ -491,5 +597,21 @@ export function applyEdits(doc: SceneDocument, edits: NonEmpty<Edit>, now: strin
     }
   }
   if (inverse === null) return { kind: 'unchanged', doc };
+  if (current.version === 6 && doc.version === 6 && !sameValue(current.remix.instances, doc.remix.instances)) {
+    current = advanceMathCheckpoint(current);
+  }
+  const checked = checkDocument(current);
+  if (!checked.ok) return { kind: 'refused', doc, ...checked.error };
   return { kind: 'applied', doc: current, inverse };
+}
+
+function advanceMathCheckpoint(doc: RemixReadDocument): RemixReadDocument {
+  const checkpoint = doc.remix.checkpoint;
+  return { ...doc, remix: { ...doc.remix, checkpoint: { ...checkpoint,
+    appliedRevision: checkpoint.appliedRevision + 1, checkpointRevision: checkpoint.checkpointRevision + 1 } } };
+}
+
+function checkDocument(doc: SceneDocument): Result<unknown, Refusal> {
+  return doc.version === 5 ? parseWith(compositionDocumentSchema, doc, 'document')
+    : parseWith(remixDocumentSchema, serializeRemixDocument(doc), 'document');
 }

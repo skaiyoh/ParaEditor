@@ -5,6 +5,10 @@
 // --migrations); a substitute exports the same three names.
 // Pure: no browser global, no Node API, no I/O.
 
+import { migrateV4ToV5 } from './composition.ts';
+import { compositionDocumentSchema } from './composition-schema.ts';
+import { migrateV5ToV6 } from './remix-schema.ts';
+
 /**
  * A total function from a document at version v to the same document at
  * version v + 1, its `version` field included: the parse chain refuses a
@@ -51,7 +55,23 @@ const addDrift: Migration = (json) => {
   return { ...json, version: 4, motion: { ...rest, drift: { direction: 'circle', amount: orbit } } };
 };
 
-export const MIGRATIONS = [addSurface, addParallax, addLayerVisibility, addDrift] as const satisfies readonly Migration[];
+/** Version 4 to 5. The frozen validator runs before translating legacy coverage. */
+const addComposition: Migration = (json) => {
+  const migrated = migrateV4ToV5(json);
+  if (!migrated.ok) throw new Error(migrated.error.kind === 'invalid' ? migrated.error.detail : 'Invalid legacy composition.');
+  return migrated.value;
+};
+
+/** Version 5 to 6 is explicit on write; the reader stops old scenes at v5. */
+const addRemix: Migration = (json) => {
+  const doc = compositionDocumentSchema.safeParse(json);
+  if (!doc.success) throw new Error('The version 5 composition is invalid.');
+  const migrated = migrateV5ToV6(doc.data);
+  if (!migrated.ok) throw new Error(migrated.error.message);
+  return migrated.value;
+};
+
+export const MIGRATIONS = [addSurface, addParallax, addLayerVisibility, addDrift, addComposition, addRemix] as const satisfies readonly Migration[];
 
 /** The table's length, typed as the tuple's literal length, so `SceneDocument['version']` is a literal type. */
 export const SCENE_VERSION = MIGRATIONS.length;

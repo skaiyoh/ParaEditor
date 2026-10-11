@@ -1,0 +1,21 @@
+{
+  "elapsedSeconds": 105.91886429100123,
+  "blender": "5.2.2 LTS",
+  "vertices": 516944,
+  "triangles": 599567,
+  "meshBytes": 29940356,
+  "externalImages": 0,
+  "engine": "CYCLES",
+  "device": "GPU",
+  "draft": false,
+  "sourceSize": [
+    1920,
+    1440
+  ],
+  "cameraRotationFixed": [
+    1.5707963705062866,
+    0.0,
+    0.0
+  ],
+  "offAxis": true
+}

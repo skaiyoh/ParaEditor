@@ -8,11 +8,15 @@ import { anchorDisparity, assetRefs, holeMask, holeRadius, labelAt, layers, mask
 import type { AssetId, ObjectId } from '../src/core/ids.ts';
 import { isAssetId } from '../src/core/ids.ts';
 import { sortedMasks } from '../src/core/produce.ts';
+import { linkedRemoval } from '../src/core/reduce.ts';
 import type { Plane, Rect, Size } from '../src/core/raster.ts';
 import { currentDocumentSchema } from '../src/core/schema.ts';
+import { compositionDocumentSchema } from '../src/core/composition-schema.ts';
+import { remixDocumentShapeSchema } from '../src/core/remix-schema.ts';
 import type { ObjectMotion, SceneDocument, SceneObject } from '../src/core/types.ts';
 import { z } from '../src/core/zod.ts';
 import { assetId, fiveClusterDocument, getAt, minimalDocument, type Key } from './fixtures/documents.ts';
+import { fullComposition, localEffect } from './fixtures/composition.ts';
 import { objectId, tappedObject } from './fixtures/edits.ts';
 import { depthProduct, plateProduct } from './fixtures/products.ts';
 
@@ -41,7 +45,7 @@ function object(n: number, spec: ObjectSpec): SceneObject {
 }
 
 function withObjects(objects: readonly SceneObject[], base: SceneDocument = fiveClusterDocument()): SceneDocument {
-  return { ...base, objects: [...objects] };
+  return { ...base, objects: [...objects], removals: objects.map(linkedRemoval) };
 }
 
 function box(x: number, y: number, width: number, height: number): Rect {
@@ -396,12 +400,9 @@ const moving: ObjectMotion = { kind: 'wobble', amount: 0.5 };
 function plateScene(spec: { readonly enabled: boolean; readonly orbit: number; readonly motion: ObjectMotion; readonly plate: 'none' | 'current' | 'stale' }): SceneDocument {
   const objects = [object(1, { bounds: box(0, 0, 10, 10), median: 0.5, motion: spec.motion }), object(0, { bounds: box(50, 0, 10, 10), median: 0.6 })];
   const doc = withObjects(objects);
-  const forMasks = spec.plate === 'current' ? sortedMasks(doc) : [assetId(0x300)];
-  return {
-    ...doc,
-    motion: { ...doc.motion, enabled: spec.enabled, drift: { direction: 'circle', amount: spec.orbit } },
-    analysis: { ...doc.analysis, plate: spec.plate === 'none' ? null : plateProduct(0, forMasks) },
-  };
+  const draft = { ...doc, motion: { ...doc.motion, enabled: spec.enabled, drift: { direction: 'circle' as const, amount: spec.orbit } } };
+  const forMasks = spec.plate === 'current' ? sortedMasks(draft) : [assetId(0x300)];
+  return { ...draft, analysis: { ...draft.analysis, plate: spec.plate === 'none' ? null : plateProduct(0, forMasks, draft) } };
 }
 
 test('no plate is needed without objects, without anything moving, or when forMasks equals the sorted mask ids', () => {
@@ -437,7 +438,8 @@ test('a plate is needed with objects, something moving, and a missing or stale p
   const [first, second] = doc.objects;
   assert.ok(first !== undefined && second !== undefined);
   assert.equal(plateNeeded({ ...doc, objects: [second, first] }), false, 'object order does not matter');
-  assert.equal(plateNeeded({ ...doc, objects: [first] }), true, 'one mask removed');
+  const removed = withObjects([first], doc);
+  assert.equal(plateNeeded(removed, plateProduct(0, sortedMasks(removed), removed).key), true, 'one mask removed');
 });
 
 // ---------------------------------------------------------------------------
@@ -462,8 +464,8 @@ test('anchorDisparity falls back from focus to the subject, the frame, and null'
 // ---------------------------------------------------------------------------
 // assetRefs
 
-/** A plate's forMasks names mask ids for comparison; it is the one AssetId field that is not a reference. */
-const NOT_REFERENCES = new Set(['analysis.plate.forMasks[]']);
+/** Import and cutout provenance hold historical digests, not assets required to render the document. */
+const NOT_REFERENCES = new Set(['sources[].provenance.originalDigest', 'objects[].origin.selectedMask']);
 
 /** The JSON Schema keywords customPaths follows into subschemas. */
 const FOLLOWED = new Set(['properties', 'items', 'prefixItems', 'anyOf', 'oneOf', 'allOf']);
@@ -518,8 +520,8 @@ test('assetRefs lists every asset the five-cluster fixture references and misses
   const doc = fiveClusterDocument();
   assert.deepEqual(
     [...assetRefs(doc)].sort(),
-    [0x10, 0x11, 0x20, 0x21, 0x31, 0x32].map(assetId).sort(),
-    'the source, the master, the depth map, the plate, and both masks',
+    [0x10, 0x11, 0x20, 0x21, 0x22, 0x23, 0x24, 0x31, 0x32].map(assetId).sort(),
+    'the source, master, depth, repair image, filled depth, union, hole, and both masks',
   );
   assert.deepEqual([...assetRefs(minimalDocument())], [assetId(1)], 'the master alone');
 });
@@ -530,19 +532,27 @@ test('the schema walk refuses a keyword that can hold a subschema it does not fo
   const values = { properties: { plates: { type: 'object', additionalProperties: { properties: { asset: {} } } } } };
   assert.throws(() => customPaths(values, '', new Set()), /does not follow additionalProperties at plates/);
   assert.throws(() => customPaths({ properties: { a: { $ref: '#/$defs/x' } } }, '', new Set()), /does not follow \$ref at a/);
-  assert.doesNotThrow(() => customPaths(z.toJSONSchema(currentDocumentSchema, { unrepresentable: 'any' }), '', new Set()));
+  assert.doesNotThrow(() => customPaths(z.toJSONSchema(compositionDocumentSchema, { unrepresentable: 'any' }), '', new Set()));
 });
 
-test('every AssetId field the schema declares is either read by assetRefs or named as not a reference', () => {
-  const doc = fiveClusterDocument();
-  const ids = customPaths(z.toJSONSchema(currentDocumentSchema, { unrepresentable: 'any' }), '', new Set());
+test('every frozen v5 AssetId field is either read by assetRefs or named as not a reference', () => {
+  const base = fullComposition();
+  const artwork = base.objects.find((layer) => layer.origin.kind === 'artwork');
+  const parent = base.objects[0];
+  assert.ok(artwork && parent && artwork.content.kind === 'source');
+  const cutout: SceneObject = { ...artwork, id: objectId(999), origin: { kind: 'cutout', operation: 'copy', source: artwork.content.source, parent: parent.id, selectedMask: assetId(0xe00) } };
+  const effect = localEffect(2);
+  assert.equal(effect.scope.kind, 'mask');
+  if (effect.scope.kind !== 'mask') throw new Error('The fixture effect must carry a mask.');
+  const doc = currentDocumentSchema.parse({ ...base, objects: [...base.objects, cutout], localEffects: [...base.localEffects, { ...effect, owner: { kind: 'layer', id: cutout.id }, scope: { ...effect.scope, mask: { ...effect.scope.mask, provenance: parent.produced.provenance } } }] });
+  const ids = customPaths(z.toJSONSchema(compositionDocumentSchema, { unrepresentable: 'any' }), '', new Set());
   assert.ok(ids.has('frame.master.asset') && ids.has('objects[].produced.mask.asset'), `the walk finds the id fields: ${[...ids].join(', ')}`);
   const assetPaths = new Set<string>();
   const referenced = new Set<AssetId>();
   for (const schemaPath of ids) {
     const instances = concrete(doc, schemaPath);
     // A field the fixture leaves null or empty would hide from this check, so the fixture must hold every one.
-    assert.ok(instances.length > 0, `the five-cluster fixture holds a value at ${schemaPath}`);
+    assert.ok(instances.length > 0, `the complete composition fixture holds a value at ${schemaPath}`);
     for (const path of instances) {
       const value = getAt(doc, path);
       if (typeof value !== 'string' || !isAssetId(value)) continue;
@@ -554,11 +564,21 @@ test('every AssetId field the schema declares is either read by assetRefs or nam
     [...assetPaths].sort(),
     [
       'analysis.depth.map.asset',
-      'analysis.plate.forMasks[]',
+      'analysis.plate.backgroundDepth.asset',
       'analysis.plate.image.asset',
+      'analysis.plate.key.depth',
+      'analysis.plate.key.hole',
+      'analysis.plate.key.removalUnion',
+      'analysis.plate.key.source',
       'frame.master.asset',
       'frame.source.asset',
+      'localEffects[].scope.mask.plane.asset',
+      'objects[].depthAttachment.map.asset',
+      'objects[].origin.selectedMask',
       'objects[].produced.mask.asset',
+      'removals[].mask.plane.asset',
+      'sources[].image.asset',
+      'sources[].provenance.originalDigest',
     ],
     'a new AssetId field is added to assetRefs, or to NOT_REFERENCES with the reason',
   );
@@ -569,7 +589,7 @@ test('hidden layers leave draw order and hit testing but retain the plate hole a
   const base = fiveClusterDocument();
   const original = base.objects[0];
   assert.ok(original);
-  const doc = { ...base, motion: { ...base.motion, enabled: false }, objects: [{ ...original, hidden: true }] };
+  const doc = { ...withObjects([{ ...original, hidden: true }], base), motion: { ...base.motion, enabled: false } };
   const mask = { format: 'u8', size: { width: 1, height: 1 }, data: new Uint8Array([255]) } satisfies Plane<'u8'>;
   const masks = new Map([[original.id, mask]]);
   assert.deepEqual(layers(doc), [{ kind: 'plate' }]);
@@ -577,6 +597,12 @@ test('hidden layers leave draw order and hit testing but retain the plate hole a
   assert.ok(holeMask(doc, masks, { width: 2, height: 2 }).data.every((byte) => byte === 255));
   assert.deepEqual(sortedMasks(doc), [original.produced.mask.asset]);
   assert.equal(plateNeeded(doc), true);
-  const fresh = { ...doc, analysis: { ...doc.analysis, plate: plateProduct(1, sortedMasks(doc)) } };
+  const fresh = { ...doc, analysis: { ...doc.analysis, plate: plateProduct(1, sortedMasks(doc), doc) } };
   assert.equal(plateNeeded(fresh), false);
+});
+
+// The read schema now derives fields; walk the raw durable shape for v6.
+test('v6 extends the durable asset inventory with paint patch tiles', () => {
+  const ids = customPaths(z.toJSONSchema(remixDocumentShapeSchema.unwrap().shape.paint, { unrepresentable: 'any' }), 'paint', new Set());
+  assert.ok(ids.has('paint.layers[].patches[].tiles[].rgba.asset'));
 });

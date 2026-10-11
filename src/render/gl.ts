@@ -5,7 +5,7 @@ export type Program = { readonly program: WebGLProgram; readonly uniforms: Reado
 export type Uniform =
   | { readonly kind: 'texture'; readonly value: Texture }
   | { readonly kind: 'int' | 'uint' | 'float'; readonly value: number }
-  | { readonly kind: 'ivec2'; readonly value: readonly [number, number] }
+  | { readonly kind: 'ivec2' | 'vec2'; readonly value: readonly [number, number] }
   | { readonly kind: 'vec3'; readonly value: readonly [number, number, number] }
   | { readonly kind: 'floatArray' | 'vec3Array'; readonly value: Float32Array };
 
@@ -71,16 +71,18 @@ export function createGl(canvas: HTMLCanvasElement) {
     }
   }
   function releaseProgram(value: Program): void { gl.deleteProgram(value.program); programs.delete(value.program); }
-  function texture(width: number, height: number, format: 'rgba8' | 'rgba16f' | 'r8' | 'r16f' | 'rg16f', data: Uint8Array | Float32Array | null, linear = false): Texture {
+  function texture(width: number, height: number, format: 'rgba8' | 'rgba16f' | 'r8' | 'r16f' | 'r32f' | 'rg16f', data: Uint8Array | Float32Array | null, linear = false): Texture {
     const texture = gl.createTexture();
     if (texture === null) throw new Error('The WebGL texture could not be created.');
     textures.add(texture);
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    const internal = { rgba8: gl.RGBA8, rgba16f: gl.RGBA16F, r8: gl.R8, r16f: gl.R16F, rg16f: gl.RG16F }[format];
-    const components = format === 'r8' || format === 'r16f' ? gl.RED : format === 'rg16f' ? gl.RG : gl.RGBA;
-    const floating = format === 'rgba16f' || format === 'r16f' || format === 'rg16f';
+    const internal = { rgba8: gl.RGBA8, rgba16f: gl.RGBA16F, r8: gl.R8, r16f: gl.R16F, r32f: gl.R32F, rg16f: gl.RG16F }[format];
+    const components = format === 'r8' || format === 'r16f' || format === 'r32f' ? gl.RED : format === 'rg16f' ? gl.RG : gl.RGBA;
+    const floating = format === 'rgba16f' || format === 'r16f' || format === 'r32f' || format === 'rg16f';
     gl.texImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0, components,
-      floating ? data instanceof Float32Array ? gl.FLOAT : gl.HALF_FLOAT : gl.UNSIGNED_BYTE, data);
+      floating ? data instanceof Float32Array || format === 'r32f' ? gl.FLOAT : gl.HALF_FLOAT : gl.UNSIGNED_BYTE, data);
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) { gl.deleteTexture(texture); textures.delete(texture); throw new Error(`The render texture allocation failed (${error}).`); }
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, linear ? gl.LINEAR : gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, linear ? gl.LINEAR : gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -93,7 +95,7 @@ export function createGl(canvas: HTMLCanvasElement) {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
     return tex;
   }
-  function target(width: number, height: number, format: boolean | 'r16f' | 'rg16f' = false, linear = false): Target {
+  function target(width: number, height: number, format: boolean | 'r16f' | 'r32f' | 'rg16f' = false, linear = false): Target {
     const tex = texture(width, height, typeof format === 'boolean' ? format ? 'rgba16f' : 'rgba8' : format, null, linear);
     const framebuffer = gl.createFramebuffer();
     if (framebuffer === null) { release(tex); throw new Error('The WebGL framebuffer could not be created.'); }
@@ -122,6 +124,7 @@ export function createGl(canvas: HTMLCanvasElement) {
         case 'int': gl.uniform1i(location, uniform.value); break;
         case 'uint': gl.uniform1ui(location, uniform.value); break;
         case 'float': gl.uniform1f(location, uniform.value); break;
+        case 'vec2': gl.uniform2f(location, ...uniform.value); break;
         case 'ivec2': gl.uniform2i(location, ...uniform.value); break;
         case 'vec3': gl.uniform3f(location, ...uniform.value); break;
         case 'floatArray': gl.uniform1fv(location, uniform.value); break;

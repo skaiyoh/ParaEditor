@@ -2,15 +2,15 @@ import assert from 'node:assert/strict';
 import { migrateV4ToV5 } from '../../src/core/composition.ts';
 import { compositionDocumentSchema, effectIdSchema, removalIdSchema, sceneLayerSchema, sourceIdSchema } from '../../src/core/composition-schema.ts';
 import type { CompositionDocument, LocalEffect, RasterSource, RepairProduct, SceneLayer, SourceRemoval } from '../../src/core/types.ts';
-import { assetId, fiveClusterDocument, INPAINT_MODEL, minimalDocument, uuid } from './documents.ts';
+import { assetId, legacyFiveClusterDocument, INPAINT_MODEL, legacyMinimalDocument, uuid } from './documents.ts';
 
 export function legacyComposition(): CompositionDocument {
-  const result = migrateV4ToV5(fiveClusterDocument());
+  const result = migrateV4ToV5(legacyFiveClusterDocument());
   assert.ok(result.ok, JSON.stringify(result));
   return result.value;
 }
 export function newComposition(): CompositionDocument {
-  const migrated = migrateV4ToV5(minimalDocument());
+  const migrated = migrateV4ToV5(legacyMinimalDocument());
   assert.ok(migrated.ok, JSON.stringify(migrated));
   // Explicit fixture policy only; C3 owns the production new-scene default.
   return compositionDocumentSchema.parse({ ...migrated.value, compositing: 'scene-depth' });

@@ -35,16 +35,26 @@ const perspective: Scenario = {
       return true;
     });
     const base = fiveClusterDocument(), first = base.objects[0];
-    if (first === undefined || base.analysis.depth === null) throw new Error('The scene fixture lacks depth/object metadata.');
+    if (first === undefined || base.analysis.depth === null || base.analysis.plate === null) throw new Error('The scene fixture lacks depth/object/repair metadata.');
     const size = { width: 640, height: 480 }, depthSize = { width: 128, height: 96 };
+    const depth = { ...base.analysis.depth, map: { ...base.analysis.depth.map, size: depthSize } };
+    const placement = { translate: { x: 0, y: 0 }, pivot: { x: 320, y: 240 }, scale: 1, rotation: 0 };
+    const object = { ...first, placement, home: placement,
+      depthAttachment: first.depthAttachment.kind === 'source' ? { ...first.depthAttachment, map: depth.map } : first.depthAttachment,
+      recolor: { kind: 'none' } satisfies typeof first.recolor, motion: { kind: 'none' } satisfies typeof first.motion,
+      produced: { ...first.produced, bounds: { x: 240, y: 180, width: 160, height: 120 },
+        mask: { ...first.produced.mask, size: depthSize }, depth: { p10: .9, median: .9, p90: .9 } } };
+    const removal = base.removals.find((entry) => entry.ownership.kind === 'legacy-layer' && entry.ownership.layer === object.id);
+    if (removal === undefined) throw new Error('The scene fixture lacks its linked source removal.');
+    const motion = { ...base.motion, enabled: false, parallax: 2 };
     const doc = { ...base, frame: { ...base.frame, master: { ...base.frame.master, size } },
-      analysis: { ...base.analysis, depth: { ...base.analysis.depth, map: { ...base.analysis.depth.map, size: depthSize } } },
+      analysis: { ...base.analysis, depth, plate: { ...base.analysis.plate,
+        image: { ...base.analysis.plate.image, size }, backgroundDepth: { ...base.analysis.plate.backgroundDepth, size: depthSize },
+        key: { ...base.analysis.plate.key, source: base.frame.master.asset, size,
+          radius: Math.ceil(Math.ceil(Math.max(size.width, size.height) / 100) * motion.parallax), purpose: { kind: 'still' } as const } } },
       style: { ...base.style, simplify: 0, outline: 0, grain: 0, colorNoise: 0, clipping: 0, crunch: 0 },
-      symbols: { ...base.symbols, enabled: false }, surface: { ...base.surface, enabled: false },
-      motion: { ...base.motion, enabled: false, parallax: 2 },
-      objects: [{ ...first, recolor: { kind: 'none' } satisfies typeof first.recolor, motion: { kind: 'none' } satisfies typeof first.motion,
-        produced: { ...first.produced, bounds: { x: 240, y: 180, width: 160, height: 120 },
-          mask: { ...first.produced.mask, size: depthSize }, depth: { p10: .9, median: .9, p90: .9 } } }] };
+      symbols: { ...base.symbols, enabled: false }, surface: { ...base.surface, enabled: false }, motion,
+      objects: [object], removals: [{ ...removal, mask: { plane: object.produced.mask, provenance: object.produced.provenance } }] };
     const geometry = createPerspectiveGeometry({ aperture: { center: { x: .12, y: -.06 }, width: .8, height: .6 },
       crop: .04, neutralDistance: 1, nearFactor: 1.1, farFactor: 2 });
     const eye = constrainEye({ x: 1, y: 0 }, geometry), coverage = liveCoverage(doc, geometry);
@@ -143,7 +153,7 @@ const perspective: Scenario = {
       const savedMetadata = doc.analysis.plate;
       if (savedMetadata === null) throw new Error('Fixture requires saved plate metadata.');
       const savedScene = { ...scene, livePlate: null, plate: image,
-        doc: { ...hiddenDoc, analysis: { ...doc.analysis, plate: { ...savedMetadata, image: { ...savedMetadata.image, size }, forMasks: [object.produced.mask.asset] } } } };
+        doc: { ...hiddenDoc, analysis: { ...doc.analysis, plate: { ...savedMetadata, image: { ...savedMetadata.image, size } } } } };
       renderer.setScene(savedScene); renderer.renderStill(); const savedHidden = capture();
       const pendingHidden = renderer.renderPerspective(normalRequest), pendingPixels = capture();
       const hiddenPending = pendingHidden.kind === 'limited' && savedHidden.every((value, i) => value === pendingPixels[i]);
@@ -152,7 +162,7 @@ const perspective: Scenario = {
       // Alternating depths vary strongly inside a mesh cell, exposing incorrect 1/w UV interpolation.
       // Its travel may be limited by the depth-edge guard; the neutral image must still be exact.
       for (let y = 0; y < depthSize.height; y++) for (let x = 0; x < depthSize.width; x++) gradient.data[y * depthSize.width + x] = x % 2;
-      renderer.setScene({ ...scene, doc: { ...doc, objects: [] }, depth: gradient, masks: new Map(), livePlate: null });
+      renderer.setScene({ ...scene, doc: { ...doc, objects: [], removals: [] }, depth: gradient, masks: new Map(), livePlate: null });
       renderer.renderPerspective({ ...normalRequest, eye: { x: 0, y: 0, z: eye.z } });
       let neutralGradientError = 0;
       for (const at of [{ x: .1234, y: .2367 }, { x: .6789, y: .7654 }]) {

@@ -23,10 +23,13 @@ import {
   type SceneId,
 } from './ids.ts';
 import { MIGRATIONS, SCENE_VERSION, type Migration } from './migrate.ts';
+import { compositionDocumentSchema } from './composition-schema.ts';
+import { remixDocumentSchema, withDerivedGrainStyle } from './remix-schema.ts';
+import { legacyDocumentSchema, legacyV4DocumentSchema } from './legacy-schema.ts';
 import { FLOORS, LENGTHS, RANGES, type FloorPath, type LengthPath, type NumberRange, type RangePath } from './ranges.ts';
 import type { PlaneFormat } from './raster.ts';
 import { err, ok, type Result } from './result.ts';
-import type { SceneDocument, SceneDocumentAt } from './types.ts';
+import type { LegacySceneDocument, SceneDocument, SceneDocumentAt } from './types.ts';
 import { z } from './zod.ts';
 
 /** How far a set of cluster weights may sum from 1 and still count as summing to 1. */
@@ -477,8 +480,12 @@ export function sceneDocumentSchema<const V extends number>(version: V) {
     });
 }
 
-/** The schema of the current version, SCENE_VERSION. */
-export const currentDocumentSchema = sceneDocumentSchema(SCENE_VERSION);
+/** Version-preserving read validation; persisted v6 uses the strict Remix schema. */
+export const currentDocumentSchema = z.preprocess((value) => {
+  if (!isRecord(value) || value['version'] !== 6 || !isRecord(value['style'])) return value;
+  const { grain: _grain, colorNoise: _noise, grainSize: _size, grainHold: _hold, ...style } = value['style'];
+  return { ...value, style };
+}, z.union([compositionDocumentSchema, remixDocumentSchema])).transform((doc) => withDerivedGrainStyle(doc));
 
 // ---------------------------------------------------------------------------
 // issues as text
@@ -501,11 +508,17 @@ export function formatPath(path: readonly PropertyKey[]): string {
  * One line of text listing the path of every issue of a parse, `; `-separated, in
  * the order zod reports them; an unknown key is listed at its own path.
  */
-export function describeIssues(issues: readonly z.core.$ZodIssue[]): string {
+export function describeIssues(issues: readonly z.core.$ZodIssue[], document?: unknown): string {
+  const analysis = isRecord(document) ? document['analysis'] : undefined;
+  const clusters = isRecord(analysis) && Array.isArray(analysis['colors']) ? analysis['colors'].length : null;
+  const message = (issue: z.core.$ZodIssue): string => issue.code === 'custom' &&
+    issue.message === 'cluster must exist in analysis.colors' && clusters !== null &&
+    issue.path.length === 4 && issue.path[0] === 'style' && issue.path[1] === 'paletteTargets' && issue.path[3] === 'cluster'
+    ? `a palette target's cluster must be below analysis.colors.length (${clusters})` : issue.message;
   const lines = issues.flatMap((issue) =>
     issue.code === 'unrecognized_keys'
       ? issue.keys.map((key) => `${formatPath([...issue.path, key])}: unknown key`)
-      : [`${formatPath(issue.path)}: ${issue.message}`],
+      : [`${formatPath(issue.path)}: ${message(issue)}`],
   );
   return lines.join('; ');
 }
@@ -632,7 +645,7 @@ function migrate(migrations: readonly Migration[], from: number, json: unknown):
 function parseStrict<T>(schema: z.ZodType<T>, json: unknown): Result<T, ParseError> {
   try {
     const parsed = schema.safeParse(json);
-    return parsed.success ? ok(parsed.data) : err({ kind: 'invalid', detail: describeIssues(parsed.error.issues) });
+    return parsed.success ? ok(parsed.data) : err({ kind: 'invalid', detail: describeIssues(parsed.error.issues, json) });
   } catch (thrown) {
     return err({ kind: 'invalid', detail: `the strict parse threw ${describeThrown(thrown)}` });
   }
@@ -664,14 +677,37 @@ export function parseDocumentWith<const M extends readonly Migration[]>(
   };
 }
 
-/** The parse chain of `core/migrate.ts`'s table: what the store and the scene file call. */
-const parseVersionedDocument = parseDocumentWith(MIGRATIONS);
-export const parseDocument: (json: unknown) => Result<SceneDocument, ParseError> = (json) => {
-  const result = parseVersionedDocument(json);
-  if (!result.ok || result.value.objects.every((object) => object.produced.selection.size !== undefined)) return result;
-  // Additive migration at the persisted-document boundary, never in reducer products.
-  // The existing version stays readable; a future versioned migration can absorb this default.
-  return parseVersionedDocument({ ...result.value, objects: result.value.objects.map((object) => ({
-    ...object, produced: { ...object.produced, selection: { ...object.produced.selection, size: object.produced.selection.size ?? 0.5 } },
+/** Frozen v4 compatibility reader: validate every historical input before the first four migrations. */
+export function parseLegacyDocument(json: unknown): Result<LegacySceneDocument, ParseError> {
+  const peek = peekVersion(json);
+  if (!peek.ok) return peek;
+  const { version, writer } = peek.value;
+  if (version > 4) return err({ kind: 'newer-version', version, writer });
+  if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4) return err({ kind: 'not-a-scene' });
+  const historical = parseStrict(legacyDocumentSchema(version), json);
+  if (!historical.ok) return historical;
+  const migrated = migrate(MIGRATIONS.slice(0, 4), version, historical.value);
+  if (!migrated.ok) return migrated;
+  const parsed = parseStrict(legacyV4DocumentSchema, migrated.value);
+  if (!parsed.ok || parsed.value.objects.every((object) => object.produced.selection.size !== undefined)) return parsed;
+  return parseStrict(legacyV4DocumentSchema, { ...parsed.value, objects: parsed.value.objects.map((object) => ({
+    ...object, produced: { ...object.produced, selection: { ...object.produced.selection, size: object.produced.selection.size ?? .5 } },
   })) });
-};
+}
+
+/** Version-preserving reader. V5 upgrades only when a Remix write is requested. */
+export function parseDocument(json: unknown): Result<SceneDocument, ParseError> {
+  const peek = peekVersion(json);
+  if (!peek.ok) return peek;
+  const { version, writer } = peek.value;
+  if (version > SCENE_VERSION) return err({ kind: 'newer-version', version, writer });
+  if (version === 6) {
+    const parsed = parseStrict(remixDocumentSchema, json);
+    return parsed.ok ? ok(withDerivedGrainStyle(parsed.value)) : parsed;
+  }
+  if (version === 5) return parseStrict(compositionDocumentSchema, json);
+  const legacy = parseLegacyDocument(json);
+  if (!legacy.ok) return legacy;
+  const migrated = migrate(MIGRATIONS.slice(0, 5), 4, legacy.value);
+  return migrated.ok ? parseStrict(compositionDocumentSchema, migrated.value) : migrated;
+}

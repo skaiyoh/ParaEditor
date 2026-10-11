@@ -91,7 +91,7 @@ export const CHECKLIST_ROWS: readonly ChecklistRow[] = [
     part: 'P0.1',
     sitting: 'A',
     kind: 'manual',
-    action: ['In Safari open ', { text: 'the noisy address', href: '/', code: false }, ' the agent sends.'],
+    action: ['In Safari open ', { text: 'the ParaEditor address', href: '/', code: false }, ' the agent sends.'],
     question: 'Does the page say "isolated: yes"?',
     answer: { kind: 'yes-no', expected: 'yes' },
     attach: 'none',

@@ -1,6 +1,9 @@
 import type { AssetId, ObjectId } from '../core/ids.ts';
 import type { Plane, Rgb8, Size } from '../core/raster.ts';
-import type { SceneDocument } from '../core/types.ts';
+import type { LegacySceneDocument, SceneDocument } from '../core/types.ts';
+import { collectCompositionAssets } from '../core/asset-refs.ts';
+import { decodeRaster, inspectPng } from '../core/asset-codec.ts';
+import { plateKeyMatches, repairHole, sourceRemovalUnion } from '../core/derive.ts';
 import { sortedMasks } from '../core/produce.ts';
 import { liveCoverage, liveHoleMask } from '../core/live-coverage.ts';
 import { frameCount, parallaxMargin, type Vec2 } from '../core/motion.ts';
@@ -8,14 +11,22 @@ import { apertureFromRect, containedImageRect, createPerspectiveGeometry, constr
 import { decodePhoto } from '../photo/decode.ts';
 import { createRenderer } from '../render/renderer.ts';
 import { LOOP_FPS, frameAtElapsed } from '../render/loop.ts';
-import type { Renderer, RenderScene } from '../render/types.ts';
+import type { Renderer, RenderScene, PaintPlane } from '../render/types.ts';
+import { resolveLocalEffects } from '../render/local-effects.ts';
 import { createTiltSource } from './tilt.ts';
 
-export type ViewerPiece = {
-  readonly document: SceneDocument;
+export type LegacyViewerPiece = {
+  /** Manifest v1 keeps its frozen v4 document and payload-only raster assets. */
+  readonly document: LegacySceneDocument;
   readonly source: Blob;
   readonly planes: ReadonlyMap<AssetId, Plane<'u8'> | Plane<'f32'> | Rgb8>;
 };
+export type CompositionViewerPiece = {
+  /** Manifest v2 owns the same encoded asset closure as the editor checkpoint. */
+  readonly document: SceneDocument;
+  readonly assets: ReadonlyMap<AssetId, Uint8Array>;
+};
+export type ViewerPiece = LegacyViewerPiece | CompositionViewerPiece;
 export type ViewerFailure =
   | { readonly kind: 'missing-asset' | 'invalid-asset'; readonly asset: AssetId | null; readonly message: string }
   | { readonly kind: 'no-webgl2' | 'decode-failure' | 'render-failure' | 'context-lost'; readonly message: string };
@@ -31,9 +42,110 @@ class AssetFailure extends Error {
   constructor(failure: Extract<ViewerFailure, { asset: AssetId | null }>) { super(failure.message); this.failure = failure; }
 }
 const sameSize = (a: Size, b: Size): boolean => a.width === b.width && a.height === b.height;
+type ResolvedViewerAssets = Pick<RenderScene, 'masks' | 'depth' | 'plate'> & (
+  | { readonly kind: 'legacy' }
+  | { readonly kind: 'composition'; readonly masterPng: Blob; readonly repairPng: Blob | null;
+    readonly masksByAsset: ReadonlyMap<AssetId, Plane<'u8'>>;
+    readonly backgroundDepth: Plane<'f32'> | null;
+    readonly localEffects: NonNullable<RenderScene['localEffects']>; readonly compositing: SceneDocument['compositing']; readonly paint: readonly PaintPlane[] }
+);
 
-/** Resolve every declared raster before allocating GL resources. The loader owns schema parsing. */
-export function resolveViewerAssets(piece: ViewerPiece): Pick<RenderScene, 'masks' | 'depth' | 'plate'> {
+type DecodedPaintTile = { readonly size: Size; readonly rgba: Uint8Array<ArrayBuffer> };
+const paintTileCache = new WeakMap<Uint8Array, DecodedPaintTile>();
+const paintContentCache = new Map<AssetId, WeakRef<DecodedPaintTile>>();
+/** Shared editor/viewer hydration keeps immutable tile identities stable across
+ * metadata-only document changes, so MRX3 can reuse its admitted textures. */
+export function resolvePaintPlanes(doc: SceneDocument, assets: ReadonlyMap<AssetId, Uint8Array>): readonly PaintPlane[] {
+  if (doc.version !== 6) return [];
+  for (const [asset, cached] of paintContentCache) if (cached.deref() === undefined) paintContentCache.delete(asset);
+  let order = 0;
+  return doc.paint.layers.flatMap(layer => [...layer.patches].sort((a, b) => a.order - b.order).map(patch => ({
+    id: patch.id, disparity: patch.disparity, order: order++, opacity: layer.opacity, visible: !layer.hidden,
+    bounds: { x: 0, y: 0, ...patch.size }, tiles: patch.tiles.map(tile => {
+      const bytes = assets.get(tile.rgba.asset);
+      if (bytes === undefined) throw new Error('A saved paint tile is unavailable.');
+      let cached = paintTileCache.get(bytes) ?? paintContentCache.get(tile.rgba.asset)?.deref();
+      if (cached === undefined) {
+        const raster = decodeRaster(bytes, { format: tile.rgba.encoding, size: tile.rgba.size });
+        if (raster.format !== 'rgba8-srgb-straight') throw new Error('A saved paint tile has the wrong format.');
+        cached = { size: raster.size, rgba: new Uint8Array(raster.data) };
+        paintContentCache.set(tile.rgba.asset, new WeakRef(cached));
+      }
+      if (!sameSize(cached.size, tile.rgba.size)) throw new Error('A saved paint tile has conflicting dimensions.');
+      paintTileCache.set(bytes, cached);
+      return { x: tile.x, y: tile.y, ...tile.rgba.size, rgba: cached.rgba };
+    }),
+  })));
+}
+
+function resolveCompositionAssets(piece: CompositionViewerPiece): ResolvedViewerAssets {
+  const doc = piece.document;
+  const invalid = (asset: AssetId | null, message: string): never => { throw new AssetFailure({ kind: 'invalid-asset', asset, message }); };
+  if (doc.compositing === 'scene-depth') return invalid(null, 'Scene-depth composition requires C3.');
+  const inventory = collectCompositionAssets([{ kind: 'document', document: doc }]);
+  if (!inventory.ok) return invalid(null, `The published asset closure is invalid: ${inventory.error.detail}`);
+  const masksByAsset = new Map<AssetId, Plane<'u8'>>(), depths = new Map<AssetId, Plane<'f32'>>();
+  const pngs = new Map<AssetId, Blob>();
+  for (const [asset, refs] of inventory.value) {
+    const bytes = piece.assets.get(asset);
+    if (bytes === undefined) throw new AssetFailure({ kind: 'missing-asset', asset, message: `The published piece is missing asset ${asset}.` });
+    for (const ref of refs) {
+      if (ref.byteLength !== null && ref.byteLength !== bytes.byteLength) return invalid(asset, 'A published asset has the wrong encoded byte length.');
+      try {
+        switch (ref.kind) {
+          case 'original': break; // Rendering uses the immutable master PNG, never another decode of the original.
+          case 'png': {
+            if (!sameSize(inspectPng(bytes).size, ref.size)) return invalid(asset, 'A published PNG has the wrong dimensions.');
+            pngs.set(asset, new Blob([new Uint8Array(bytes)], { type: 'image/png' })); break;
+          }
+          case 'raster': {
+            const plane = decodeRaster(bytes, ref);
+            if (plane.format === 'u8') masksByAsset.set(asset, { ...plane, format: 'u8' });
+            else if (plane.format === 'f32') depths.set(asset, { ...plane, format: 'f32' });
+            break;
+          }
+          default: { const exhaustive: never = ref; return exhaustive; }
+        }
+      } catch (error) {
+        if (error instanceof AssetFailure) throw error;
+        return invalid(asset, `A published asset is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+  if (piece.assets.size !== inventory.value.size) return invalid(null, 'The published piece contains an unreferenced asset.');
+  const masterPng = pngs.get(doc.frame.master.asset);
+  if (masterPng === undefined) return invalid(doc.frame.master.asset, 'The published master PNG is unavailable.');
+  const masks = new Map<ObjectId, Plane<'u8'>>();
+  for (const object of doc.objects) {
+    const mask = masksByAsset.get(object.produced.mask.asset);
+    if (mask === undefined) return invalid(object.produced.mask.asset, 'A published layer mask is unavailable.');
+    masks.set(object.id, mask);
+  }
+  const depth = doc.analysis.depth === null ? null : depths.get(doc.analysis.depth.map.asset) ?? null;
+  const repair = doc.analysis.plate;
+  let repairPng: Blob | null = null, backgroundDepth: Plane<'f32'> | null = null;
+  if (repair !== null) {
+    if (!plateKeyMatches(doc, repair.key)) return invalid(repair.image.asset, 'The published repair belongs to a different source, depth or reveal envelope.');
+    const union = sourceRemovalUnion(doc, masksByAsset), hole = repairHole(doc, union);
+    const samePlane = (actual: Plane<'u8'> | undefined, expected: Plane<'u8'>): boolean => actual !== undefined
+      && sameSize(actual.size, expected.size) && actual.data.length === expected.data.length
+      && actual.data.every((value, index) => value === expected.data[index]);
+    if (!samePlane(masksByAsset.get(repair.key.removalUnion), union) || !samePlane(masksByAsset.get(repair.key.hole), hole)) {
+      return invalid(repair.image.asset, 'The published repair belongs to different source removals or a different hole.');
+    }
+    repairPng = pngs.get(repair.image.asset) ?? null;
+    backgroundDepth = depths.get(repair.backgroundDepth.asset) ?? null;
+    if (repairPng === null || backgroundDepth === null) return invalid(repair.image.asset, 'The published repair output is unavailable.');
+  } else if (doc.objects.length > 0) {
+    throw new AssetFailure({ kind: 'missing-asset', asset: null, message: 'The published layers need a background plate.' });
+  }
+  return { kind: 'composition', masks, depth, plate: null, masterPng, repairPng, masksByAsset, backgroundDepth,
+    localEffects: resolveLocalEffects(doc.localEffects, masksByAsset), compositing: doc.compositing, paint: resolvePaintPlanes(doc, piece.assets) };
+}
+
+/** Resolve every declared raster before GL or image decoding. The loader owns schema parsing and byte hashes. */
+export function resolveViewerAssets(piece: ViewerPiece): ResolvedViewerAssets {
+  if ('assets' in piece) return resolveCompositionAssets(piece);
   const doc = piece.document;
   const invalid = (asset: AssetId | null, message: string): never => { throw new AssetFailure({ kind: 'invalid-asset', asset, message }); };
   const read = (asset: AssetId, size: Size) => {
@@ -68,7 +180,7 @@ export function resolveViewerAssets(piece: ViewerPiece): Pick<RenderScene, 'mask
   if (doc.objects.length > 0 && plate === null) {
     throw new AssetFailure({ kind: 'missing-asset', asset: null, message: 'The published layers need a background plate.' });
   }
-  return { masks, depth, plate };
+  return { kind: 'legacy', masks, depth, plate };
 }
 
 export function tiltNeedsPermission(): boolean {
@@ -77,7 +189,7 @@ export function tiltNeedsPermission(): boolean {
 }
 
 /** Only animation-frame timestamps advance Motion; a pause retains the last submitted time. */
-export function createViewerMotionClock(motion: SceneDocument['motion']) {
+export function createViewerMotionClock(motion: LegacySceneDocument['motion']) {
   const count = frameCount(motion, LOOP_FPS);
   let origin: number | null = null, elapsed = 0, retained = 0;
   return {
@@ -96,6 +208,8 @@ export function createViewer({ canvas, piece }: { readonly canvas: HTMLCanvasEle
   let status: ViewerStatus = { kind: 'idle' }, input: ViewerInput = 'none';
   let renderer: Renderer | null = null, master: ImageBitmap | null = null;
   let scene: RenderScene | null = null, geometryKey = '';
+  let paintPlanes: readonly PaintPlane[] = [];
+  let removalMasks: ReadonlyMap<AssetId, Plane<'u8'>> | undefined;
   let disposed = false, running = false, epoch = 0;
   let pending: Promise<void> | null = null, request = 0, viewId = 0;
   const motionClock = createViewerMotionClock(piece.document.motion);
@@ -127,7 +241,7 @@ export function createViewer({ canvas, piece }: { readonly canvas: HTMLCanvasEle
   }
   function release(): void {
     renderer?.dispose(); renderer = null;
-    master?.close(); master = null; scene = null; geometryKey = '';
+    master?.close(); master = null; scene = null; geometryKey = ''; removalMasks = undefined; paintPlanes = [];
   }
   function fail(failure: ViewerFailure): void {
     setStatus({ kind: 'failed', failure }); stop(); release();
@@ -180,8 +294,12 @@ export function createViewer({ canvas, piece }: { readonly canvas: HTMLCanvasEle
       const coverage = liveCoverage(doc, geometry);
       // Published RGB is already prepared. Only the viewport-dependent hole and key are transient.
       const livePlate = coverage === null || scene.plate === null || scene.depth === null ? null
-        : { key: coverage.key, image: scene.plate, hole: liveHoleMask(doc, scene.masks, coverage), depth: scene.depth };
+        : { key: coverage.key, image: scene.plate, hole: liveHoleMask(doc, scene.masks, coverage, removalMasks), depth: scene.depth };
       renderer.setScene({ ...scene, livePlate }); geometryKey = key;
+      if (paintPlanes.length > 0) {
+        const paint = renderer.setPaintPlanes(paintPlanes);
+        if (paint.kind === 'refused') throw new Error(paint.reason);
+      }
     }
     const usesTilt = now - tiltAt <= 250;
     const target = usesTilt ? tiltTarget : pointer;
@@ -207,19 +325,48 @@ export function createViewer({ canvas, piece }: { readonly canvas: HTMLCanvasEle
     catch (error) {
       fail(error instanceof AssetFailure ? error.failure : { kind: 'render-failure', message: message(error) }); return;
     }
+    paintPlanes = assets.kind === 'composition' ? assets.paint : [];
+    let plate = assets.plate;
     try {
-      const photo = await decodePhoto(new File([piece.source], piece.document.frame.original.name, { type: piece.source.type || piece.document.frame.original.mediaType }));
-      if (disposed) { photo.bitmap.close(); return; }
-      master = photo.bitmap;
-      if (!sameSize(photo.pixels, piece.document.frame.master.size)) throw new Error('The decoded source does not match the published master dimensions.');
+      if ('assets' in piece && assets.kind === 'composition') {
+        const bitmap = await createImageBitmap(assets.masterPng);
+        if (disposed) { bitmap.close(); return; }
+        master = bitmap;
+        if (!sameSize(bitmap, piece.document.frame.master.size)) throw new Error('The decoded PNG does not match the published master dimensions.');
+        if (assets.repairPng !== null) {
+          const repair = await createImageBitmap(assets.repairPng);
+          try {
+            if (disposed) return;
+            if (!sameSize(repair, piece.document.frame.master.size)) throw new Error('The decoded repair does not match the published master dimensions.');
+            const canvas = new OffscreenCanvas(repair.width, repair.height), context = canvas.getContext('2d', { willReadFrequently: true });
+            if (context === null) throw new Error('The published repair image could not be read.');
+            context.drawImage(repair, 0, 0);
+            const rgba = context.getImageData(0, 0, repair.width, repair.height).data, data = new Uint8Array(repair.width * repair.height * 3);
+            for (let pixel = 0; pixel < data.length / 3; pixel++) data.set(rgba.subarray(pixel * 4, pixel * 4 + 3), pixel * 3);
+            plate = { size: { width: repair.width, height: repair.height }, data };
+          } finally { repair.close(); }
+        }
+      } else if ('source' in piece) {
+        const photo = await decodePhoto(new File([piece.source], piece.document.frame.original.name, { type: piece.source.type || piece.document.frame.original.mediaType }));
+        if (disposed) { photo.bitmap.close(); return; }
+        master = photo.bitmap;
+        if (!sameSize(photo.pixels, piece.document.frame.master.size)) throw new Error('The decoded source does not match the published master dimensions.');
+      }
     } catch (error) { if (!disposed) fail({ kind: 'decode-failure', message: message(error) }); return; }
+    if (disposed) return;
     try {
       const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: true });
       if (gl === null || gl.getExtension('EXT_color_buffer_float') === null) {
         fail({ kind: 'no-webgl2', message: 'This device cannot show the live piece. Showing its poster.' }); return;
       }
       renderer = createRenderer(canvas);
-      if (master !== null) scene = { doc: piece.document, master, ...assets, selected: null };
+      if (master !== null) {
+        const common = { doc: piece.document, master, masks: assets.masks, depth: assets.depth, plate, selected: null };
+        if (assets.kind === 'composition') {
+          scene = { ...common, localEffects: assets.localEffects, compositing: assets.compositing, backgroundDepth: assets.backgroundDepth };
+          removalMasks = assets.masksByAsset;
+        } else scene = common;
+      }
     } catch (error) { fail({ kind: 'render-failure', message: message(error) }); }
   }
   async function start(): Promise<void> {
@@ -244,6 +391,8 @@ export function createViewer({ canvas, piece }: { readonly canvas: HTMLCanvasEle
     start, stop, requestTilt,
     status: (): ViewerStatus => status,
     input: (): ViewerInput => input,
+    /** Real renderer readback for dev scenarios; no authoring state or production pixels are exposed. */
+    debug: (): Renderer['debug'] => NOISY_DEV ? renderer?.debug ?? null : null,
     tiltNeedsPermission,
     subscribe(listener: () => void): () => void { listeners.add(listener); return () => listeners.delete(listener); },
     dispose(): void {

@@ -1,4 +1,8 @@
-import { layers, maskCovers, holeMask, holeRadius, anchorDisparity, cameraRadius, parallaxClamp, plateNeeded } from '../core/derive.ts';
+import { createPaintComposition, type PaintProjection, type PhotoDepthDraw } from './composition.ts';
+import type { PaintPlane, PaintAdmission, PaintDepthCapture } from './paint.ts';
+import { layers, maskCovers, holeMask, holeRadius, anchorDisparity, cameraRadius, parallaxClamp, plateNeeded, plateKeyMatches } from '../core/derive.ts';
+import { migrateV4ToV5 } from '../core/composition.ts';
+import type { SceneDocument } from '../core/types.ts';
 import type { EffectId, ObjectId } from '../core/ids.ts';
 import type { Plane } from '../core/raster.ts';
 import { frameCount, loopPhase, cameraOffset, parallaxDisplacement, effectiveOrbit, loopZoom, parallaxMargin } from '../core/motion.ts';
@@ -39,6 +43,9 @@ import { surface, surfaceLookup } from './shaders/surface.ts';
 import { LOCAL_EFFECT_BATCH, prepareLocalEffects, type PreparedLocalEffect } from './local-effects.ts';
 import { localEffects, localCoverage, stillLookup } from './shaders/local-effects.ts';
 import type { LocalEffectReadback } from './types.ts';
+import type { PreparedPhotoRack } from './types.ts';
+import { location, type MathResult } from '../core/math-expression.ts';
+import { admitPhotoRack, mathShaderDiagnostic, type MathPhotoRack, type MathPhotoPass } from './math-program.ts';
 
 const tex = (value: Texture): Uniform => ({ kind: 'texture', value });
 const float = (value: number): Uniform => ({ kind: 'float', value });
@@ -50,6 +57,11 @@ type CrunchBuffers = { readonly y: readonly [Target, Target]; readonly c: readon
 type CellBuffers = { readonly variant: Target; readonly cells: Target; readonly decisions: Target; readonly size: number };
 type LiveBuffers = { readonly color: Target; readonly label: Target; readonly depth: Target; readonly source: Target; readonly composite: Target };
 type Lookup = { readonly label: Target; readonly source: Target };
+type PreparedScene = Omit<RenderScene, 'doc'> & {
+  readonly doc: SceneDocument;
+  /** Live products retain the identity of the reader that supplied their bytes. */
+  readonly coverageDocument: RenderScene['doc'];
+};
 type LiveProducts = {
   readonly identity: NonNullable<RenderScene['livePlate']> | null;
   readonly depthIdentity: RenderScene['depth']; readonly labels: string;
@@ -75,6 +87,7 @@ type ExportRenderer = Omit<Renderer, 'exportStill' | 'debug'> & {
 export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   const gpu = createGl(canvas);
   const { gl } = gpu;
+  const paint = createPaintComposition(gpu);
   let lost = false;
   const onContextLost = (): void => { lost = true; };
   canvas.addEventListener('webglcontextlost', onContextLost);
@@ -94,7 +107,9 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   }
   try { programs = makePrograms(); }
   catch (error) { canvas.removeEventListener('webglcontextlost', onContextLost); gpu.dispose(); throw error; }
-  let scene: RenderScene | null = null;
+  let scene: PreparedScene | null = null;
+  let legacyPlateReady = false;
+  const renderPlateNeeded = (doc: SceneDocument): boolean => !legacyPlateReady && plateNeeded(doc);
   let master: Texture | null = null;
   let plate: Texture | null = null;
   let plateSimplified: Target | null = null;
@@ -137,6 +152,8 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   const symbolModes = new Float32Array(33);
   let finalTarget: Target | null = null;
   let selectionSource: Target | null = null;
+  let manualSelection: Texture | null = null;
+  let manualIdentity: Plane<'u8'> | null = null;
   let depth: Texture | null = null;
   let depthRange = 0;
   let profiling = false;
@@ -164,6 +181,53 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       lost = true;
       throw new Error('The graphics context was lost; reload the page');
     }
+  }
+  type PhotoPass = { readonly program: ReturnType<typeof gpu.program>; readonly pass: MathPhotoPass };
+  type PhotoPreparation = { readonly token: PreparedPhotoRack; readonly passes: readonly PhotoPass[];
+    readonly master: ImageBitmap | null; readonly sceneId: string | null };
+  let pendingPhotoRack: PhotoPreparation | null = null;
+  let activePhotoRack: readonly PhotoPass[] | null = null;
+  function releasePhotoRack(passes: readonly PhotoPass[] | null): void {
+    for (const pass of passes ?? []) gpu.releaseProgram(pass.program);
+  }
+  function preparePhotoRack(rack: MathPhotoRack): MathResult<PreparedPhotoRack> {
+    checkLive();
+    releasePhotoRack(pendingPhotoRack?.passes ?? null); pendingPhotoRack = null;
+    const admitted = admitPhotoRack(rack);
+    if (!admitted.ok) return admitted;
+    const passes: PhotoPass[] = [];
+    for (const pass of admitted.value.passes) {
+      if (pass.bypass) continue;
+      try { passes.push({ pass, program: gpu.program(pass.fragment) }); }
+      catch (error) {
+        releasePhotoRack(passes);
+        const message = error instanceof Error ? error.message : String(error);
+        const line = /ERROR:\s*\d+:(\d+)/.exec(message)?.[1];
+        return { ok: false, error: { kind: 'context', ...mathShaderDiagnostic(pass, Number(line ?? 1), 1, message) } };
+      }
+    }
+    if (gl.isContextLost()) {
+      releasePhotoRack(passes);
+      return { ok: false, error: { kind: 'context', ...location('photo-rack'), message: 'The graphics context was lost while preparing the photo rack.' } };
+    }
+    const token = Object.freeze({ handle: Symbol('photo-rack') });
+    pendingPhotoRack = { token, passes, master: scene?.master ?? null, sceneId: scene?.doc.id ?? null };
+    return { ok: true, value: token };
+  }
+  function activatePhotoRack(prepared: PreparedPhotoRack | null): void {
+    checkLive();
+    if (prepared === null) {
+      releasePhotoRack(pendingPhotoRack?.passes ?? null); pendingPhotoRack = null;
+      releasePhotoRack(activePhotoRack); activePhotoRack = null;
+      return;
+    }
+    const pending = pendingPhotoRack;
+    if (pending === null || prepared.handle !== pending.token.handle ||
+      pending.master !== (scene?.master ?? null) || pending.sceneId !== (scene?.doc.id ?? null)) {
+      throw new Error('This prepared photo rack is stale or belongs to another renderer; prepare it again.');
+    }
+    releasePhotoRack(activePhotoRack);
+    activePhotoRack = pending.passes; pendingPhotoRack = null;
   }
   function complete(target: Target): void {
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
@@ -297,7 +361,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       simplified: gpu.target(width, height, false, true), quantized: gpu.target(width, height), final: gpu.target(width, height),
     };
   }
-  function rebuildLabels(next: RenderScene): void {
+  function rebuildLabels(next: PreparedScene): void {
     const order = layers(next.doc);
     const key = order.map((layer) => {
       if (layer.kind === 'plate') return 'plate';
@@ -329,12 +393,35 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     }
     dirty = true;
   }
-  function setScene(next: RenderScene): void {
+  function setScene(input: RenderScene): void {
+    let next: PreparedScene;
+    let preparedLegacy = false;
+    if (input.doc.version === 4) {
+      const migrated = migrateV4ToV5(input.doc);
+      if (!migrated.ok) throw new Error(JSON.stringify(migrated.error));
+      const masks = input.doc.objects.map(object => object.produced.mask.asset).sort();
+      const saved = input.doc.analysis.plate?.forMasks;
+      preparedLegacy = input.plate !== null && saved !== undefined && masks.length === saved.length && masks.every((asset, i) => asset === saved[i]);
+      next = { ...input, doc: migrated.value, coverageDocument: input.doc };
+    } else next = { ...input, doc: input.doc, coverageDocument: input.doc };
     checkLive();
+    // A preparation belongs to one photo generation, even if an earlier photo returns.
+    if (scene?.master !== next.master || scene?.doc.id !== next.doc.id) {
+      releasePhotoRack(pendingPhotoRack?.passes ?? null); pendingPhotoRack = null;
+    }
     if (next.compositing === 'scene-depth' || 'compositing' in next.doc && next.doc.compositing === 'scene-depth') {
       throw new Error('Scene-depth composition is not available in C2; physical layer depth requires C3.');
     }
+    if (paint.hasPlanes() && (scene?.master !== next.master || scene?.depth !== next.depth)) {
+      throw new Error('Clear paint before replacing the photo or its captured depth. Existing paint is unchanged.');
+    }
     const nextEffects = prepareLocalEffects(next.localEffects ?? [], next.doc.objects);
+    if ((next.manualSelection ?? null) !== manualIdentity) {
+      if (manualSelection !== null) gpu.release(manualSelection);
+      manualSelection = null; manualIdentity = next.manualSelection ?? null;
+      if (manualIdentity !== null) manualSelection = gpu.texture(manualIdentity.size.width, manualIdentity.size.height, 'r8',
+        Uint8Array.from(manualIdentity.data, value => value > 0 ? 1 : 0));
+    }
     const maxSize: unknown = gl.getParameter(gl.MAX_TEXTURE_SIZE);
     if (typeof maxSize !== 'number') checkLive();
     if (typeof maxSize !== 'number' || next.master.width > maxSize || next.master.height > maxSize) throw new Error('The photo exceeds this WebGL2 device’s texture limit.');
@@ -346,6 +433,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     lastFrameLookup = null; appliedLocalEffects = false;
     if (scene?.master !== next.master) {
       endPerspective();
+      paint.dispose();
       if (master !== null) gpu.release(master);
       master = gpu.bitmap(next.master);
       dirty = true;
@@ -357,10 +445,8 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       buffers = allocate(next.master.width, next.master.height);
       dirty = true;
     }
-    const masks = sortedMasks(next.doc);
-    const forMasks = next.doc.analysis.plate?.forMasks;
-    const freshPlate = next.doc.objects.length > 0 && forMasks !== undefined && masks.length === forMasks.length &&
-      masks.every((asset, i) => asset === forMasks[i]) ? next.plate : null;
+    legacyPlateReady = preparedLegacy;
+    const freshPlate = preparedLegacy || (next.doc.analysis.plate !== null && plateKeyMatches(next.doc, next.doc.analysis.plate.key)) ? next.plate : null;
     if (plateIdentity !== freshPlate) {
       if (plate !== null) gpu.release(plate);
       plate = null; plateIdentity = freshPlate; backDirty = true;
@@ -526,14 +612,8 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         prepared.dirty = false;
       }
     }
-    const { geometry: config, eye } = request;
-    const uniforms = {
-      apertureCenter: { kind: 'vec3', value: [config.aperture.center.x, config.aperture.center.y, 0] },
-      apertureSizeCrop: { kind: 'vec3', value: [config.aperture.width, config.aperture.height, config.crop] },
-      depthFactors: { kind: 'vec3', value: [config.nearFactor, config.farFactor, config.neutralDistance] },
-      eye: { kind: 'vec3', value: [eye.x, eye.y, eye.z] },
-      hole: tex(validBackground ? prepared.hole : backgroundLabel),
-    } satisfies Record<string, Uniform>;
+    const uniforms = { ...paintPerspectiveProjection(request).uniforms,
+      hole: tex(validBackground ? prepared.hole : backgroundLabel) };
     const target = liveBuffers, coverageProgram = livePrograms.coverage;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.composite.framebuffer);
     gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0, 0, 0, 1]));
@@ -603,10 +683,10 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   }
   function liveBackgroundMatches(prepared: LiveProducts, request: PerspectiveRenderRequest): boolean {
     return scene !== null && (scene.doc.objects.length === 0 || prepared.identity !== null &&
-      prepared.identity.key === liveCoverage(scene.doc, request.geometry)?.key);
+      prepared.identity.key === liveCoverage(scene.coverageDocument, request.geometry)?.key);
   }
 
-  function rebuildGeometryInputs(next: RenderScene): void {
+  function rebuildGeometryInputs(next: PreparedScene): void {
     for (const [id, entry] of objectMeshes) if (!next.doc.objects.some((object) => object.id === id)) {
       gpu.releaseMesh(entry.mesh); gpu.release(entry.texture); objectMeshes.delete(id);
     }
@@ -634,10 +714,13 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         hole = gpu.texture(holePlane.size.width, holePlane.size.height, 'r8', holePlane.data);
       }
     }
-    if (backgroundPlane !== next.depth || backgroundKey !== holeKey) {
+    if (backgroundPlane !== (next.backgroundDepth ?? next.depth) || backgroundKey !== holeKey) {
       if (backgroundDepth !== null) gpu.release(backgroundDepth);
-      backgroundDepth = null; backgroundPlane = next.depth; backgroundKey = holeKey;
-      if (next.depth !== null && holePlane !== null) {
+      backgroundDepth = null; backgroundPlane = next.backgroundDepth ?? next.depth; backgroundKey = holeKey;
+      if (next.backgroundDepth != null) {
+        const filled = next.backgroundDepth;
+        backgroundDepth = gpu.texture(filled.size.width, filled.size.height, 'r16f', filled.data, true);
+      } else if (next.depth !== null && holePlane !== null) {
         const { width, height } = next.depth.size;
         const data = new Uint8Array(width * height);
         for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
@@ -659,11 +742,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       gpu.attachDepth(gbuffer.color);
     }
     const target = gbuffer;
-    const anchor = anchorDisparity(scene.doc);
-    const lo = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(offset, 0, anchor);
-    const hi = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(offset, 1, anchor);
-    const displacement = { displacementX: { kind: 'vec3', value: [lo.x, hi.x, 0] },
-      displacementY: { kind: 'vec3', value: [lo.y, hi.y, 0] }, zoom: float(zoom) } satisfies Record<string, Uniform>;
+    const displacement = paintMotionProjection(offset, zoom).uniforms;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.color.framebuffer);
     gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2, gl.COLOR_ATTACHMENT3]);
     gl.clearBufferfv(gl.COLOR, 3, new Float32Array([0, 0, 0, 1]));
@@ -720,6 +799,76 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       gl.depthRange(0, 1);
     }
     return target;
+  }
+
+  function setPaintPlanes(planes: readonly PaintPlane[]): PaintAdmission {
+    checkLive();
+    if (scene === null) return { kind: 'refused', reason: 'Open a photo before adding paint.' };
+    if (planes.length > 0 && depth === null) return { kind: 'refused', reason: 'Depth is not ready. Paint needs its captured depth plane.' };
+    const result = paint.setPlanes(planes, scene.master);
+    if (result.kind === 'accepted') { hasRendered = false; finalTarget = null; selectionSource = null; }
+    return result;
+  }
+  function capturePaintDepth(at: Vec2): PaintDepthCapture {
+    checkLive();
+    if (!hasRendered || scene === null || depth === null || lastRender.compare === 'source-photo') {
+      return { kind: 'refused', reason: 'Render the current photo with depth before starting paint.' };
+    }
+    const pixel = samplePixel(at, scene.master);
+    if (pixel === null) return { kind: 'refused', reason: 'Start paint inside the photo.' };
+    const dimensions = { width: scene.master.width, height: scene.master.height };
+    const request = lastRender.perspective;
+    const moving = lastRender.camera !== null || lastRender.loop && effectiveOrbit(scene.doc.motion) > 0 && !renderPlateNeeded(scene.doc);
+    const projection = request === null ? paintMotionProjection(renderedCamera, moving ? loopZoom(scene.doc.motion.parallax) : 1)
+      : paintPerspectiveProjection(request);
+    try {
+      const disparity = preserveFramebuffers(() => paint.capture(pixel.x, pixel.y, dimensions, paintDepthDraws(request), projection,
+        paintSurfaceUniforms(lastRender.compare === 'edited', lastRender.frame)));
+      return disparity === null ? { kind: 'refused', reason: 'There is no opaque photo surface at this point.' } : { kind: 'captured', disparity };
+    } catch (error) { return { kind: 'refused', reason: error instanceof Error ? error.message : String(error) }; }
+  }
+  function paintSurfaceUniforms(treatments: boolean, frame: number): Readonly<Record<string, Uniform>> | null {
+    if (scene === null) return null;
+    const coating = scene.doc.surface;
+    return treatments && coating.enabled && coating.relief > 0 && coating.refraction > 0 ? {
+      seed: { kind: 'uint', value: scene.doc.seed }, pattern: int({ bars: 0, cracks: 1, scales: 2 }[coating.pattern]),
+      relief: float(coating.relief), refraction: float(coating.refraction), scale: float(coating.scale),
+      phase: float(loopPhase(frame, frameCount(scene.doc.motion, LOOP_FPS))),
+    } : null;
+  }
+  function paintMotionProjection(offset: Vec2, zoom: number): PaintProjection {
+    if (scene === null) throw new Error('Open a photo before projecting paint.');
+    const anchor = anchorDisparity(scene.doc);
+    const lo = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(offset, 0, anchor);
+    const hi = anchor === null ? { x: 0, y: 0 } : parallaxDisplacement(offset, 1, anchor);
+    return { kind: 'motion', uniforms: {
+      displacementX: { kind: 'vec3', value: [lo.x, hi.x, 0] },
+      displacementY: { kind: 'vec3', value: [lo.y, hi.y, 0] }, zoom: float(zoom),
+    } };
+  }
+  function paintPerspectiveProjection(request: PerspectiveRenderRequest): PaintProjection {
+    const { geometry: config, eye } = request;
+    return { kind: 'perspective', uniforms: {
+      apertureCenter: { kind: 'vec3', value: [config.aperture.center.x, config.aperture.center.y, 0] },
+      apertureSizeCrop: { kind: 'vec3', value: [config.aperture.width, config.aperture.height, config.crop] },
+      depthFactors: { kind: 'vec3', value: [config.nearFactor, config.farFactor, config.neutralDistance] },
+      eye: { kind: 'vec3', value: [eye.x, eye.y, eye.z] },
+    } };
+  }
+  function paintDepthDraws(request: PerspectiveRenderRequest | null): readonly PhotoDepthDraw[] {
+    if (scene === null || depth === null) throw new Error('Paint requires the captured photo depth.');
+    const prepared = request === null ? null : prepareLiveProducts();
+    const valid = prepared !== null && request !== null && liveBackgroundMatches(prepared, request);
+    const draws: PhotoDepthDraw[] = [{ mesh: backMesh, mask: label, objectId: 0,
+      depth: request === null ? backgroundDepth ?? depth : valid ? prepared.depth : depth }];
+    for (const layer of layers(scene.doc)) {
+      if (layer.kind === 'plate') continue;
+      const entry = objectMeshes.get(layer.object.id);
+      if (entry === undefined) continue;
+      draws.push({ mesh: entry.mesh, mask: entry.texture, objectId: scene.doc.objects.indexOf(layer.object) + 1,
+        depth: valid ? prepared.objectDepths.get(layer.object.id) ?? prepared.depth : depth });
+    }
+    return draws;
   }
 
   function simplify(source: Texture, destination: Target, grid: Grid, amount: number,
@@ -831,7 +980,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       camera = { x: Math.max(-reach, Math.min(reach, camera.x)), y: Math.max(-reach, Math.min(reach, camera.y)) };
     }
     const index = loop && (camera === null || depth !== null) ? wrapFrame(frame, frameCount(scene.doc.motion, LOOP_FPS)) : 0;
-    const moving = camera !== null ? depth !== null : loop && effectiveOrbit(scene.doc.motion) > 0 && !plateNeeded(scene.doc);
+    const moving = camera !== null ? depth !== null : loop && effectiveOrbit(scene.doc.motion) > 0 && !renderPlateNeeded(scene.doc);
     const start = probe?.begin() ?? 0;
     if (dirty && treatments) {
       const run = (): void => {
@@ -890,7 +1039,22 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         lastLiveLookup = liveWarp; displayLabel = liveWarp.label;
       }
     }
-    if (treatments && (style.grain !== 0 || style.colorNoise !== 0)) {
+    if (treatments && activePhotoRack !== null) {
+      for (const { program, pass } of activePhotoRack) {
+        const target = other(output);
+        const length = pass.parameters['grainHold']?.value;
+        const parameters: Record<string, Uniform> = {};
+        pass.block.source.parameters.forEach((parameter, index) => {
+          const value = pass.parameters[parameter.name];
+          if (value !== undefined && typeof value.value === 'number') parameters[`m_p${index}`] = float(value.value);
+        });
+        cameraDraw('grain', program, target, { ...parameters, src: tex(output), label: tex(displayLabel),
+          seed: { kind: 'uint', value: scene.doc.seed },
+          hold: { kind: 'uint', value: holdIndex(index, frameCount(scene.doc.motion, LOOP_FPS), typeof length === 'number' ? length : style.grainHold) },
+          compositionFrame: int(index), clarity: { kind: 'floatArray', value: clarity } });
+        output = target;
+      }
+    } else if (treatments && (style.grain !== 0 || style.colorNoise !== 0)) {
       const target = other(output);
       cameraDraw('grain', programs.grain, target, { src: tex(output), label: tex(displayLabel),
         seed: { kind: 'uint', value: scene.doc.seed }, hold: { kind: 'uint', value: holdIndex(index, frameCount(scene.doc.motion, LOOP_FPS), style.grainHold) },
@@ -940,14 +1104,19 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       }
       appliedLocalEffects = true;
     }
+    if (paint.active()) {
+      const projection = perspective === null ? paintMotionProjection(drawCamera, moving ? loopZoom(scene.doc.motion.parallax) : 1)
+        : paintPerspectiveProjection(perspective);
+      output = paint.composite(output, paintDepthDraws(perspective), projection, paintSurfaceUniforms(treatments, index));
+    }
     const selectedId = scene.selected;
     const selected = selectedId === null ? -1 : scene.doc.objects.findIndex((object) => object.id === selectedId);
     selectionSource = output;
-    if (treatments && showSelection && selected >= 0) {
+    if (treatments && showSelection && (selected >= 0 || manualSelection !== null)) {
       const box = canvas.getBoundingClientRect();
       // Camera passes swap these targets; never sample the selection target.
       const target = other(output);
-      gpu.draw(programs.select, target, { src: tex(output), label: tex(displayLabel), selected: int(selected + 1),
+      gpu.draw(programs.select, target, { src: tex(output), label: tex(manualSelection ?? displayLabel), selected: int(manualSelection !== null ? 1 : selected + 1),
         pixelStep: { kind: 'ivec2', value: [Math.max(1, Math.round(canvas.width / (box.width || canvas.width))),
           Math.max(1, Math.round(canvas.height / (box.height || canvas.height)))] } });
       output = target;
@@ -1057,7 +1226,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     const programs = ensureSourcePrograms();
     legacyLookup ??= allocateLookup(true);
     const lookup = legacyLookup;
-    const moving = snapshot.compare !== 'source-photo' && (snapshot.camera !== null ? depth !== null : snapshot.loop && effectiveOrbit(scene.doc.motion) > 0 && !plateNeeded(scene.doc));
+    const moving = snapshot.compare !== 'source-photo' && (snapshot.camera !== null ? depth !== null : snapshot.loop && effectiveOrbit(scene.doc.motion) > 0 && !renderPlateNeeded(scene.doc));
     const composed = snapshot.compare !== 'source-photo' && (moving || plate !== null && scene.doc.objects.some((object) => object.hidden));
     gl.bindFramebuffer(gl.FRAMEBUFFER, lookup.label.framebuffer);
     gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
@@ -1284,7 +1453,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     const restore = lastRender;
     try {
       render(frame, true, false, null, null, 'edited');
-      exportedEdges = scene !== null && effectiveOrbit(scene.doc.motion) > 0 && !plateNeeded(scene.doc) ? readGeometryEdges() : null;
+      exportedEdges = scene !== null && effectiveOrbit(scene.doc.motion) > 0 && !renderPlateNeeded(scene.doc) ? readGeometryEdges() : null;
       return new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => {
         if (blob === null) reject(new Error('The loop PNG could not be encoded.'));
         else resolve(blob);
@@ -1324,19 +1493,22 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     } finally { restoreRender(restore); }
   }
   return {
-    setScene, setCompare, sampleColor, renderStill,
+    setScene, setPaintPlanes, capturePaintDepth, setCompare, sampleColor, renderStill, preparePhotoRack, activatePhotoRack,
     renderFrame, renderView, exportView, renderPerspective, hitTest, endPerspective,
     exportStill,
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      releasePhotoRack(pendingPhotoRack?.passes ?? null); pendingPhotoRack = null;
+      releasePhotoRack(activePhotoRack); activePhotoRack = null;
       canvas.removeEventListener('webglcontextlost', onContextLost);
       endPerspective();
+      paint.dispose();
       gpu.dispose(); scopeTextures.clear(); preparedLocalEffects = []; legacyLookup = null; legacyWarp = null; lastFrameLookup = null; localBefore = null; localCoverageTarget = null;
       scene = null; buffers = null; cellBuffers = null; crunchBuffers = null; finalTarget = null; selectionSource = null; master = null; plate = null; depth = null; lut = null; palette = null;
     },
     debug: probe === null ? null : { ...probe.debug, readGeometryPatch, perspectiveResources, resources: gpu.resources,
-      readLocalEffectPatch, readLocalCoveragePatch, localResources,
+      readLocalEffectPatch, readLocalCoveragePatch, localResources, paintResources: paint.resources, readPaintPixel: (x, y) => preserveFramebuffers(() => paint.readPixel(x, y)),
       motionCamera: () => ({ ...renderedCamera }),
       setMotionFeather: (enabled: boolean): void => { featherEnabled = enabled; },
     },

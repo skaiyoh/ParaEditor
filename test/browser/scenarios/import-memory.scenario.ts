@@ -182,4 +182,127 @@ export const scenarios: readonly Scenario[] = [{
       }
     }
   },
+}, {
+  id: 'demo.cached-reopen', title: 'a saved photo survives reload with cached embeddings and a working tap',
+  // Production app, with the local project's storage API supplied by the dev server.
+  target: 'dev-production-build', covers: [], timeoutMs: 300_000,
+  async run(t) {
+    const { page } = t;
+    const observeReplies = (holdInit: boolean): true => {
+      const replies: unknown[] = [];
+      const record = (event: MessageEvent<unknown>): void => {
+        const data = event.data;
+        if (typeof data !== 'object' || data === null || !('type' in data)) return;
+        replies.push(Object.fromEntries(['type', 'stage', 'phase', 'message', 'fatal'].map((key) => [key, Reflect.get(data, key)])));
+        document.body.dataset['cachedReopenReplies'] = JSON.stringify(replies);
+      };
+      const NativeWorker = Worker, NativeChannel = MessageChannel;
+      window.Worker = class extends NativeWorker {
+        constructor(url: string | URL, options?: WorkerOptions) {
+          super(url, options);
+          this.addEventListener('message', record);
+        }
+        postMessage(message: unknown, options: Transferable[] | StructuredSerializeOptions = []): void {
+          const send = (): void => { if (Array.isArray(options)) super.postMessage(message, options); else super.postMessage(message, options); };
+          if (holdInit && typeof message === 'object' && message !== null && 'type' in message && message.type === 'initialize') {
+            holdInit = false;
+            document.body.dataset['cachedReopenHeld'] = 'true';
+            document.addEventListener('cached-reopen-release', send, { once: true });
+          } else send();
+        }
+      };
+      window.MessageChannel = class extends NativeChannel {
+        constructor() { super(); this.port1.addEventListener('message', record); }
+      };
+      return true;
+    };
+    const clickAction = async (label: string): Promise<void> => {
+      if (await page.evaluate(z.boolean(), () => document.querySelector('[data-testid=tool-actions]')?.getAttribute('aria-expanded') === 'false')) await page.click('[data-testid=tool-actions]');
+      const selector = await page.evaluate(z.string(), (label) => {
+        const button = [...document.querySelectorAll('[data-testid=panel-actions] button')].find((button) => button.textContent === label);
+        if (!(button instanceof HTMLButtonElement)) throw new Error(`No ${label} action.`);
+        button.dataset['cachedReopenAction'] = label;
+        return `[data-cached-reopen-action="${label}"]`;
+      }, label);
+      await page.click(selector);
+    };
+    await page.goto('/');
+    await page.waitFor('the import action', z.literal(true), () => document.querySelector('input[type=file]') === null ? null : true);
+    await page.evaluate(z.literal(true), observeReplies, false);
+    await clickAction('Try a sample');
+    await page.waitFor('fresh import ready to tap', z.literal(true), () => document.querySelector('[data-testid=status]')?.textContent === 'Ready to tap' ? true : null, { timeoutMs: 180_000 });
+    await page.waitFor('embeddings persisted before reload', z.literal(true), async () => (await (await caches.open('noisy-embeddings-v2')).keys()).length === 1 ? true : null);
+    await page.click('[data-testid=projects-toggle]');
+    await page.waitFor('project saved', z.literal(true), () => document.querySelector('[data-testid=projects-state]')?.textContent === 'Current photo saved.' ? true : null);
+    const project = await page.evaluate(z.string(), () => document.querySelector('[data-testid=project-row]')?.getAttribute('data-project-id'));
+    await t.file('fresh-replies.json', await page.evaluate(z.string(), () => document.body.dataset['cachedReopenReplies'] ?? '[]'));
+    await page.reload();
+    await page.waitFor('Projects after reload', z.literal(true), () => document.querySelector('[data-testid=projects-toggle]') === null ? null : true);
+    await page.evaluate(z.literal(true), observeReplies, true);
+    await page.click('[data-testid=projects-toggle]');
+    await page.waitFor('saved project listed', z.literal(true), () => document.querySelector('[data-testid=project-row] .project-open') === null ? null : true);
+    await page.click(`[data-project-id="${project}"] .project-open`);
+    try {
+      await page.waitFor('cached embeddings reach decoder initialization', z.literal(true), () => document.body.dataset['cachedReopenHeld'] === 'true' ? true : null, { timeoutMs: 180_000 });
+      if (await page.evaluate(z.boolean(), () => document.querySelector('[data-testid=tool-actions]')?.getAttribute('aria-expanded') === 'false')) await page.click('[data-testid=tool-actions]');
+      const cachedEncoder = await page.evaluate(z.string(), () => [...document.querySelectorAll('.scene-facts > div')].find((row) => row.querySelector('dt')?.textContent === 'Encoder')?.querySelector('dd')?.textContent);
+      t.ok('cached encoder is ready before the decoder starts', cachedEncoder.startsWith('Ready'), { encoder: cachedEncoder });
+      await page.evaluate(z.literal(true), () => { document.dispatchEvent(new Event('cached-reopen-release')); return true; });
+      const status = await page.waitFor('cached reopen reaches tapping or a terminal error', z.string(), () => {
+        const status = document.querySelector('[data-testid=status]')?.textContent ?? '';
+        return /Ready to tap|Tapping (needs|unavailable)|Analysis failed/.test(status) ? status : null;
+      }, { timeoutMs: 180_000 });
+      t.equal('cached reopen is ready to tap', status, 'Ready to tap');
+      if (await page.evaluate(z.boolean(), () => document.querySelector('[data-testid=tool-actions]')?.getAttribute('aria-expanded') === 'false')) await page.click('[data-testid=tool-actions]');
+      const encoder = await page.evaluate(z.string(), () => [...document.querySelectorAll('.scene-facts > div')].find((row) => row.querySelector('dt')?.textContent === 'Encoder')?.querySelector('dd')?.textContent);
+      t.ok('cached encoder reads ready', encoder.startsWith('Ready'), { encoder });
+      const replies = await page.evaluate(z.array(z.object({ type: z.string() })), () => JSON.parse(document.body.dataset['cachedReopenReplies'] ?? '[]'));
+      t.equal('reopen never re-encodes', replies.filter((reply) => reply.type === 'embeddings').length, 0);
+      await page.evaluate(z.literal(true), () => {
+        const stage = document.querySelector('[data-testid=stage]');
+        if (!(stage instanceof HTMLCanvasElement)) throw new Error('No rendered photo.');
+        const box = stage.getBoundingClientRect();
+        stage.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: box.left + .38 * box.width, clientY: box.top + .585 * box.height }));
+        return true;
+      });
+      await page.waitFor('tap opens subject swatches', z.literal(true), () => document.querySelector('[data-testid=swatches]') === null ? null : true, { timeoutMs: 30_000 });
+      await t.file('reopen-replies.json', await page.evaluate(z.string(), () => document.body.dataset['cachedReopenReplies'] ?? '[]'));
+      await page.screenshot('cached-reopen');
+      await page.click('[data-testid=projects-toggle]');
+      await page.waitFor('tapped project saved', z.literal(true), () => document.querySelector('[data-testid=projects-state]')?.textContent === 'Current photo saved.' ? true : null);
+      await page.evaluate(z.literal(true), async () => {
+        const cache = await caches.open('noisy-embeddings-v2'), [key] = await cache.keys();
+        if (key === undefined) throw new Error('No cached embedding to corrupt.');
+        const response = await cache.match(key);
+        if (response === undefined) throw new Error('No cached embedding body.');
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const offset = bytes.byteLength - 33;
+        bytes[offset] = (bytes[offset] ?? 0) ^ 1;
+        await cache.put(key, new Response(bytes, { headers: response.headers }));
+        return true;
+      });
+      await page.reload();
+      await page.waitFor('Projects after cache corruption', z.literal(true), () => document.querySelector('[data-testid=projects-toggle]') === null ? null : true);
+      await page.evaluate(z.literal(true), observeReplies, false);
+      await page.click('[data-testid=projects-toggle]');
+      await page.waitFor('saved project listed again', z.literal(true), () => document.querySelector('[data-testid=project-row] .project-open') === null ? null : true);
+      await page.click(`[data-project-id="${project}"] .project-open`);
+      await page.waitFor('restored photo ready for a tap', z.literal(true), () => document.querySelector('[data-testid=projects-toggle]')?.getAttribute('aria-expanded') === 'false' && document.querySelector('main.has-photo') !== null && document.querySelector('[data-testid=parallax-enabled]')?.hasAttribute('disabled') === false ? true : null);
+      await page.evaluate(z.literal(true), () => {
+        const stage = document.querySelector('[data-testid=stage]');
+        if (!(stage instanceof HTMLCanvasElement)) throw new Error('No rendered photo.');
+        const box = stage.getBoundingClientRect();
+        stage.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: box.left + .38 * box.width, clientY: box.top + .585 * box.height }));
+        return true;
+      });
+      await page.waitFor('corrupt cache re-encodes and warms', z.literal(true), () => document.querySelector('[data-testid=status]')?.textContent === 'Ready to tap' ? true : null, { timeoutMs: 180_000 });
+      await page.waitFor('corrupt-cache tap opens subject swatches', z.literal(true), () => document.querySelector('[data-testid=swatches]')?.checkVisibility() === true ? true : null, { timeoutMs: 30_000 });
+      t.ok('corrupt-cache tap succeeds', await page.evaluate(z.boolean(), () => document.querySelector('[data-testid=swatches]')?.checkVisibility() === true));
+      const recovered = await page.evaluate(z.array(z.object({ type: z.string() })), () => JSON.parse(document.body.dataset['cachedReopenReplies'] ?? '[]'));
+      t.equal('corrupt cache produces one fresh encoding', recovered.filter((reply) => reply.type === 'embeddings').length, 1);
+    } finally {
+      await t.file('final-replies.json', await page.evaluate(z.string(), () => document.body.dataset['cachedReopenReplies'] ?? '[]'));
+      await page.screenshot('final-reopen');
+    }
+  },
 }];

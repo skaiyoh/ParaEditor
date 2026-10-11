@@ -172,22 +172,40 @@ async function rendererChecks(t: ScenarioContext, section: 'color' | 'compare'):
   const base = fiveClusterDocument(), object = base.objects[0];
   if (object === undefined || base.analysis.depth === null || base.analysis.plate === null) throw new Error('Missing C1 renderer fixture metadata.');
   const size = { width: 640, height: 480 }, mapSize = { width: 128, height: 96 };
-  const doc = currentDocumentSchema.parse({ ...base, frame: { ...base.frame, master: { ...base.frame.master, size } },
-    analysis: { ...base.analysis, depth: { ...base.analysis.depth, map: { ...base.analysis.depth.map, size: mapSize } },
-      plate: { ...base.analysis.plate, image: { ...base.analysis.plate.image, size }, forMasks: [object.produced.mask.asset] } },
+  const depthMap = { ...base.analysis.depth.map, size: mapSize };
+  const motion = { ...base.motion, enabled: false, focus: .2, parallax: 2 };
+  const layer = { ...object, motion: { kind: 'none' }, produced: { ...object.produced,
+    bounds: { x: 210, y: 150, width: 220, height: 180 }, mask: { ...object.produced.mask, size: mapSize },
+    depth: { p10: .9, median: .9, p90: .9 } },
+    placement: { ...object.placement, pivot: { x: 320, y: 240 } }, home: { ...object.home, pivot: { x: 320, y: 240 } },
+    depthAttachment: { kind: 'source', map: depthMap, model: base.analysis.depth.model,
+      offset: object.depthAttachment.kind === 'source' ? object.depthAttachment.offset : 0 } };
+  const doc = currentDocumentSchema.parse({ ...base, frame: { ...base.frame, source: null,
+    master: { ...base.frame.master, size }, original: { name: 'C1 renderer fixture.png', mediaType: 'image/png', size } },
+    provenance: { ...base.provenance, importedOn: 'analytic C1 renderer fixture' },
+    analysis: { ...base.analysis, depth: { ...base.analysis.depth, map: depthMap },
+      plate: { ...base.analysis.plate, image: { ...base.analysis.plate.image, size },
+        backgroundDepth: { ...base.analysis.plate.backgroundDepth, size: mapSize },
+        key: { ...base.analysis.plate.key, source: base.frame.master.asset, size, depth: depthMap.asset,
+          radius: Math.ceil(Math.ceil(Math.max(size.width, size.height) / 100) * motion.parallax), purpose: { kind: 'still' } } } },
     style: { ...base.style, fry: 0, simplify: .4, outline: .5, grain: .6, colorNoise: .4, clipping: .4, crunch: .5 },
     symbols: { ...base.symbols, enabled: true, amount: .7 },
     surface: { enabled: true, pattern: 'bars', relief: 1, refraction: 1, shine: .4, scale: .5 },
-    motion: { ...base.motion, enabled: false, focus: .2, parallax: 2 },
-    objects: [{ ...object, motion: { kind: 'none' }, produced: { ...object.produced,
-      bounds: { x: 210, y: 150, width: 220, height: 180 }, mask: { ...object.produced.mask, size: mapSize },
-      depth: { p10: .9, median: .9, p90: .9 } } }] });
+    motion, objects: [layer], removals: base.removals
+      .filter((removal) => removal.ownership.kind === 'legacy-layer' && removal.ownership.layer === object.id)
+      .map((removal) => ({ ...removal, mask: { ...removal.mask, plane: layer.produced.mask } })) });
+  const repair = doc.analysis.plate;
+  if (repair === null) throw new Error('Missing C1 renderer repair fixture.');
+  const loopDocument = currentDocumentSchema.parse({ ...doc, motion: { ...doc.motion, enabled: true },
+    analysis: { ...doc.analysis, plate: { ...repair, key: { ...repair.key,
+      purpose: { kind: 'loop', parallax: doc.motion.parallax, reach: doc.motion.drift.amount } } } } });
   const geometry = createPerspectiveGeometry({ aperture: { center: { x: 0, y: 0 }, width: .8, height: .6 },
     crop: .04, neutralDistance: 1, nearFactor: 1.1, farFactor: 2 });
   const eye = constrainEye({ x: .6, y: .1 }, geometry), coverage = liveCoverage(doc, geometry);
   if (coverage === null) throw new Error('No C1 live coverage.');
-  const rows = await t.page.evaluate(rowsSchema, async ({ section, documentJson, geometry, eye, key }) => {
+  const rows = await t.page.evaluate(rowsSchema, async ({ section, documentJson, loopDocumentJson, geometry, eye, key }) => {
     const doc: import('../../../src/core/types.ts').SceneDocument = JSON.parse(documentJson);
+    const loopDoc: import('../../../src/core/types.ts').SceneDocument = JSON.parse(loopDocumentJson);
     const demo = window.__noisyTest?.demo, renderer = window.__noisyTest?.session?.renderer();
     const stage = document.querySelector('[data-testid="stage"]');
     if (demo === undefined || renderer == null || !(stage instanceof HTMLCanvasElement)) throw new Error('No C1 renderer.');
@@ -235,7 +253,7 @@ async function rendererChecks(t: ScenarioContext, section: 'color' | 'compare'):
       if (section === 'color') {
         for (const mode of ['still', 'motion', 'surface', 'perspective']) {
           const active = mode === 'surface' ? scene : mode === 'motion'
-            ? { ...ordinary, doc: { ...ordinary.doc, motion: { ...doc.motion, enabled: true } } } : ordinary;
+            ? { ...ordinary, doc: { ...loopDoc, surface: ordinary.doc.surface } } : ordinary;
           const draw = (): void => {
             if (mode === 'perspective') renderer.renderPerspective(request);
             else if (mode === 'motion') renderer.renderFrame(17);
@@ -319,7 +337,7 @@ async function rendererChecks(t: ScenarioContext, section: 'color' | 'compare'):
           let error = 0; for (let i = 0; i < pixels.length; i++) error = Math.max(error, Math.abs((pixels[i] ?? 0) - (raw.data[i] ?? 0)));
           check(`${compare}: every master byte survives all treatments, including Fry zero`, error <= 1, { error, bytes: pixels.length });
         }
-        renderer.setScene({ ...scene, doc: { ...doc, motion: { ...doc.motion, enabled: true } } }); renderer.setCompare('source-photo'); renderer.renderFrame(17);
+        renderer.setScene({ ...scene, doc: loopDoc }); renderer.setCompare('source-photo'); renderer.renderFrame(17);
         check('Source photo retains canonical framing during Motion', same(capture(), raw.data, 1));
         renderer.renderPerspective(request);
         check('Source photo retains canonical framing during perspective', same(capture(), raw.data, 1));
@@ -361,7 +379,7 @@ async function rendererChecks(t: ScenarioContext, section: 'color' | 'compare'):
       renderer.setCompare('edited'); renderer.endPerspective(); demo.setSampleMode('edited'); demo.select(null); demo.select(selected); bitmap.close();
     }
     return rows;
-  }, { section, documentJson: JSON.stringify(doc), geometry, eye, key: coverage.key });
+  }, { section, documentJson: JSON.stringify(doc), loopDocumentJson: JSON.stringify(loopDocument), geometry, eye, key: coverage.key });
   for (const row of rows) t.ok(row.name, row.pass, row.evidence);
   await t.file(`c1-${section}-pixels.json`, JSON.stringify(rows, null, 2));
 }

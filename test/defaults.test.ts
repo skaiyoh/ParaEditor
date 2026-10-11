@@ -7,10 +7,9 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 import { defaultLighting, defaultMotion, defaultStyle, defaultSymbols, defaultSurface, newDocument, newLight, newObject, nextObjectName } from '../src/core/defaults.ts';
-import { SCENE_VERSION } from '../src/core/migrate.ts';
 import { parseDocument } from '../src/core/schema.ts';
 import type { SceneDocument } from '../src/core/types.ts';
-import { fiveClusterDocument, LIGHT_IDS, minimalDocument, OBJECT_IDS, SCENE_ID, WRITER } from './fixtures/documents.ts';
+import { fiveClusterDocument, legacyMinimalDocument, LIGHT_IDS, minimalDocument, OBJECT_IDS, SCENE_ID, WRITER } from './fixtures/documents.ts';
 import { REPO } from './support/cli.ts';
 
 function newScene(): SceneDocument {
@@ -23,7 +22,7 @@ test('a document built from the defaults and the minimal analysis parses, unchan
   const result = parseDocument(doc);
   assert.ok(result.ok, result.ok ? '' : JSON.stringify(result.error));
   assert.deepEqual(result.value, doc);
-  assert.equal(doc.version, SCENE_VERSION);
+  assert.equal(doc.version, 5);
   assert.equal(doc.createdAt, doc.updatedAt);
   assert.deepEqual([doc.objects, doc.lights], [[], []]);
   assert.equal(doc.seed, 0xdead_beef);
@@ -79,6 +78,10 @@ test('a new object takes its defaults and the first free name, and a scene holdi
     motion: { kind: 'none' },
     thickness: 0.3,
     produced: first.produced,
+    content: { kind: 'source', source: { kind: 'photo' } }, origin: { kind: 'photo-region' },
+    placement: { translate: { x: 0, y: 0 }, pivot: { x: 600, y: 450 }, scale: 1, rotation: 0 },
+    home: { translate: { x: 0, y: 0 }, pivot: { x: 600, y: 450 }, scale: 1, rotation: 0 },
+    opacity: 1, depthAttachment: { kind: 'plane', disparity: .7 },
   });
   const light = newLight({ id: LIGHT_IDS[0], at: { x: 0.5, y: 0.25 } });
   assert.deepEqual(light, {
@@ -117,9 +120,9 @@ test('Parallax amount 2 belongs to new documents; saved amounts and legacy amoun
     assert.ok(result.ok);
     assert.equal(result.value.motion.parallax, parallax);
   }
-  const doc = newScene();
-  const { parallax: _parallax, ...motion } = doc.motion;
-  const legacy = parseDocument({ ...doc, version: 1, motion });
+  const doc = legacyMinimalDocument();
+  const { parallax: _parallax, drift, ...motion } = doc.motion;
+  const legacy = parseDocument({ ...doc, version: 1, motion: { ...motion, orbit: drift.amount } });
   assert.ok(legacy.ok);
   assert.equal(legacy.value.motion.parallax, 1);
 });

@@ -4,7 +4,7 @@ import { rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 import { galleryCreatedSchema, galleryDraftSchema, galleryListSchema, galleryManifestSchema } from '../src/core/gallery.ts';
-import { fiveClusterDocument } from './fixtures/documents.ts';
+import { legacyFiveClusterDocument as fiveClusterDocument } from './fixtures/documents.ts';
 import { startServer, tempDir } from './support/cli.ts';
 
 // Complete baseline JPEG encoding one gray pixel, including its entropy-coded scan.

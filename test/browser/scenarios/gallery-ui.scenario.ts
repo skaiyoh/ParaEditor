@@ -91,7 +91,7 @@ async function captures(t: ScenarioContext, name: string): Promise<void> {
       t.equal(`${size.width}: grid hint matches the input device`, await page.evaluate(z.string(), () => {
         const hint = document.querySelector<HTMLElement>('.gallery-hint');
         return hint?.innerText ?? '';
-      }), size.width === 390 ? 'Tap a piece to step into it. Tilt your phone to look around.' : 'Click a piece to step into it.');
+      }), size.width === 390 ? 'Tap a piece to step into it. Tilt to look around.' : 'Click a piece to step into it.');
       t.ok(`${size.width}: grid hint is centered 11 px secondary text after the grid`, await page.evaluate(z.boolean(), () => {
         const hint = document.querySelector('.gallery-hint');
         if (hint === null) return false;

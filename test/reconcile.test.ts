@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { NEED_OPS, plateNeeded, reconcile, type AnalysisOp, type CacheIndex, type Intent, type Need } from '../src/core/derive.ts';
 import { applyProduce, sortedMasks } from '../src/core/produce.ts';
-import { applyEdit } from '../src/core/reduce.ts';
+import { applyEdit, linkedRemoval } from '../src/core/reduce.ts';
 import { parseDocument } from '../src/core/schema.ts';
 import type { ObjectMotion, SceneDocument, SceneObject } from '../src/core/types.ts';
 import { assetId, minimalDocument, validDocuments } from './fixtures/documents.ts';
@@ -147,9 +147,10 @@ test('a missing or stale plate is listed last, for the current sorted masks, unl
   assert.deepEqual(reconcile(five, COLD, NONE, NO_INTENT), [], 'the five-cluster fixture holds every product, its plate current');
   const [first] = five.objects;
   assert.ok(first !== undefined);
-  const oneMask = { ...five, objects: [first] };
-  assert.deepEqual(reconcile(oneMask, COLD, NONE, NO_INTENT), [{ kind: 'plate', forMasks: [first.produced.mask.asset] }]);
-  assert.deepEqual(reconcile(oneMask, COLD, new Set(['inpaint']), NO_INTENT), []);
+  const oneMask = { ...five, objects: [first], removals: [linkedRemoval(first)] };
+  const required = plateProduct(0, sortedMasks(oneMask), oneMask).key;
+  assert.deepEqual(reconcile(oneMask, COLD, NONE, NO_INTENT, required), [{ kind: 'plate', forMasks: [first.produced.mask.asset] }]);
+  assert.deepEqual(reconcile(oneMask, COLD, new Set(['inpaint']), NO_INTENT, required), []);
   const fresh = { ...oneMask, analysis: { ...oneMask.analysis, depth: null } };
   assert.deepEqual(kinds(reconcile(fresh, COLD, NONE, { objectsActive: true, tapPending: false })), ['depth', 'encode', 'plate']);
 });
@@ -189,11 +190,11 @@ function generatedDocuments(): readonly { readonly label: string; readonly doc: 
                   return { ...base, subject: n === 0, motion: n === 0 ? objectMotion : { kind: 'none' }, produced: { ...base.produced, mask: { ...base.produced.mask, asset: assetId(0x400 - n) } } };
                 });
                 const base = minimalDocument();
-                const draft: SceneDocument = { ...base, objects, motion: { ...base.motion, enabled, drift: { direction: 'circle', amount: orbit } } };
+                const draft: SceneDocument = { ...base, objects, removals: objects.map(linkedRemoval), motion: { ...base.motion, enabled, drift: { direction: 'circle', amount: orbit } }, analysis: { ...base.analysis, depth, autoSubject } };
                 const forMasks = plate === 'current' ? sortedMasks(draft) : [assetId(0x3ff), assetId(0x3ff)];
                 const doc: SceneDocument = {
                   ...draft,
-                  analysis: { ...base.analysis, depth, autoSubject, plate: plate === 'none' ? null : plateProduct(0, forMasks) },
+                  analysis: { ...draft.analysis, plate: plate === 'none' ? null : plateProduct(0, forMasks, draft) },
                 };
                 out.push({ label: JSON.stringify({ depth: depth !== null, autoSubject, count, objectMotion: objectMotion.kind, enabled, orbit, plate }), doc });
               }

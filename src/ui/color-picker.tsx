@@ -7,6 +7,7 @@ import type { OperationTarget } from '../session/authoring.ts';
 import { useControlGesture } from './controls.tsx';
 import { Icon } from './icons.tsx';
 import { SWATCHES } from './swatches.tsx';
+import type { PaintModel } from './paint-model.ts';
 
 const INITIAL: Oklch = { l: .9, c: 0, h: 0 };
 const WHITE: InputColor = { hex: '#ffffff', srgb: { r: 255, g: 255, b: 255 }, oklch: { l: 1, c: 0, h: 0 } };
@@ -43,19 +44,28 @@ function colorFrom({ h, s, v }: Hsv): InputColor {
   return parsed.kind === 'valid' ? parsed.color : WHITE;
 }
 
-export function ColorPicker({ session, palette, pending, clearPending, active }: {
+export function ColorPicker({ session, palette, pending, clearPending, active, paint = null }: {
   readonly session: DemoSession; readonly palette: ColorPalette; readonly pending: PendingColor;
   readonly clearPending: () => void; readonly active: boolean;
+  readonly paint?: PaintModel | null;
 }) {
+  const ink = paint !== null && paint.tool !== null ? paint : null;
+  const [previousInk, setPreviousInk] = useState<Oklch>(ink?.brush.color ?? INITIAL);
+  const inkPointer = useRef<{ pointer: number; node: HTMLDivElement; color: Oklch } | null>(null);
   const state = session.snapshot(), doc = session.previewDocument();
   const selected = doc?.objects.find((object) => object.id === state.scene?.selected);
   const committed = state.scene?.doc.objects.find((object) => object.id === selected?.id)?.recolor;
-  const target: OperationTarget = selected === undefined ? { kind: 'scene' } : { kind: 'layer', id: selected.id };
+  const selection = session.selectionState().selection;
+  const selectionTarget = selection !== null;
+  const [treatment, setTreatment] = useState<'recolor' | 'fill'>('recolor');
+  const target: OperationTarget = selectionTarget ? { kind: 'selection' } : selected === undefined ? { kind: 'scene' } : { kind: 'layer', id: selected.id };
   const availability = session.capability({ operation: 'color', target });
-  const disabled = availability.kind === 'unavailable';
-  const previous = committed?.kind === 'target' ? committed.color : null;
-  const sampled = pending?.layer === selected?.id ? pending?.color : undefined;
-  const current = sampled ?? (selected === undefined ? displayColor(palette.last) : selected.recolor.kind === 'target' ? displayColor(selected.recolor.color) : null);
+  const disabled = ink === null && availability.kind === 'unavailable';
+  const local = doc?.localEffects.findLast(effect => effect.scope.kind === 'mask' && effect.scope.mask.plane.asset === selection?.mask.plane.asset && effect.operation.kind === treatment);
+  const localColor = local?.operation.kind === 'recolor' || local?.operation.kind === 'fill' ? local.operation.color : palette.last;
+  const previous = ink !== null ? previousInk : selectionTarget ? localColor : committed?.kind === 'target' ? committed.color : null;
+  const sampled = ink === null && pending?.layer === (selectionTarget ? 'selection' : selected?.id) ? pending?.color : undefined;
+  const current = ink !== null ? displayColor(ink.brush.color) : sampled ?? (selectionTarget ? displayColor(localColor) : selected === undefined ? displayColor(palette.last) : selected.recolor.kind === 'target' ? displayColor(selected.recolor.color) : null);
   const controlColor = current ?? displayColor(INITIAL);
   const currentHex = current?.hex ?? '';
   const [hsv, setHsv] = useState(() => hsvFrom(controlColor));
@@ -64,22 +74,28 @@ export function ColorPicker({ session, palette, pending, clearPending, active }:
   const hexInput = useRef<HTMLInputElement>(null);
   const editedHex = useRef(false);
   const ownHex = useRef<string | null>(null);
-  const latest = useRef({ current, selected, palette, clearPending });
-  latest.current = { current, selected, palette, clearPending };
+  const latest = useRef({ current, selected, palette, clearPending, selectionTarget, treatment, ink });
+  latest.current = { current, selected, palette, clearPending, selectionTarget, treatment, ink };
   const resetDisplay = (): void => {
     ownHex.current = null;
     const object = session.previewDocument()?.objects.find((object) => object.id === session.snapshot().scene?.selected);
-    const display = object === undefined ? displayColor(latest.current.palette.last) : object.recolor.kind === 'target' ? displayColor(object.recolor.color) : null;
+    const mask = session.selectionState().selection?.mask.plane.asset;
+    const local = session.snapshot().scene?.doc.localEffects.findLast(effect => effect.scope.kind === 'mask' && effect.scope.mask.plane.asset === mask && effect.operation.kind === latest.current.treatment);
+    const color = local?.operation.kind === 'recolor' || local?.operation.kind === 'fill' ? local.operation.color : latest.current.palette.last;
+    const display = latest.current.ink !== null ? displayColor(latest.current.ink.brush.color) : latest.current.selectionTarget ? displayColor(color) : object === undefined ? displayColor(latest.current.palette.last) : object.recolor.kind === 'target' ? displayColor(object.recolor.color) : null;
     setHsv(hsvFrom(display ?? displayColor(INITIAL))); setHex(display?.hex ?? ''); editedHex.current = false; setError(null);
   };
   useLayoutEffect(() => {
     if (ownHex.current !== currentHex) setHsv(hsvFrom(controlColor));
     if (!editedHex.current) setHex(currentHex);
   }, [currentHex]);
-  useLayoutEffect(() => { editedHex.current = false; setHex(currentHex); setError(null); }, [selected?.id, active, sampled]);
+  useLayoutEffect(() => { editedHex.current = false; setHex(currentHex); setError(null); }, [selected?.id, selectionTarget, treatment, active, sampled, ink !== null]);
   useLayoutEffect(() => {
-    if (active && !disabled) session.setTarget(target);
-  }, [session, active, selected?.id, disabled]);
+    if (ink === null && active && !disabled) session.setTarget(target);
+  }, [session, active, selected?.id, selectionTarget, disabled, ink !== null]);
+  useLayoutEffect(() => {
+    if (ink !== null && active) setPreviousInk(ink.brush.color);
+  }, [ink !== null, active]);
   useLayoutEffect(() => {
     const input = hexInput.current;
     const cancel = (): void => { editedHex.current = false; setHex(latest.current.current?.hex ?? ''); setError(null); };
@@ -88,10 +104,15 @@ export function ColorPicker({ session, palette, pending, clearPending, active }:
   }, []);
   const apply = (color: Oklch | null): void => {
     if (disabled) return;
-    session.setTarget(target);
-    const result = session.setColor({ target, color });
-    if (result.kind === 'refused') { setError(result.reason); return; }
-    if (result.kind === 'cancelled') return;
+    if (ink !== null) {
+      if (color === null) return;
+      setPreviousInk(ink.brush.color); ink.setBrush({ color });
+    } else {
+      session.setTarget(target);
+      const result = selectionTarget && color !== null ? session.setLocalOperation({ target, operation: { kind: treatment, color } }) : session.setColor({ target, color });
+      if (result.kind === 'refused') { setError(result.reason); return; }
+      if (result.kind === 'cancelled') return;
+    }
     if (color !== null) palette.remember(color);
     clearPending(); editedHex.current = false; setError(null);
     if (color !== null) { const display = displayColor(color); setHex(display.hex); setHsv(hsvFrom(display)); }
@@ -103,18 +124,34 @@ export function ColorPicker({ session, palette, pending, clearPending, active }:
     apply(parsed.color.oklch);
   };
   const gesture = useControlGesture({ session,
-    start: () => ({ operation: 'color', target }),
+    start: () => ({ operation: selectionTarget && treatment === 'fill' ? 'fill' : 'color', target }),
     committed() {
       const object = session.snapshot().scene?.doc.objects.find((entry) => entry.id === session.snapshot().scene?.selected);
-      if (object?.recolor.kind === 'target') latest.current.palette.remember(object.recolor.color);
+      if (latest.current.current !== null && session.authoringState().target.kind === 'selection') latest.current.palette.remember(latest.current.current.oklch);
+      else if (object?.recolor.kind === 'target') latest.current.palette.remember(object.recolor.color);
       latest.current.clearPending(); editedHex.current = false;
     }, cancelled: resetDisplay,
   });
   useLayoutEffect(() => { if (!active) gesture.cancel(); }, [active]);
+  const finishInk = (): void => {
+    const current = inkPointer.current; inkPointer.current = null;
+    if (current === null) return;
+    latest.current.palette.remember(current.color);
+    if (current.node.hasPointerCapture(current.pointer)) current.node.releasePointerCapture(current.pointer);
+  };
+  useLayoutEffect(() => {
+    if (!active || ink === null) finishInk();
+    return () => finishInk();
+  }, [active, ink !== null]);
   const update = (value: Hsv): void => {
     const color = colorFrom(value); ownHex.current = color.hex;
     setHsv(value); setHex(color.hex); setError(null); editedHex.current = false;
-    clearPending(); gesture.update({ kind: 'color', color: color.oklch });
+    clearPending();
+    if (ink !== null) {
+      if (inkPointer.current !== null) inkPointer.current.color = color.oklch;
+      else { setPreviousInk(ink.brush.color); palette.remember(color.oklch); }
+      ink.setBrush({ color: color.oklch });
+    } else gesture.update({ kind: selectionTarget && treatment === 'fill' ? 'fill' : 'color', color: color.oklch });
   };
   const point = (event: JSX.TargetedPointerEvent<HTMLDivElement>, kind: 'sv' | 'hue'): void => {
     const box = event.currentTarget.getBoundingClientRect();
@@ -152,18 +189,41 @@ export function ColorPicker({ session, palette, pending, clearPending, active }:
     onPointerDown(event: JSX.TargetedPointerEvent<HTMLDivElement>) {
       if (disabled) return;
       event.preventDefault(); event.currentTarget.focus();
+      if (ink !== null) {
+        if (event.button !== 0 || inkPointer.current !== null) return;
+        setPreviousInk(ink.brush.color);
+        inkPointer.current = { pointer: event.pointerId, node: event.currentTarget, color: ink.brush.color };
+        try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Synthetic input has no native capture. */ }
+        point(event, kind); return;
+      }
       if (gesture.begin(event)) point(event, kind);
     },
-    onPointerMove(event: JSX.TargetedPointerEvent<HTMLDivElement>) { if (gesture.owns(event.pointerId)) point(event, kind); },
-    onPointerUp(event: JSX.TargetedPointerEvent<HTMLDivElement>) { if (gesture.owns(event.pointerId)) { point(event, kind); gesture.commit(); } },
-    onPointerCancel: () => gesture.cancel(), onLostPointerCapture: gesture.lost,
+    onPointerMove(event: JSX.TargetedPointerEvent<HTMLDivElement>) {
+      if (ink !== null) { if (inkPointer.current?.pointer === event.pointerId) point(event, kind); return; }
+      if (gesture.owns(event.pointerId)) point(event, kind);
+    },
+    onPointerUp(event: JSX.TargetedPointerEvent<HTMLDivElement>) {
+      if (ink !== null) { if (inkPointer.current?.pointer === event.pointerId) { point(event, kind); finishInk(); } return; }
+      if (gesture.owns(event.pointerId)) { point(event, kind); gesture.commit(); }
+    },
+    onPointerCancel(event: JSX.TargetedPointerEvent<HTMLDivElement>) {
+      if (ink !== null) { if (inkPointer.current?.pointer === event.pointerId) finishInk(); return; }
+      gesture.cancel();
+    },
+    onLostPointerCapture(event: JSX.TargetedPointerEvent<HTMLDivElement>) {
+      if (ink !== null) { if (inkPointer.current?.pointer === event.pointerId) finishInk(); return; }
+      gesture.lost(event);
+    },
     onKeyDown: (event: JSX.TargetedKeyboardEvent<HTMLDivElement>) => key(event, kind),
   });
-  return <section class="color-picker" aria-label="Object color">
-    <div class="panel-title"><h2>Color</h2><span data-testid="color-target">{selected?.name ?? 'Select an object'}</span></div>
-    {availability.kind === 'unavailable' && <p class="color-help" data-testid="color-unavailable">{availability.reason}</p>}
+  return <section class="color-picker" aria-label="Color">
+    <div class="panel-title"><h2>Color</h2><span data-testid="color-target">{ink !== null ? 'Brush ink' : selectionTarget ? 'Selection' : selected?.name ?? 'Select an object'}</span></div>
+    {ink === null && selectionTarget && <div class="color-segment selection-treatment" role="group" aria-label="Selection treatment">
+      {(['recolor', 'fill'] satisfies readonly ('recolor' | 'fill')[]).map(kind => <button type="button" data-testid={`selection-${kind}`} aria-pressed={treatment === kind} onClick={() => { gesture.cancel(); setTreatment(kind); }}>{kind === 'recolor' ? 'Recolor' : 'Fill'}</button>)}
+    </div>}
+    {ink === null && availability.kind === 'unavailable' && <p class="color-help" data-testid="color-unavailable">{availability.reason}</p>}
     <fieldset class="color-controls" disabled={disabled}>
-      <legend class="visually-hidden">Recolor {selected?.name ?? 'selected object'}</legend>
+      <legend class="visually-hidden">{ink !== null ? 'Brush ink' : selectionTarget ? `${treatment === 'fill' ? 'Fill' : 'Recolor'} Selection` : `Recolor ${selected?.name ?? 'selected object'}`}</legend>
       <div class="color-sv" data-testid="color-sv" role="slider" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
         aria-label="Saturation and value" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(hsv.s * 100)}
         aria-valuetext={`Saturation ${Math.round(hsv.s * 100)}%, value ${Math.round(hsv.v * 100)}%`}
@@ -204,7 +264,7 @@ export function ColorPicker({ session, palette, pending, clearPending, active }:
             }} />
         </label>)}
       </div>
-      <div class="color-sample-row">
+      {ink === null && <div class="color-sample-row">
         <span>Sample from</span>
         <div class="color-segment" role="group" aria-label="Sample source">
           {(['edited', 'source'] satisfies readonly ('edited' | 'source')[]).map((mode) => <button type="button" key={mode} data-testid={`sample-mode-${mode}`}
@@ -212,7 +272,7 @@ export function ColorPicker({ session, palette, pending, clearPending, active }:
         </div>
         <button type="button" class="icon-button" data-testid="color-sampler" aria-label={`Sample color from ${state.authoring.sampleMode === 'edited' ? 'Edited' : 'Source'}`}
           title="Sample a color" aria-pressed={state.authoring.tool === 'sample'} onClick={() => { session.setTarget(target); session.setTool(state.authoring.tool === 'sample' ? 'select' : 'sample'); }}><Icon name="sampler" /></button>
-      </div>
+      </div>}
       {sampled !== undefined && <button type="button" class="color-apply" data-testid="color-apply" onClick={() => apply(sampled.oklch)}><Icon name="check" />Apply {sampled.hex}</button>}
       <h3 class="color-group-heading">Recent</h3>
       {palette.recent.length === 0 ? <p class="color-help">Colors you apply appear here.</p> : <div class="color-swatches" role="group" aria-label="Recent colors">
@@ -222,7 +282,7 @@ export function ColorPicker({ session, palette, pending, clearPending, active }:
       <h3 class="color-group-heading">Presets</h3>
       <div class="color-swatches" role="group" aria-label="Preset colors">
         {SWATCHES.map(({ name, color }) => <button class="swatch" type="button" key={name} aria-label={name} title={name}
-          aria-pressed={selected?.recolor.kind === 'target' && sameColor(selected.recolor.color, color)}
+          aria-pressed={current !== null && sameColor(current.oklch, color)}
           style={{ background: `oklch(${color.l * 100}% ${color.c} ${color.h})` }} onClick={() => apply(color)} />)}
       </div>
     </fieldset>

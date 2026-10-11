@@ -6,13 +6,14 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { Plane } from '../src/core/raster.ts';
 import type { Edit } from '../src/core/edits.ts';
-import { COALESCE_WINDOW_MS, coalesceKey, EMPTY_HISTORY, HISTORY_LIMIT, push, recordEdit, redo, referencedAssets, undo, type History, type HistoryEntry } from '../src/core/history.ts';
+import { COALESCE_WINDOW_MS, coalesceKey, EMPTY_HISTORY, HISTORY_LIMIT, push, recordEdit, recordSelection, redo, referencedAssets, undo, type History, type DocumentHistoryEntry, type HistoryEntry } from '../src/core/history.ts';
 import type { AssetId } from '../src/core/ids.ts';
 import { applyProduce } from '../src/core/produce.ts';
 import { applyEdit, applyEdits } from '../src/core/reduce.ts';
-import type { SceneDocument, SceneObject } from '../src/core/types.ts';
-import { assetId, fiveClusterDocument, LIGHT_IDS, OBJECT_IDS } from './fixtures/documents.ts';
+import type { ActiveSelection, SceneDocument, SceneObject } from '../src/core/types.ts';
+import { assetId, fiveClusterDocument, LIGHT_IDS, minimalDocument, OBJECT_IDS } from './fixtures/documents.ts';
 import { newLightAt, objectId, tappedObject } from './fixtures/edits.ts';
 import { depthProduct } from './fixtures/products.ts';
 
@@ -21,7 +22,7 @@ const [KEY_LIGHT] = LIGHT_IDS;
 
 test('the recorded mutation boundary defaults to distinct actions but preserves explicit legacy coalescing', () => {
   for (const legacy of [false, true]) {
-    let doc = fiveClusterDocument(), history = EMPTY_HISTORY;
+    let doc: SceneDocument = fiveClusterDocument(), history = EMPTY_HISTORY;
     for (let at = 0; at < 3; at++) {
       const change: Edit = { kind: 'symbols', patch: { amount: .1 * at } };
       const result = recordEdit({ doc, history, edit: change, now: stamp(at), at,
@@ -62,6 +63,8 @@ function edit(session: Session, change: Edit, at: number): Session {
 function stepBack(session: Session, at: number): Session {
   const step = undo(session.history);
   assert.ok(step !== null, 'nothing to undo');
+  assert.equal(step.kind, 'document');
+  if (step.kind !== 'document') throw new Error('Expected a document history step.');
   const result = applyEdits(session.doc, step.edits, stamp(at));
   assert.notEqual(result.kind, 'refused');
   return { doc: result.doc, history: step.history };
@@ -70,6 +73,8 @@ function stepBack(session: Session, at: number): Session {
 function stepForward(session: Session, at: number): Session {
   const step = redo(session.history);
   assert.ok(step !== null, 'nothing to redo');
+  assert.equal(step.kind, 'document');
+  if (step.kind !== 'document') throw new Error('Expected a document history step.');
   const result = applyEdits(session.doc, step.edits, stamp(at));
   assert.notEqual(result.kind, 'refused');
   return { doc: result.doc, history: step.history };
@@ -88,7 +93,7 @@ function content(doc: SceneDocument): Omit<SceneDocument, 'updatedAt'> {
 /** A document whose saturation is not 0, so no `entry` below undoes as unchanged on it. */
 const DOC = fiveClusterDocument();
 
-function entry(key: string | null, at: number, n = 0): HistoryEntry {
+function entry(key: string | null, at: number, n = 0): DocumentHistoryEntry {
   return { key, at, forward: [{ kind: 'style', patch: { saturation: n / 100 } }], inverse: [{ kind: 'style', patch: { saturation: 0 } }] };
 }
 
@@ -159,6 +164,7 @@ test('a drag on one swatch is one undo step, and undoing it clears a cluster tha
   for (let n = 0; n < 10; n++) session = edit(session, { kind: 'palette.target', cluster: 2, color: { l: 0.5, c: 0.1, h: n * 30 } }, n * 200);
   assert.equal(session.history.undo.length, 1);
   const [step] = session.history.undo;
+  assert.ok(step !== undefined && !('kind' in step));
   assert.deepEqual(step?.forward, [{ kind: 'palette.target', cluster: 2, color: { l: 0.5, c: 0.1, h: 270 } }]);
   assert.deepEqual(step?.inverse, [{ kind: 'palette.target', cluster: 2, color: null }]);
   assert.equal(step?.at, 1800);
@@ -259,7 +265,7 @@ test('an edit after an undo or a redo starts a step of its own, though its key a
   session = edit(session, { kind: 'style', patch: { grain: 0.1 } }, 100);
   session = stepBack(session, 200);
   session = edit(session, { kind: 'style', patch: { saturation: 0.2 } }, 300);
-  assert.deepEqual(session.history.undo.map((e) => e.inverse), [[{ kind: 'style', patch: { saturation: 0.62 } }], [{ kind: 'style', patch: { saturation: 0.1 } }]]);
+  assert.deepEqual(session.history.undo.map((e) => { assert.ok(!('kind' in e)); return e.inverse; }), [[{ kind: 'style', patch: { saturation: 0.62 } }], [{ kind: 'style', patch: { saturation: 0.1 } }]]);
   session = stepBack(session, 400);
   assert.equal(session.doc.style.saturation, 0.1);
 
@@ -318,7 +324,7 @@ test('referencedAssets lists the masks of object.add, of object.remove inverses,
   session = edit(session, { kind: 'object.remove', id: BOX }, 1000);
   session = edit(session, { kind: 'object.refine', id: SUBJECT, produced: { ...subject.produced, mask: { ...subject.produced.mask, asset: assetId(0x71) } } }, 2000);
   session = edit(session, { kind: 'style', patch: { saturation: 0.1 } }, 3000);
-  const all = new Set([assetId(0x70), assetId(0x32), assetId(0x31), assetId(0x71)]);
+  const all = new Set([assetId(0x70), assetId(0x32), assetId(0x31), assetId(0x71), assetId(0x20)]);
   assert.deepEqual(referencedAssets(session.history), all);
   // Undone, the add, the remove, and the refine sit on the redo stack, and still count.
   for (let n = 0; n < 4; n++) session = stepBack(session, 4000 + n);
@@ -353,7 +359,7 @@ test('undo after a depth product lands keeps the depth, and a product never ente
   assert.equal(session.history, history);
   session = stepBack(stepBack(session, 2000), 2100);
   assert.deepEqual(session.doc.analysis.depth, depthProduct(3));
-  assert.deepEqual(content(session.doc), content({ ...before, analysis: { ...before.analysis, depth: depthProduct(3) } }));
+  assert.deepEqual(content(session.doc), content({ ...before, analysis: { ...before.analysis, depth: depthProduct(3), plate: null } }));
   session = stepForward(stepForward(session, 2200), 2300);
   assert.deepEqual(session.doc.analysis.depth, depthProduct(3));
   assert.equal(session.doc.objects.length, 1);
@@ -407,4 +413,49 @@ test('discarding redo releases masks referenced only by that history branch', ()
   assert.ok(referencedAssets(session.history).has(asset));
   session = edit(session, { kind: 'title', title: 'A different branch' }, 2000);
   assert.equal(referencedAssets(session.history).has(asset), false);
+});
+
+
+test('selection operations share chronological Undo with document edits and retain immutable before/after masks', () => {
+  const doc = minimalDocument();
+  const before: ActiveSelection = { space: { kind: 'photo' }, mask: { plane: { asset: assetId(0x901), format: 'u8', size: { width: 2, height: 2 } }, provenance: { kind: 'manual', operation: 'rectangle' } } };
+  const after: ActiveSelection = { ...before, mask: { ...before.mask, plane: { ...before.mask.plane, asset: assetId(0x902) }, provenance: { kind: 'manual', operation: 'add' } } };
+  const masks = new Map([
+    [before.mask.plane.asset, { format: 'u8', size: { width: 2, height: 2 }, data: new Uint8Array([255, 0, 0, 0]) } satisfies Plane<'u8'>],
+    [after.mask.plane.asset, { format: 'u8', size: { width: 2, height: 2 }, data: new Uint8Array([255, 255, 0, 0]) } satisfies Plane<'u8'>],
+  ]);
+  let history = recordSelection({ doc, history: EMPTY_HISTORY, before: null, after: before, at: 0, masks });
+  history = recordSelection({ doc, history, before, after, at: 1, masks });
+  assert.equal(history.undo.length, 2, 'two quick completed selection operations remain separate');
+  assert.deepEqual(referencedAssets(history), new Set([before.mask.plane.asset, after.mask.plane.asset]));
+  const last = history.undo.at(-1); assert.ok(last?.selection);
+  assert.ok(Object.isFrozen(last.selection) && Object.isFrozen(last.selection.after) && Object.isFrozen(last.selection.after?.mask));
+  assert.notEqual(last.selection.after, after);
+  Reflect.set(after.mask.plane, 'asset', assetId(0x999));
+  assert.equal(last.selection.after?.mask.plane.asset, assetId(0x902));
+  const recorded = recordEdit({ doc, history, edit: { kind: 'style', patch: { clipping: .7 } }, now: stamp(2), at: 2 });
+  assert.equal(recorded.kind, 'applied');
+  const documentBack = undo(recorded.history); assert.ok(documentBack && documentBack.kind === 'document');
+  assert.equal(applyEdits(recorded.doc, documentBack.edits, stamp(3)).doc.style.clipping, doc.style.clipping);
+  const selectionBack = undo(documentBack.history); assert.ok(selectionBack && selectionBack.kind === 'selection');
+  assert.deepEqual(selectionBack.selection, before);
+  const selectionForward = redo(selectionBack.history); assert.ok(selectionForward && selectionForward.kind === 'selection');
+  assert.deepEqual(selectionForward.selection, last.selection.after);
+  assert.equal(recordSelection({ doc, history, before, after: before, at: 3 }), history, 'a selection no-op keeps history identity');
+});
+
+test('selection-only history obeys the shared 50-step bound and preserves roots needed by retained steps', () => {
+  const doc = minimalDocument();
+  let history = EMPTY_HISTORY, previous: ActiveSelection = null;
+  for (let n = 1; n <= HISTORY_LIMIT + 1; n++) {
+    const next: ActiveSelection = { space: { kind: 'photo' }, mask: { plane: { asset: assetId(0xa00 + n), format: 'u8', size: { width: 2, height: 2 } }, provenance: { kind: 'manual', operation: 'rectangle' } } };
+    history = recordSelection({ doc, history, before: previous, after: next, at: n });
+    previous = next;
+  }
+  assert.equal(history.undo.length, HISTORY_LIMIT);
+  assert.ok(referencedAssets(history).has(assetId(0xa01)), 'first retained inverse still requires the earlier selection');
+  assert.ok(referencedAssets(history).has(assetId(0xa33)), 'last selection remains redoable');
+  const cleared = recordSelection({ doc, history, before: previous, after: null, at: 99 });
+  assert.equal(cleared.undo.length, HISTORY_LIMIT);
+  assert.equal(referencedAssets(cleared).has(assetId(0xa01)), false, 'only evicted roots can be released');
 });

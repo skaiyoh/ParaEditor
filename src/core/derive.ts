@@ -9,8 +9,10 @@ import { sameValue } from './equal.ts';
 import type { AssetId, NonEmpty, ObjectId } from './ids.ts';
 import { effectiveOrbit, motionBound, parallaxMargin, type Vec2 } from './motion.ts';
 import { sortedMasks } from './produce.ts';
+import { collectCompositionAssets } from './asset-refs.ts';
+import { inspectRaster, RASTER_HEADER_BYTES } from './asset-codec.ts';
 import type { ImagePoint, Plane, Rect, Size } from './raster.ts';
-import type { SceneDocument, SceneObject } from './types.ts';
+import type { SceneDocument, SceneObject, RepairRequestKey, LegacySceneDocument } from './types.ts';
 
 // ---------------------------------------------------------------------------
 // layers
@@ -168,7 +170,7 @@ function axisTaps(count: number, texels: number): { readonly lo: Int32Array; rea
  * Sets to 255 every texel of `hole` (of `size`) whose center `mask` covers:
  * maskCovers's rule, with the taps of each column and row computed once.
  */
-function markCovered(hole: Uint8Array, size: Size, mask: Plane<'u8'>): void {
+function markCovered(hole: Uint8Array, size: Size, mask: Plane<'u8'>, threshold = 128): void {
   const xs = axisTaps(size.width, mask.size.width);
   const ys = axisTaps(size.height, mask.size.height);
   const data = mask.data;
@@ -185,7 +187,7 @@ function markCovered(hole: Uint8Array, size: Size, mask: Plane<'u8'>): void {
       const wx = xs.weight[x] ?? 0;
       const upper = (data[top + left] ?? 0) * (SUBTEXEL - wx) + (data[top + right] ?? 0) * wx;
       const lower = (data[bottom + left] ?? 0) * (SUBTEXEL - wx) + (data[bottom + right] ?? 0) * wx;
-      if (upper * (SUBTEXEL - wy) + lower * wy >= COVERED_AT) hole[row + x] = 255;
+      if (upper * (SUBTEXEL - wy) + lower * wy >= threshold * SUBTEXEL * SUBTEXEL) hole[row + x] = 255;
     }
   }
 }
@@ -270,18 +272,43 @@ function dilate(hole: Uint8Array, size: Size, radius: number): Uint8Array {
  * long edge of `size`, rounded up to whole texels (21 at 2048), scaled by
  * Parallax and rounded up again; 0 elsewhere.
  */
-export function holeMask(doc: SceneDocument, masks: ReadonlyMap<ObjectId, Plane<'u8'>>, size: Size): Plane<'u8'> {
+export function holeMask(doc: SceneDocument | LegacySceneDocument, masks: ReadonlyMap<ObjectId, Plane<'u8'>>, size: Size): Plane<'u8'> {
   const hole = new Uint8Array(size.width * size.height);
-  for (const object of doc.objects) {
+  if (doc.version === 4) for (const object of doc.objects) {
     const mask = masks.get(object.id);
     if (mask !== undefined) markCovered(hole, size, mask);
+  } else for (const removal of doc.removals) {
+    const mask = removal.ownership.kind === 'legacy-layer' ? masks.get(removal.ownership.layer) : undefined;
+    if (mask !== undefined) markCovered(hole, size, mask, removal.threshold);
   }
   const radius = holeRadius(doc, size);
   return { format: 'u8', size: { width: size.width, height: size.height }, data: dilate(hole, size, radius) };
 }
 
+/** Source removal is explicit. Selection and local effects never enter this union. */
+export function sourceRemovalUnion(doc: SceneDocument, masks: ReadonlyMap<AssetId, Plane<'u8'>>, size = doc.frame.master.size): Plane<'u8'> {
+  const data = new Uint8Array(size.width * size.height);
+  for (const removal of doc.removals) {
+    const mask = masks.get(removal.mask.plane.asset);
+    if (mask === undefined) throw new Error('A source removal mask is unavailable.');
+    markCovered(data, size, mask, removal.threshold);
+  }
+  return { format: 'u8', size: { ...size }, data };
+}
+
+export function repairHole(doc: SceneDocument, union: Plane<'u8'>): Plane<'u8'> {
+  return { format: 'u8', size: { ...union.size }, data: dilate(union.data, union.size, holeRadius(doc, union.size)) };
+}
+
+/** Metadata gate; the session/driver additionally validates exact union and hole bytes. */
+export function plateKeyMatches(doc: SceneDocument, key: RepairRequestKey): boolean {
+  return key.source === doc.frame.master.asset && sameValue(key.size, doc.frame.master.size) &&
+    key.depth === (doc.analysis.depth?.map.asset ?? null) && key.radius === holeRadius(doc, doc.frame.master.size) &&
+    sameValue(key.purpose, doc.motion.enabled ? { kind: 'loop', parallax: doc.motion.parallax, reach: effectiveOrbit(doc.motion) } : { kind: 'still' });
+}
+
 /** Scale today's rounded dilation radius so Parallax 1 preserves it and 2 doubles it exactly. */
-export function holeRadius(doc: SceneDocument, size: Size): number {
+export function holeRadius(doc: SceneDocument | LegacySceneDocument, size: Size): number {
   return Math.ceil(Math.ceil(Math.max(size.width, size.height) / 100) * doc.motion.parallax);
 }
 
@@ -289,16 +316,63 @@ export function holeRadius(doc: SceneDocument, size: Size): number {
 // the plate, the anchor, and the assets
 
 /**
- * True when hidden layers or motion expose the background, and the stored
- * plate was not made for the current masks. Hidden layers need a plate even
- * with Motion off; every mask remains in its inpaint/freshness input.
+ * True when hidden layers or motion expose the background without a matching
+ * repair. Metadata checks source, extent, depth, radius and reveal envelope;
+ * callers with the exact request also check union/hole digests and model.
  */
-export function plateNeeded(doc: SceneDocument): boolean {
+export function plateNeeded(doc: SceneDocument, required?: RepairRequestKey): boolean {
   if (doc.objects.length === 0) return false;
   const hidden = doc.objects.some((object) => object.hidden);
   const moves = doc.motion.enabled && (effectiveOrbit(doc.motion) > 0 || doc.objects.some((object) => object.motion.kind !== 'none'));
   if (!hidden && !moves) return false;
-  return !sameValue(sortedMasks(doc), doc.analysis.plate?.forMasks ?? null);
+  return doc.analysis.plate === null || !plateKeyMatches(doc, doc.analysis.plate.key) ||
+    (required !== undefined && !sameValue(doc.analysis.plate.key, required));
+}
+
+/** A published piece needs a complete repair even when editing Motion is off. */
+export function publicationPlateNeeded(doc: SceneDocument, assets: ReadonlyMap<AssetId, Uint8Array>): boolean {
+  return doc.objects.length > 0 && (doc.analysis.plate === null || renderingPrerequisites(doc, assets).kind !== 'ready');
+}
+
+/** A saved scene must contain the exact repair its committed rendering needs. */
+export function renderingPrerequisites(doc: SceneDocument, assets: ReadonlyMap<AssetId, Uint8Array>):
+  { readonly kind: 'ready' } | { readonly kind: 'preparing'; readonly reason: string } {
+  const preparing = (reason: string) => ({ kind: 'preparing' as const, reason });
+  if (plateNeeded(doc)) return preparing('The required background repair is still preparing.');
+  const plate = doc.analysis.plate;
+  if (plate === null) return { kind: 'ready' };
+  if (!plateKeyMatches(doc, plate.key)) return preparing('The background repair does not match the current composition.');
+  if (!assets.has(plate.image.asset) || !assets.has(plate.backgroundDepth.asset)) {
+    return preparing('The required background repair assets are unavailable.');
+  }
+  try {
+    const mask = (asset: AssetId, size: Size): Plane<'u8'> => {
+      const bytes = assets.get(asset);
+      if (bytes === undefined) throw new Error('A repair mask is unavailable.');
+      const actual = inspectRaster(bytes);
+      if (actual.format !== 'u8' || !sameValue(actual.size, size)) throw new Error('A repair mask does not match its extent.');
+      return { format: 'u8', size: actual.size, data: bytes.subarray(RASTER_HEADER_BYTES) };
+    };
+    const masks = new Map(doc.removals.map(removal => [removal.mask.plane.asset,
+      mask(removal.mask.plane.asset, removal.mask.plane.size)]));
+    const union = sourceRemovalUnion(doc, masks), hole = repairHole(doc, union);
+    const samePixels = (expected: Plane<'u8'>, asset: AssetId): boolean => {
+      const actual = mask(asset, expected.size);
+      return actual.data.length === expected.data.length && actual.data.every((value, i) => value === expected.data[i]);
+    };
+    if (!samePixels(union, plate.key.removalUnion) || !samePixels(hole, plate.key.hole)) {
+      return preparing('The background repair does not match its exact source removal and hole.');
+    }
+    const depthBytes = assets.get(plate.backgroundDepth.asset);
+    if (depthBytes === undefined) return preparing('The saved background depth is unavailable.');
+    const background = inspectRaster(depthBytes);
+    if (background.format !== 'f32' || !sameValue(background.size, plate.backgroundDepth.size)) {
+      return preparing('The saved background depth does not match its repair.');
+    }
+    return { kind: 'ready' };
+  } catch (error) {
+    return preparing(error instanceof Error ? error.message : 'The required background repair is invalid.');
+  }
 }
 
 /**
@@ -353,13 +427,9 @@ export function objectMotionBound(doc: SceneDocument, id: ObjectId): Vec2 {
  * object's mask.
  */
 export function assetRefs(doc: SceneDocument): ReadonlySet<AssetId> {
-  const refs = new Set<AssetId>();
-  if (doc.frame.source !== null) refs.add(doc.frame.source.asset);
-  refs.add(doc.frame.master.asset);
-  if (doc.analysis.depth !== null) refs.add(doc.analysis.depth.map.asset);
-  if (doc.analysis.plate !== null) refs.add(doc.analysis.plate.image.asset);
-  for (const object of doc.objects) refs.add(object.produced.mask.asset);
-  return refs;
+  const inventory = collectCompositionAssets([{ kind: 'document', document: doc }]);
+  if (!inventory.ok) throw new Error(inventory.error.detail);
+  return new Set(inventory.value.keys());
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +480,7 @@ export const NEED_OPS: Readonly<Record<Need['kind'], readonly AnalysisOp[]>> = {
  * that existed only for it. Timing (debounce, cooldown, visibility) is the
  * driver's.
  */
-export function reconcile(doc: SceneDocument, cache: CacheIndex, blocked: ReadonlySet<AnalysisOp>, intent: Intent): readonly Need[] {
+export function reconcile(doc: SceneDocument, cache: CacheIndex, blocked: ReadonlySet<AnalysisOp>, intent: Intent, required?: RepairRequestKey): readonly Need[] {
   const plan: Need[] = [];
   const list = (need: Need): boolean => {
     if (NEED_OPS[need.kind].some((op) => blocked.has(op))) return false;
@@ -421,6 +491,6 @@ export function reconcile(doc: SceneDocument, cache: CacheIndex, blocked: Readon
   const subjectWanted = doc.analysis.autoSubject === 'pending' && doc.objects.length === 0 && (doc.analysis.depth !== null || depthListed);
   const encodeListed = !cache.embeddings && (subjectWanted || intent.objectsActive || intent.tapPending) && list({ kind: 'encode' });
   if (subjectWanted && (cache.embeddings || encodeListed)) list({ kind: 'auto-subject' });
-  if (plateNeeded(doc)) list({ kind: 'plate', forMasks: sortedMasks(doc) });
+  if (plateNeeded(doc, required)) list({ kind: 'plate', forMasks: sortedMasks(doc) });
   return plan;
 }
