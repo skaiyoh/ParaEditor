@@ -383,6 +383,7 @@ button.layer-row.is-selected:focus-visible,
 .gallery-strip { min-height: calc(52px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(8px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left)); display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--panel); border-bottom: 1px solid var(--hairline); }
 .gallery-strip > div { display: flex; align-items: baseline; gap: 8px; }
 .gallery-strip h1 { margin: 0; font-size: var(--type-ui); font-weight: 600; }
+.gallery-actions { display: flex; align-items: center; gap: 8px; }
 .gallery-strip span, .gallery-piece-top time { color: var(--secondary); font-size: var(--type-meta); }
 .gallery-key { min-height: 44px; padding: 0 16px; border-radius: var(--radius); display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 .gallery-page .primary-action, .gallery-piece .primary-action { color: var(--ground); }

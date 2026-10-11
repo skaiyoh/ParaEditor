@@ -67,7 +67,8 @@ function Grid({ context, ready }: { readonly context: GalleryUiContext; readonly
   }, [state.kind]);
   return <main class="gallery-page" aria-label="Gallery">
     <header class="gallery-strip"><div><h1>Gallery</h1>{state.kind === 'listed' && <span>{state.pieces.length} {state.pieces.length === 1 ? 'piece' : 'pieces'}</span>}</div>
-      {!(state.kind === 'listed' && state.pieces.length === 0) && <MakeOne href={context.editorUrl} />}</header>
+      <nav class="gallery-actions" aria-label="Gallery actions"><a class="gallery-key" data-testid="gallery-scenes" href="/scenes.html">3D scenes</a>
+        {!(state.kind === 'listed' && state.pieces.length === 0) && <MakeOne href={context.editorUrl} />}</nav></header>
     {state.kind === 'loading' && <p class="gallery-message" data-testid="gallery-status" role="status">Opening gallery…</p>}
     {state.kind === 'failed' && <div class="gallery-message"><p data-testid="gallery-status" role="status">{state.sentence}</p><button type="button" onClick={() => setAttempt(attempt + 1)}>Retry</button></div>}
     {state.kind === 'listed' && (state.pieces.length === 0
