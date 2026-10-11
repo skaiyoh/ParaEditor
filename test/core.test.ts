@@ -7,6 +7,10 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import '../src/core/face-view.ts';
+import '../src/core/live-coverage.ts';
+import '../src/core/orientation.ts';
+import '../src/core/perspective.ts';
 import { srgbToOklab } from '../src/core/color.ts';
 import { defaultStyle } from '../src/core/defaults.ts';
 import { layers, NEED_OPS } from '../src/core/derive.ts';
@@ -40,12 +44,16 @@ const CORE_MODULES = [
   'derive.ts',
   'edits.ts',
   'equal.ts',
+  'face-view.ts',
   'fry.ts',
   'history.ts',
   'ids.ts',
+  'live-coverage.ts',
   'migrate.ts',
   'motion.ts',
+  'orientation.ts',
   'percentile.ts',
+  'perspective.ts',
   'produce.ts',
   'ranges.ts',
   'raster.ts',

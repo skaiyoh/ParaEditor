@@ -470,10 +470,16 @@ export type SequenceReply = z.infer<typeof sequenceReplySchema>;
 export type DecodeRequest = z.infer<typeof decodeRequestSchema>;
 export type DecodeReply = z.infer<typeof decodeReplySchema>;
 
-const faceDetectionSchema = strictObject({
+const faceCandidateShape = {
   center: strictObject({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
   size: z.number().positive().max(1),
-}).readonly();
+  confidence: z.number().min(0).max(1).optional(),
+  clipped: z.boolean().optional(),
+  box: strictObject({ x0: z.number().min(0).max(1), y0: z.number().min(0).max(1), x1: z.number().min(0).max(1), y1: z.number().min(0).max(1) })
+    .refine((box) => box.x0 < box.x1 && box.y0 < box.y1, 'Face box must have positive area.').optional(),
+};
+const faceCandidateSchema = strictObject(faceCandidateShape).readonly();
+const faceDetectionSchema = strictObject({ ...faceCandidateShape, candidates: z.array(faceCandidateSchema).max(8).optional() }).readonly();
 const faceRequestSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('init'), ortBase: ortBaseSchema }),
   z.strictObject({ type: z.literal('track'), jobId: jobIdSchema, frame: imageBitmapSchema }),

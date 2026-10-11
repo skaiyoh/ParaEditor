@@ -14,6 +14,17 @@ import type { SymbolsDebug, LoopDebug, SelectionDebug } from '../../src/render/d
 import type { FaceDetection } from '../../src/analysis/protocol.ts';
 import type { Vec2 } from '../../src/core/motion.ts';
 import type { AnalysisDriver } from '../../src/session/driver.ts';
+import type { createViewDriver, SourceMode } from '../../src/session/view-driver.ts';
+import type { createTiltSource } from '../../src/session/tilt.ts';
+import type { createWindowSource } from '../../src/session/window.ts';
+import type { PerspectiveRenderResult } from '../../src/render/types.ts';
+type ViewDriver = ReturnType<typeof createViewDriver>;
+type LiveDebug = ReturnType<ReturnType<typeof createTiltSource>['readings']>
+  & ReturnType<ReturnType<typeof createWindowSource>['preview']>
+  & ReturnType<ViewDriver['targets']> & ReturnType<ViewDriver['diagnostics']>
+  & { coverage: PerspectiveRenderResult; preparation: ReturnType<AnalysisDriver['livePlate']>['kind']; viewId: number;
+      offset: Vec2; cameraRunning: boolean; tiltRunning: boolean };
+
 
 declare global {
   const NOISY_MODEL_LOCK: string;
@@ -62,8 +73,11 @@ declare global {
         injectDepth(plane: Plane<'f32'> | null): void;
         injectFace(center: Vec2 | null): void;
         injectCameraFrame(frame: ImageData, face: FaceDetection | null): void;
-        parallaxDebug(): { beta: number | null; gamma: number | null; type: OrientationType | null; effectiveType: OrientationType; angle: number | null; legacy: number | null; effectiveAngle: number; faceTarget: Vec2; tilt: Vec2; frame: HTMLCanvasElement | null; face: FaceDetection | null; offset: Vec2; cameraRunning: boolean; tiltRunning: boolean };
-        injectOrientation(orientation: Pick<DeviceOrientationEvent, 'beta' | 'gamma'>): void;
+        parallaxDebug(): LiveDebug;
+        recenterParallax(): void;
+        setParallaxSource(mode: SourceMode): void;
+        parallaxTrace(): ReturnType<ViewDriver['trace']> & { stage: { x: number; y: number; width: number; height: number; viewportWidth: number; viewportHeight: number; dpr: number } | null };
+        injectOrientation(orientation: import('../../src/session/tilt.ts').Orientation): void;
         injectScreenAngle(angle: number | null): void;
         windowReady(): boolean;
         windowFrames(): number;

@@ -8,6 +8,8 @@ import { isAssetId, isBuildId, isModelId, isObjectId, isSceneId } from '../src/c
 import { newDocument, newObject } from '../src/core/defaults.ts';
 import { photoStats } from '../src/photo/stats.ts';
 import type { Plane } from '../src/core/raster.ts';
+import type { Produce } from '../src/core/edits.ts';
+import type { PerspectiveGeometry } from '../src/core/perspective.ts';
 
 Object.defineProperty(globalThis, 'NOISY_DEV', { value: false, configurable: true });
 
@@ -27,7 +29,7 @@ function driverRig(failures: readonly string[] = []) {
     selection: { kind: 'taps', points: [{ at: { x: 0.5, y: 0.5 }, label: 'include' }], candidate: 0 },
     mask: { asset, format: 'u8', size: guide.size }, bounds: { x: 0, y: 0, ...guide.size }, depth: null,
     color: { mean: color, clusters: [{ lab: color, weight: 0.5 }, { lab: color, weight: 0.5 }] } } });
-  const doc = newDocument({ id, title: 'fixture', seed: 1, now: '2026-10-10T18:00:00.000Z', writer: build, importedOn: 'node',
+  let doc = newDocument({ id, title: 'fixture', seed: 1, now: '2026-10-10T18:00:00.000Z', writer: build, importedOn: 'node',
     frame: { source: { asset, mediaType: 'image/png', byteLength: 1 }, master: { asset, size: guide.size },
       original: { name: 'fixture.png', mediaType: 'image/png', size: guide.size } },
     analysis: { ...stats, depth: null, plate: null, autoSubject: 'pending' } });
@@ -60,13 +62,22 @@ function driverRig(failures: readonly string[] = []) {
     get alive() { return { heavy, decoder: decoderAlive }; },
     lastHeavyTermination: null,
   };
-  const driver = createDriver({ read: () => ({ doc: { ...doc, objects: plateWanted ? [object] : [], motion: { ...doc.motion, enabled: plateWanted } }, masterPixels: master }),
-    products: createProducts(), produce: () => {}, changed: () => changed(), windowEnabled: () => plateWanted }, {
+  const products = createProducts(), produced: Produce[] = [];
+  const driver = createDriver({ read: () => ({ doc: { ...doc, objects: plateWanted ? [object] : doc.objects, motion: { ...doc.motion, enabled: plateWanted } }, masterPixels: master }),
+    products, produce: (product) => produced.push(product), changed: () => changed() }, {
     clock: { now: () => now }, diag: { events: [], log: () => {} }, service, threads: 2,
     prepareGuide: async () => guide, models: { kind: 'ready', ids: [model], depth: model, inpaint: model, count: 1 },
   });
   return {
-    driver, events, master,
+    driver, events, master, products, produced,
+    liveSubject(withSubject = true) {
+      doc = { ...doc, objects: withSubject ? [object] : [], analysis: { ...doc.analysis, depth: { model,
+        map: { asset, format: 'f32', size: guide.size }, stats: { p10: .1, median: .5, p90: .9 } } } };
+      products.putDepth(asset, { format: 'f32', size: guide.size, data: new Float32Array([0, .2, .8, 1]) });
+      products.putMask(asset, { format: 'u8', size: guide.size, data: new Uint8Array([255, 0, 0, 0]) });
+    },
+    finishLive() { if (listener === null) throw new Error('No live sequence.'); const on = listener; heavy = false; on.onPlate(guide); on.onDone(); },
+    staleListener: () => listener,
     heavyReleases: () => heavyReleases,
     onChange(callback: () => void) { changed = callback; },
     advance(ms: number) { now += ms; },
@@ -86,6 +97,58 @@ function driverRig(failures: readonly string[] = []) {
     failPlate() { if (listener === null) throw new Error('No plate running.'); heavy = false; events.push('sequence.terminate'); listener.onFailed('inpaint', { kind: 'worker', op: 'inpaint', message: 'background error' }); },
   };
 }
+
+const liveGeometry: PerspectiveGeometry = { aperture: { center: { x: 0, y: 0 }, width: 1, height: .75 }, crop: .04, neutralDistance: 1, nearFactor: 1.1, farFactor: 2 };
+
+test('live-only preparation leaves saved plate untouched and deduplicates requests', async () => {
+  const r = driverRig(); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master); r.complete(); await flush(); r.liveSubject();
+  const savedAsset = 'f'.repeat(64); assert.ok(isAssetId(savedAsset));
+  const saved = { size: { width: 2, height: 2 }, data: new Uint8Array(12).fill(42) };
+  r.products.putPlate(savedAsset, saved);
+  const first = r.driver.requestLivePlate(liveGeometry), second = r.driver.requestLivePlate(liveGeometry);
+  assert.equal(r.driver.livePlate().kind, 'preparing');
+  assert.equal(r.events.filter((e) => e === 'sequence.spawn:inpaint').length, 1);
+  r.finishLive(); await Promise.all([first, second]);
+  assert.equal(r.driver.livePlate().kind, 'ready'); assert.equal(r.produced.length, 0);
+  assert.equal(r.products.plates.get(savedAsset), saved);
+  await r.driver.requestLivePlate(null); assert.equal(r.products.livePlate, null);
+  assert.equal(r.products.plates.get(savedAsset), saved);
+});
+
+test('changed live geometry discards the old completion and schedules exactly one replacement', async () => {
+  const r = driverRig(); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master); r.complete(); await flush(); r.liveSubject();
+  const old = r.driver.requestLivePlate(liveGeometry);
+  const next = r.driver.requestLivePlate({ ...liveGeometry, crop: .02 });
+  r.finishLive(); await flush();
+  assert.equal(r.products.livePlate, null);
+  assert.equal(r.events.filter((e) => e === 'sequence.spawn:inpaint').length, 2);
+  r.finishLive(); await Promise.all([old, next]); assert.equal(r.driver.livePlate().kind, 'ready');
+});
+
+test('disable and import invalidate pending live completion and release live products', async () => {
+  const r = driverRig(); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master); r.complete(); await flush(); r.liveSubject();
+  const pending = r.driver.requestLivePlate(liveGeometry);
+  const releases = r.heavyReleases();
+  await r.driver.requestLivePlate(null); assert.equal(r.heavyReleases(), releases + 1); r.finishLive(); await pending;
+  assert.equal(r.products.livePlate, null);
+  const importing = r.driver.requestLivePlate(liveGeometry); const stale = r.staleListener();
+  const rejected = assert.rejects(importing, /photo was replaced/);
+  r.driver.beginImport(); stale?.onPlate({ size: { width: 2, height: 2 }, data: new Uint8Array(12) }); stale?.onDone();
+  await rejected; assert.equal(r.products.livePlate, null); assert.equal(r.driver.livePlate().kind, 'off');
+});
+
+test('objectless depth needs no plate and disabling live mode does not cancel saved work', async () => {
+  const r = driverRig(); await flush();
+  await r.driver.sceneReady(r.driver.beginImport(), r.master); r.complete(); await flush(); r.liveSubject(false);
+  await r.driver.requestLivePlate(liveGeometry); assert.equal(r.driver.livePlate().kind, 'not-needed');
+  assert.equal(r.events.filter((e) => e === 'sequence.spawn:inpaint').length, 0);
+  r.wantPlate(true); const saved = r.driver.requestPlateIfNeeded(), releases = r.heavyReleases();
+  await r.driver.requestLivePlate(null); assert.equal(r.heavyReleases(), releases);
+  r.finishPlate(); await saved;
+});
 
 test('three imports release before sequence spawn and open only after sequence termination', async () => {
   const r = driverRig(); await flush();

@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { DemoScene, DemoSession } from '../session/scene.ts';
 import type { SceneDocument, Style } from '../core/types.ts';
 import { applyEdit } from '../core/reduce.ts';
+import { containedImageRect } from '../core/perspective.ts';
 import { RANGES } from '../core/ranges.ts';
 import { EnableSwitch, Node, RangeControl } from './controls.tsx';
 import { Layers, ObjectInspector } from './layers.tsx';
@@ -45,11 +46,9 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
     const box = node.getBoundingClientRect();
     if (box.width <= 0 || box.height <= 0) return null;
     // The phone's canvas contains the bitmap; letterbox presses are ignored.
-    const scale = contained ? Math.min(box.width / node.width, box.height / node.height) : 1;
-    const width = contained ? node.width * scale : box.width;
-    const height = contained ? node.height * scale : box.height;
-    const x = (clientX - box.left - (box.width - width) / 2) / width;
-    const y = (clientY - box.top - (box.height - height) / 2) / height;
+    const aperture = contained ? containedImageRect(box, { width: node.width, height: node.height }) : box;
+    const x = (clientX - aperture.x) / aperture.width;
+    const y = (clientY - aperture.y) / aperture.height;
     return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? { x, y } : null;
   };
   const clearGesture = (): void => {
@@ -162,6 +161,7 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
 function ParallaxDebug({ session }: { readonly session: DemoSession }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [readings, setReadings] = useState(session.parallaxDebug());
+  const [aperture, setAperture] = useState({ width: 0, height: 0, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight });
   useLayoutEffect(() => {
     let request = 0, last = -Infinity;
     const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
@@ -169,15 +169,21 @@ function ParallaxDebug({ session }: { readonly session: DemoSession }) {
       if (now - last >= 100) {
         last = now;
         const next = session.parallaxDebug(); setReadings(next);
+        const stage = document.querySelector('[data-testid="stage"]');
+        const box = stage?.getBoundingClientRect();
+        const image = stage instanceof HTMLCanvasElement && box !== undefined && box.width > 0 && box.height > 0
+          ? containedImageRect(box, { width: stage.width, height: stage.height }) : null;
+        setAperture({ width: image?.width ?? 0, height: image?.height ?? 0, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight });
         const context = canvas.current?.getContext('2d', { willReadFrequently: true });
         if (context !== null && context !== undefined) {
           context.clearRect(0, 0, 320, 240);
           if (next.frame !== null) {
             context.drawImage(next.frame, 0, 0, 320, 240);
             if (next.face !== null) {
-              const { center, size } = next.face;
+              const { center, size, box } = next.face;
               context.strokeStyle = accent; context.lineWidth = 2;
-              context.strokeRect((center.x - size / 2) * 320, (center.y - size / 2) * 240, size * 320, size * 240);
+              if (box !== undefined) context.strokeRect(box.x0 * 320, box.y0 * 240, (box.x1 - box.x0) * 320, (box.y1 - box.y0) * 240);
+              else context.strokeRect((center.x - size / 2) * 320, (center.y - size / 2) * 240, size * 320, size * 240);
             }
           }
         }
@@ -187,22 +193,44 @@ function ParallaxDebug({ session }: { readonly session: DemoSession }) {
     request = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(request);
   }, [session]);
-  const number = (n: number | null): string => n === null ? 'Unavailable' : n.toFixed(2);
+  const number = (n: number | null | undefined): string => n === null || n === undefined || !Number.isFinite(n) ? 'Unavailable' : n.toFixed(2);
+  const age = (capturedAt: number | undefined): string => capturedAt === undefined ? 'Unavailable' : `${Math.max(0, performance.now() - capturedAt).toFixed(0)} ms`;
+  const modes = [{ value: 'auto', label: 'Auto' }, { value: 'camera', label: 'Camera' }, { value: 'tilt', label: 'Tilt' }] satisfies readonly { value: Parameters<DemoSession['setParallaxSource']>[0]; label: string }[];
   const pair = (value: { x: number; y: number }): string => `${value.x.toFixed(3)}, ${value.y.toFixed(3)}`;
   return <div class="parallax-debug-area"><section class="parallax-debug" id="parallax-debug-panel" data-testid="parallax-debug" aria-label="Parallax debug">
+    <div class="parallax-source-controls" role="group" aria-label="Parallax input source">
+      {modes.map(({ value, label }) => <button key={value} type="button" data-testid={`parallax-source-${value}`}
+        aria-pressed={readings.sourceMode === value} onClick={() => session.setParallaxSource(value)}>{label}</button>)}
+    </div>
     <canvas ref={canvas} width="320" height="240" data-testid="parallax-debug-frame" aria-label="Camera frame with detected face box" />
     {readings.frame === null && <p class="parallax-camera-status">{readings.cameraRunning ? 'Waiting for camera frame' : 'Camera unavailable'}</p>}
     <dl>
+      <div><dt>View coverage</dt><dd data-testid="parallax-coverage">{readings.coverage.reason ?? 'Ready'}</dd></div>
+      <div><dt>Background preparation</dt><dd>{readings.preparation}</dd></div>
+      <div><dt>View sample</dt><dd>{readings.viewId}</dd></div>
+      <div><dt>Active source</dt><dd data-testid="parallax-active-source">{readings.source === 'none' ? 'Waiting' : readings.source}</dd></div>
+      <div><dt>Camera state</dt><dd data-testid="parallax-camera-state">{readings.samples.camera?.state ?? 'Unavailable'}</dd></div>
+      <div><dt>Camera age / sample</dt><dd>{age(readings.samples.camera?.capturedAt)} / {readings.samples.camera?.sequence ?? '-'}</dd></div>
+      <div><dt>Camera quality</dt><dd>{number(readings.samples.camera?.quality)}</dd></div>
+      <div><dt>Tilt state</dt><dd>{readings.state} ({readings.reason})</dd></div>
+      <div><dt>Tilt age / sample</dt><dd>{age(readings.capturedAt)} / {readings.sequence}</dd></div>
+      <div><dt>Orientation</dt><dd>{readings.pose}{readings.yawLimited ? ' (yaw unavailable)' : ''}</dd></div>
+      <div><dt>Alpha</dt><dd>{number(readings.alpha)}</dd></div>
       <div><dt>Beta</dt><dd data-testid="parallax-beta">{number(readings.beta)}</dd></div>
       <div><dt>Gamma</dt><dd data-testid="parallax-gamma">{number(readings.gamma)}</dd></div>
       <div><dt>Screen type</dt><dd data-testid="parallax-screen-type">{readings.type ?? 'Unavailable'}</dd></div>
       <div><dt>Screen angle</dt><dd data-testid="parallax-screen-angle">{number(readings.angle)}</dd></div>
       <div><dt>Window angle</dt><dd data-testid="parallax-window-angle">{number(readings.legacy)}</dd></div>
       <div><dt>Mapped angle</dt><dd data-testid="parallax-mapped-angle">{number(readings.effectiveAngle)}</dd></div>
+      <div><dt>Display basis</dt><dd>{readings.basisProvenance}</dd></div>
+      <div><dt>Tilt before clamp</dt><dd data-testid="parallax-preclamp">{pair(readings.preclamp)}°</dd></div>
       <div><dt>Tilt target</dt><dd data-testid="parallax-tilt-target">{pair(readings.tilt)}</dd></div>
       <div><dt>Face target</dt><dd data-testid="parallax-face-target">{pair(readings.faceTarget)}</dd></div>
-      <div><dt>Fused offset</dt><dd data-testid="parallax-fused-offset">{pair(readings.offset)}</dd></div>
+      <div><dt>View offset</dt><dd data-testid="parallax-fused-offset">{pair(readings.offset)}</dd></div>
+      <div><dt>Stage CSS pixels</dt><dd>{Math.round(aperture.width)} × {Math.round(aperture.height)}</dd></div>
+      <div><dt>Viewport / DPR</dt><dd>{aperture.viewportWidth} × {aperture.viewportHeight} / {window.devicePixelRatio}</dd></div>
     </dl>
+    <button type="button" data-testid="parallax-trace-download" onClick={() => session.downloadParallaxTrace()}>Download numeric trace</button>
   </section></div>;
 }
 
@@ -269,7 +297,7 @@ function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, d
         <MotionControls motion={scene.doc.motion} session={session} />
         {scene.doc.motion.enabled && <MotionExport session={session} />}
       </Node>
-      <ParallaxNode enabled={parallaxEnabled} available={modelsReady} onParallax={onParallax} debug={debug} onDebug={onDebug} />
+      <ParallaxNode session={session} strength={scene.doc.motion.parallax} enabled={parallaxEnabled} available={modelsReady} onParallax={onParallax} debug={debug} onDebug={onDebug} />
       <Node name="Symbols" expanded={expanded.Symbols} onExpand={() => expand('Symbols')}
         toggle={<EnableSwitch name="Symbols" portrait={portrait} checked={scene.doc.symbols.enabled} onChange={(enabled) => editSymbols(session, { enabled })} />}>
         <RangeControl id="symbols-cellSize" label="Cell size" min={6} max={48} step={2} value={scene.doc.symbols.cellSize} onInput={(cellSize) => editSymbols(session, { cellSize })} />

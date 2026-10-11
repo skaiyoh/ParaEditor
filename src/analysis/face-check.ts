@@ -65,6 +65,12 @@ export function decodeFace(outputs: TensorMap): Result<FaceDetection | null, str
   candidates.sort((a, b) => b.score - a.score);
   const kept: Box[] = [];
   for (const box of candidates) if (!kept.some((other) => iou(box, other) > 0.3)) kept.push(box);
-  const viewer = kept.reduce<Box | null>((best, box) => best === null || box.area > best.area ? box : best, null);
-  return ok(viewer === null ? null : { center: { x: (viewer.x0 + viewer.x1) / 2, y: (viewer.y0 + viewer.y1) / 2 }, size: Math.max(viewer.x1 - viewer.x0, viewer.y1 - viewer.y0) });
+  const detections = kept.sort((a, b) => b.area - a.area).slice(0, 8).map((viewer) => ({
+    center: { x: (viewer.x0 + viewer.x1) / 2, y: (viewer.y0 + viewer.y1) / 2 },
+    size: Math.max(viewer.x1 - viewer.x0, viewer.y1 - viewer.y0), confidence: viewer.score,
+    box: { x0: viewer.x0, y0: viewer.y0, x1: viewer.x1, y1: viewer.y1 },
+    clipped: viewer.x0 === 0 || viewer.y0 === 0 || viewer.x1 === 1 || viewer.y1 === 1,
+  }));
+  const viewer = detections[0];
+  return ok(viewer === undefined ? null : { ...viewer, candidates: detections });
 }

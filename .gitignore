@@ -53,3 +53,6 @@
 # Symlinks a lane worktree makes to the main clone.
 /models
 /node_modules
+
+# Codex run state and per-run evidence folders (local only; Returns under plan/evidence/ are the record).
+/.codex/work/

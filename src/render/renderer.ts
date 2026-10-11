@@ -3,10 +3,12 @@ import type { ObjectId } from '../core/ids.ts';
 import type { Plane } from '../core/raster.ts';
 import { frameCount, loopPhase, cameraOffset, parallaxDisplacement, effectiveOrbit, loopZoom, parallaxMargin } from '../core/motion.ts';
 import type { Vec2 } from '../core/motion.ts';
+import { createPerspectiveGeometry, constrainEye } from '../core/perspective.ts';
+import { liveCoverage } from '../core/live-coverage.ts';
 import { sortedMasks } from '../core/produce.ts';
 import { LOOP_FPS, wrapFrame } from './loop.ts';
-import { backGrid, objectGrid } from './mesh.ts';
-import { geometry, geometryVertex, geometryCoverage } from './shaders/geometry.ts';
+import { backGrid, objectGrid, meshProjectionScale } from './mesh.ts';
+import { geometry, geometryVertex, geometryCoverage, perspectiveGeometry, perspectiveVertex, perspectiveCoverage } from './shaders/geometry.ts';
 import { backsource } from './shaders/backsource.ts';
 import { fillBackgroundDepth } from './shaders/pushpull.ts';
 import { holdIndex } from './grain.ts';
@@ -14,7 +16,7 @@ import { LUMA_TABLE, CHROMA_TABLE, crunchQuality, qualityTable } from './crunch.
 import { createRenderProbe, type CellReadback } from './debug.ts';
 import { createGl, type Target, type Texture, type Uniform } from './gl.ts';
 import { documentPalette, type Palette } from './palette.ts';
-import type { Renderer, RenderScene } from './types.ts';
+import type { Renderer, RenderScene, PerspectiveRenderRequest, PerspectiveRenderResult, PerspectiveHit } from './types.ts';
 import { down } from './shaders/down.ts';
 import { tensor } from './shaders/tensor.ts';
 import { blur } from './shaders/blur.ts';
@@ -31,7 +33,7 @@ import { crunchExtract, crunchRowDct, crunchColumnDct, crunchColumnIdct, crunchR
 import { ATLAS_SIZE, GLYPHS, glyphAtlas, cellGrid } from './symbols.ts';
 import { cellsReduce } from './shaders/cells-reduce.ts';
 import { cellsDraw } from './shaders/cells-draw.ts';
-import { surface } from './shaders/surface.ts';
+import { surface, surfaceLookup } from './shaders/surface.ts';
 
 const tex = (value: Texture): Uniform => ({ kind: 'texture', value });
 const float = (value: number): Uniform => ({ kind: 'float', value });
@@ -41,6 +43,17 @@ type Grid = { readonly low: Target; readonly tensor: Target; readonly blur: Targ
 type Buffers = { readonly grid: Grid; readonly simplified: Target; readonly quantized: Target; readonly final: Target };
 type CrunchBuffers = { readonly y: readonly [Target, Target]; readonly c: readonly [Target, Target] };
 type CellBuffers = { readonly variant: Target; readonly cells: Target; readonly decisions: Target; readonly size: number };
+type LiveBuffers = { readonly color: Target; readonly label: Target; readonly depth: Target; readonly source: Target; readonly composite: Target };
+type LiveProducts = {
+  readonly identity: NonNullable<RenderScene['livePlate']> | null;
+  readonly depthIdentity: RenderScene['depth']; readonly labels: string;
+  readonly image: Texture | null; readonly hole: Texture;
+  readonly depth: Texture; readonly objectDepths: ReadonlyMap<ObjectId, Texture>;
+  readonly backgroundPlane: Plane<'f32'>; readonly objectPlanes: ReadonlyMap<ObjectId, Plane<'f32'>>;
+  readonly background: Target | null; readonly simplified: Target | null;
+  readonly limitation: string | null; dirty: boolean;
+  projectionKey: string; projectionScale: number;
+};
 
 /** Offline frames share the still export's selection-free draw and restoration. */
 export type LoopCapture = { readonly frame: number; readonly canvas: HTMLCanvasElement };
@@ -60,6 +73,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   const onContextLost = (): void => { lost = true; };
   canvas.addEventListener('webglcontextlost', onContextLost);
   let programs: ReturnType<typeof makePrograms>;
+  let livePrograms: { geometry: ReturnType<typeof gpu.program>; coverage: ReturnType<typeof gpu.program>; surfaceLookup: ReturnType<typeof gpu.program> } | null = null;
   function makePrograms() {
     return {
       geometry: gpu.program(geometry, geometryVertex), coverage: gpu.program(geometryCoverage, geometryVertex), backsource: gpu.program(backsource),
@@ -88,10 +102,14 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   let backgroundKey = '';
   let backgroundPlane: RenderScene['depth'] = null;
   let gbuffer: { color: Target; label: Target; depth: Target; composite: Target } | null = null;
+  let liveBuffers: LiveBuffers | null = null;
+  let liveWarp: { label: Target; source: Target } | null = null;
+  let lastLiveLookup: { label: Target; source: Target } | null = null;
+  let liveProducts: LiveProducts | null = null;
   const backMesh = gpu.mesh(backGrid());
   const objectMeshes = new Map<ObjectId, { key: string; mesh: ReturnType<typeof gpu.mesh>; mask: Plane<'u8'>; texture: Texture }>();
-  let lastRender: { frame: number; loop: boolean; camera: Vec2 | null; showSelection: boolean } =
-    { frame: 0, loop: false, camera: null, showSelection: true };
+  let lastRender: { frame: number; loop: boolean; camera: Vec2 | null; showSelection: boolean; perspective: PerspectiveRenderRequest | null } =
+    { frame: 0, loop: false, camera: null, showSelection: true, perspective: null };
   let featherEnabled = true;
   let renderedCamera: Vec2 = { x: 0, y: 0 };
   let exportedEdges: boolean | null = null;
@@ -203,6 +221,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
 
   function releaseBuffers(): void {
     releaseCells();
+    endPerspective();
     if (crunchBuffers !== null) for (const target of [...crunchBuffers.y, ...crunchBuffers.c]) gpu.release(target);
     crunchBuffers = null; finalTarget = null; selectionSource = null;
     if (buffers !== null) {
@@ -214,6 +233,26 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     if (gbuffer !== null) for (const target of Object.values(gbuffer)) gpu.release(target);
     plateSimplified = null; backSource = null; gbuffer = null; backDirty = true;
     buffers = null;
+  }
+  function endPerspective(): void {
+    releaseLiveProducts();
+    if (liveBuffers !== null) for (const target of Object.values(liveBuffers)) gpu.release(target);
+    if (liveWarp !== null) for (const target of Object.values(liveWarp)) gpu.release(target);
+    liveBuffers = null; liveWarp = null; lastLiveLookup = null;
+    lastRender = { ...lastRender, perspective: null };
+  }
+  function perspectiveResources(): { readonly targets: number; readonly textures: number } {
+    return { targets: (liveBuffers === null ? 0 : 5) + (liveWarp === null ? 0 : 2) +
+      (liveProducts?.background === null || liveProducts === null ? 0 : 1) + (liveProducts?.simplified === null || liveProducts === null ? 0 : 1),
+      textures: liveProducts === null ? 0 : 2 + (liveProducts.image === null ? 0 : 1) + liveProducts.objectDepths.size };
+  }
+  function releaseLiveProducts(): void {
+    if (liveProducts === null) return;
+    for (const resource of [liveProducts.image, liveProducts.hole, liveProducts.depth, liveProducts.background, liveProducts.simplified]) {
+      if (resource !== null) gpu.release(resource);
+    }
+    for (const resource of liveProducts.objectDepths.values()) gpu.release(resource);
+    liveProducts = null;
   }
   function releaseCells(): void {
     if (cellBuffers === null) return;
@@ -276,6 +315,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     if (typeof maxSize !== 'number') checkLive();
     if (typeof maxSize !== 'number' || next.master.width > maxSize || next.master.height > maxSize) throw new Error('The photo exceeds this WebGL2 device’s texture limit.');
     if (scene?.master !== next.master) {
+      endPerspective();
       if (master !== null) gpu.release(master);
       master = gpu.bitmap(next.master);
       dirty = true;
@@ -348,9 +388,187 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       paletteKey = key;
     }
     rebuildGeometryInputs(next);
-    if (dirty) backDirty = true;
+    if (dirty) { backDirty = true; if (liveProducts !== null) liveProducts.dirty = true; }
     exportedEdges = null;
+    // A hit may only describe a draw of this exact scene, not a preceding edit.
+    lastRender = { ...lastRender, perspective: null };
     scene = next;
+  }
+
+  function prepareLiveProducts(): LiveProducts {
+    if (scene === null) throw new Error('Open a photo before preparing perspective.');
+    const identity = scene.livePlate ?? null;
+    if (liveProducts !== null && liveProducts.identity === identity && liveProducts.depthIdentity === scene.depth && liveProducts.labels === labelKey) return liveProducts;
+    releaseLiveProducts();
+    const allocated: Texture[] = [];
+    const keep = <T extends Texture>(resource: T): T => { allocated.push(resource); return resource; };
+    try {
+      const plane = scene.depth ?? { format: 'f32', size: { width: 1, height: 1 }, data: new Float32Array(1) } satisfies Plane<'f32'>;
+      let background = plane;
+      let image: Texture | null = null, holeTexture: Texture | null = null;
+      const objectDepths = new Map<ObjectId, Texture>();
+      const objectPlanes = new Map<ObjectId, Plane<'f32'>>();
+      let limitation: string | null = scene.depth === null ? 'Depth is not ready' : null;
+      if (scene.doc.objects.length > 0 && identity === null) limitation = 'Preparing background coverage';
+      if (identity !== null) {
+        const { image: plateImage, hole: plateHole } = identity;
+        if (plateImage.size.width !== scene.master.width || plateImage.size.height !== scene.master.height ||
+          plateHole.size.width !== scene.master.width || plateHole.size.height !== scene.master.height ||
+          plateImage.data.length !== scene.master.width * scene.master.height * 3 ||
+          plateHole.data.length !== scene.master.width * scene.master.height || identity.depth !== scene.depth) {
+          throw new Error('The live background does not match this photo and depth.');
+        }
+        const bytes = new Uint8Array(scene.master.width * scene.master.height * 4);
+        for (let i = 0; i < bytes.length / 4; i++) { bytes.set(plateImage.data.subarray(i * 3, i * 3 + 3), i * 4); bytes[i * 4 + 3] = 255; }
+        image = keep(gpu.texture(scene.master.width, scene.master.height, 'rgba8', bytes));
+        holeTexture = keep(gpu.texture(plateHole.size.width, plateHole.size.height, 'r8', plateHole.data));
+        const data = new Uint8Array(plane.data.length);
+        for (let y = 0; y < plane.size.height; y++) for (let x = 0; x < plane.size.width; x++) {
+          const hx = Math.min(plateHole.size.width - 1, Math.floor((x + .5) * plateHole.size.width / plane.size.width));
+          const hy = Math.min(plateHole.size.height - 1, Math.floor((y + .5) * plateHole.size.height / plane.size.height));
+          data[y * plane.size.width + x] = plateHole.data[hy * plateHole.size.width + hx] ?? 0;
+        }
+        background = fillBackgroundDepth(plane, { format: 'u8', size: plane.size, data });
+      }
+      // Known silhouettes get their own extended depth, so a foreground triangle cannot
+      // sample the original background just outside its mask and stretch across that jump.
+      for (const object of scene.doc.objects) {
+        if (object.hidden) continue;
+        const mask = scene.masks.get(object.id);
+        if (mask === undefined) continue;
+        const data = new Uint8Array(plane.data.length);
+        for (let y = 0; y < plane.size.height; y++) for (let x = 0; x < plane.size.width; x++) {
+          data[y * plane.size.width + x] = maskCovers(mask, { x: (x + .5) / plane.size.width, y: (y + .5) / plane.size.height }) ? 0 : 255;
+        }
+        const ownDepth = fillBackgroundDepth(plane, { format: 'u8', size: plane.size, data });
+        objectDepths.set(object.id, keep(gpu.texture(ownDepth.size.width, ownDepth.size.height, 'r16f', ownDepth.data, true)));
+        objectPlanes.set(object.id, ownDepth);
+      }
+      liveProducts = {
+        identity, depthIdentity: scene.depth, labels: labelKey, image,
+        hole: holeTexture ?? keep(gpu.texture(1, 1, 'r8', new Uint8Array(1))),
+        depth: keep(gpu.texture(background.size.width, background.size.height, 'r16f', background.data, true)), objectDepths,
+        backgroundPlane: background, objectPlanes,
+        background: image === null ? null : keep(gpu.target(scene.master.width, scene.master.height)),
+        simplified: image === null ? null : keep(gpu.target(scene.master.width, scene.master.height, false, true)),
+        limitation, dirty: true, projectionKey: '', projectionScale: 0,
+      };
+      return liveProducts;
+    } catch (error) { for (const resource of allocated) gpu.release(resource); throw error; }
+  }
+
+  function perspectiveInputs(request: PerspectiveRenderRequest, cells: CellBuffers | null): LiveBuffers {
+    if (scene === null || buffers === null || master === null) throw new Error('Open a photo before rendering perspective.');
+    if (livePrograms === null) {
+      const count: unknown = gl.getParameter(gl.MAX_DRAW_BUFFERS), attachments: unknown = gl.getParameter(gl.MAX_COLOR_ATTACHMENTS);
+      if (typeof count !== 'number' || count < 4 || typeof attachments !== 'number' || attachments < 4) {
+        throw new Error('Perspective picking requires four WebGL2 color attachments.');
+      }
+      const geometryProgram = gpu.program(perspectiveGeometry, perspectiveVertex);
+      let coverageProgram: ReturnType<typeof gpu.program> | null = null;
+      try {
+        coverageProgram = gpu.program(perspectiveCoverage, perspectiveVertex);
+        livePrograms = { geometry: geometryProgram, coverage: coverageProgram, surfaceLookup: gpu.program(surfaceLookup) };
+      } catch (error) {
+        gpu.releaseProgram(geometryProgram);
+        if (coverageProgram !== null) gpu.releaseProgram(coverageProgram);
+        throw error;
+      }
+    }
+    if (liveBuffers === null) {
+      const allocated: Target[] = [];
+      const target = (depth = false): Target => { const value = gpu.target(canvas.width, canvas.height, depth ? 'r16f' : false); allocated.push(value); return value; };
+      try {
+        const prepared = { color: target(), label: target(), depth: target(true), source: target(), composite: target() };
+        gpu.attachMany(prepared.color, [prepared.label, prepared.depth, prepared.source]); gpu.attachDepth(prepared.color);
+        liveBuffers = prepared;
+      } catch (error) { for (const resource of allocated) gpu.release(resource); throw error; }
+    }
+    const prepared = prepareLiveProducts();
+    lastLiveLookup = { label: liveBuffers.label, source: liveBuffers.source };
+    const validBackground = liveBackgroundMatches(prepared, request);
+    if (prepared.dirty && prepared.image !== null && prepared.background !== null && prepared.simplified !== null) {
+      gpu.draw(programs.backsource, prepared.background, { master: tex(master), plate: tex(prepared.image), hole: tex(prepared.hole) });
+      simplify(prepared.background, prepared.simplified, buffers.grid, scene.doc.style.simplify, { label: backgroundLabel, clarity: backgroundClarity });
+      prepared.dirty = false;
+    }
+    const { geometry: config, eye } = request;
+    const uniforms = {
+      apertureCenter: { kind: 'vec3', value: [config.aperture.center.x, config.aperture.center.y, 0] },
+      apertureSizeCrop: { kind: 'vec3', value: [config.aperture.width, config.aperture.height, config.crop] },
+      depthFactors: { kind: 'vec3', value: [config.nearFactor, config.farFactor, config.neutralDistance] },
+      eye: { kind: 'vec3', value: [eye.x, eye.y, eye.z] },
+      hole: tex(validBackground ? prepared.hole : backgroundLabel),
+    } satisfies Record<string, Uniform>;
+    const target = liveBuffers, coverageProgram = livePrograms.coverage;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.composite.framebuffer);
+    gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0, 0, 0, 1]));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.color.framebuffer);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2, gl.COLOR_ATTACHMENT3]);
+    for (let i = 0; i < 4; i++) gl.clearBufferfv(gl.COLOR, i, new Float32Array(4));
+    gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS); gl.depthRange(0, 1 - 1 / 65535); gl.clearDepth(1); gl.clear(gl.DEPTH_BUFFER_BIT);
+    const cover = (mesh: ReturnType<typeof gpu.mesh>, mask: Texture, objectId: number, plane: Texture): void => {
+      if (!featherEnabled) return;
+      gl.disable(gl.DEPTH_TEST);
+      const styled = stylize(target, cells);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target.color.framebuffer);
+      // Keep the four-attachment WebGL2 floor: temporarily route only color
+      // coverage to slot 3, preserving the source-UV texture for exact picking.
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT3, gl.TEXTURE_2D, target.composite.texture, 0);
+      gl.drawBuffers([gl.NONE, gl.NONE, gl.NONE, gl.COLOR_ATTACHMENT3]);
+      gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.EQUAL); gl.depthMask(false);
+      gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+      try {
+        gpu.draw(coverageProgram, target.color, { ...uniforms, styled: tex(styled), mask: tex(mask), objectId: int(objectId),
+          depthPlane: tex(plane), masterSize: { kind: 'ivec2', value: [canvas.width, canvas.height] } }, mesh);
+      } finally {
+        gl.disable(gl.BLEND); gl.depthMask(true); gl.depthFunc(gl.LESS);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT3, gl.TEXTURE_2D, target.source.texture, 0);
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2, gl.COLOR_ATTACHMENT3]);
+      }
+    };
+    try {
+      gpu.draw(livePrograms.geometry, liveBuffers.color, { ...uniforms,
+        simplified: tex(validBackground ? prepared.simplified ?? buffers.simplified : buffers.simplified),
+        depthPlane: tex(validBackground ? prepared.depth : depth ?? prepared.depth), mask: tex(label), objectId: int(0) }, backMesh);
+      cover(backMesh, label, 0, validBackground ? prepared.depth : depth ?? prepared.depth);
+      for (const layer of layers(scene.doc)) {
+        if (layer.kind === 'plate') continue;
+        const entry = objectMeshes.get(layer.object.id);
+        if (entry === undefined) continue;
+        gl.clear(gl.DEPTH_BUFFER_BIT);
+        gpu.draw(livePrograms.geometry, liveBuffers.color, { ...uniforms, simplified: tex(buffers.simplified),
+          depthPlane: tex(validBackground ? prepared.objectDepths.get(layer.object.id) ?? prepared.depth : depth ?? prepared.depth),
+          mask: tex(entry.texture), objectId: int(scene.doc.objects.indexOf(layer.object) + 1) }, entry.mesh);
+        cover(entry.mesh, entry.texture, scene.doc.objects.indexOf(layer.object) + 1,
+          validBackground ? prepared.objectDepths.get(layer.object.id) ?? prepared.depth : depth ?? prepared.depth);
+      }
+    } finally { gl.disable(gl.DEPTH_TEST); gl.depthRange(0, 1); }
+    return liveBuffers;
+  }
+
+  function liveLimitation(prepared: LiveProducts, request: PerspectiveRenderRequest): string | null {
+    if (!liveBackgroundMatches(prepared, request)) {
+      return 'Preparing background coverage';
+    }
+    if (scene !== null) {
+      const key = JSON.stringify(request.geometry);
+      if (key !== prepared.projectionKey) {
+        prepared.projectionKey = key;
+        prepared.projectionScale = meshProjectionScale(backGrid(), prepared.backgroundPlane, request.geometry);
+        for (const object of scene.doc.objects) {
+          const plane = prepared.objectPlanes.get(object.id);
+          if (!object.hidden && plane !== undefined) prepared.projectionScale = Math.min(prepared.projectionScale,
+            meshProjectionScale(objectGrid(object.produced.bounds, scene.doc.frame.master.size, parallaxClamp(scene.doc)), plane, request.geometry));
+        }
+      }
+      if (prepared.projectionScale <= 0) return 'Depth geometry is unavailable';
+    }
+    return prepared.limitation;
+  }
+  function liveBackgroundMatches(prepared: LiveProducts, request: PerspectiveRenderRequest): boolean {
+    return scene !== null && (scene.doc.objects.length === 0 || prepared.identity !== null &&
+      prepared.identity.key === liveCoverage(scene.doc, request.geometry)?.key);
   }
 
   function rebuildGeometryInputs(next: RenderScene): void {
@@ -509,7 +727,40 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   function renderStill(showSelection = true): void { render(0, false, showSelection); }
   function renderFrame(frame: number, showSelection = true): void { render(frame, true, showSelection); }
   function renderView(camera: Vec2, frame = 0, showSelection = true): void { render(frame, true, showSelection, camera); }
-  function render(frame: number, loop: boolean, showSelection: boolean, camera: Vec2 | null = null): void {
+  function renderPerspective(request: PerspectiveRenderRequest): PerspectiveRenderResult {
+    checkLive();
+    const geometry = createPerspectiveGeometry(request.geometry);
+    if (![request.sceneGeneration, request.viewId].every((n) => Number.isSafeInteger(n) && n >= 0)) throw new Error('The perspective view identity is invalid.');
+    if (!Number.isFinite(request.eye.z) || Math.abs(request.eye.z - geometry.neutralDistance) > 1e-9) {
+      throw new Error('Live perspective currently requires the calibrated fixed viewing distance.');
+    }
+    const frame = request.frame ?? 0;
+    if (!Number.isSafeInteger(frame) || frame < 0) throw new Error('The perspective frame must be a nonnegative integer.');
+    try {
+      const prepared = prepareLiveProducts();
+      const limitation = liveLimitation(prepared, request);
+      if (scene?.doc.objects.some((object) => object.hidden) === true && !liveBackgroundMatches(prepared, request)) {
+        // Legacy still rendering already owns authored visibility and its saved plate.
+        // Until live coverage matches, preserve that composition instead of revealing the original object.
+        renderStill(request.showSelection ?? true);
+        return { kind: 'limited', reason: limitation ?? 'Preparing background coverage' };
+      }
+      const fullEye = constrainEye(request.eye, geometry);
+      const eye = { x: fullEye.x * prepared.projectionScale, y: fullEye.y * prepared.projectionScale, z: fullEye.z };
+      const snapshot: PerspectiveRenderRequest = { geometry,
+        eye: limitation === null ? eye : { x: 0, y: 0, z: geometry.neutralDistance },
+        sceneGeneration: request.sceneGeneration, viewId: request.viewId, frame, showSelection: request.showSelection ?? true };
+      render(frame, true, snapshot.showSelection ?? true, null, snapshot);
+      return limitation === null ? { kind: 'rendered', eye, travelScale: prepared.projectionScale,
+        reason: prepared.projectionScale < 1 ? 'Travel reduced to preserve depth edges' : null } : { kind: 'limited', reason: limitation };
+    } catch (error) {
+      // Preserve an inspectable still if live-only program/attachment preparation fails.
+      try { renderStill(); } catch { /* The existing session error path owns context-loss status. */ }
+      throw error;
+    }
+  }
+  function render(frame: number, loop: boolean, showSelection: boolean, camera: Vec2 | null = null,
+    perspective: PerspectiveRenderRequest | null = null): void {
     checkLive();
     if (scene === null || buffers === null || master === null || palette === null || lut === null) throw new Error('Open a photo before rendering.');
     if (camera !== null) {
@@ -538,9 +789,11 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
     renderedCamera = drawCamera;
     const cells = scene.doc.symbols.enabled ? ensureCells(canvas.width, canvas.height, scene.doc.symbols.cellSize) : null;
     const hiding = plate !== null && scene.doc.objects.some((object) => object.hidden);
-    const inputs = moving || hiding ? geometryInputs(drawCamera, moving ? loopZoom(scene.doc.motion.parallax) : 1, cells) :
+    const inputs = perspective !== null ? perspectiveInputs(perspective, cells) : moving || hiding ? geometryInputs(drawCamera, moving ? loopZoom(scene.doc.motion.parallax) : 1, cells) :
       { color: buffers.simplified, label, depth: depth ?? label };
-    const styled = featherEnabled && (moving || hiding) && gbuffer !== null ? gbuffer.composite : stylize(inputs, cells);
+    let displayLabel: Texture = inputs.label;
+    const composite = perspective !== null ? liveBuffers?.composite : moving || hiding ? gbuffer?.composite : undefined;
+    const styled = featherEnabled && composite !== undefined ? composite : stylize(inputs, cells);
     const { style } = scene.doc;
     const currentBuffers = buffers;
     let output = styled;
@@ -553,12 +806,29 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         seed: { kind: 'uint', value: scene.doc.seed }, pattern: int(patterns[coating.pattern]),
         relief: float(coating.relief), refraction: float(coating.refraction), shine: float(coating.shine), scale: float(coating.scale),
         phase: float(loopPhase(index, frameCount(scene.doc.motion, LOOP_FPS))),
-        cameraDirection: { kind: 'vec3', value: [drawCamera.x / parallaxMargin(scene.doc.motion.parallax), -drawCamera.y / parallaxMargin(scene.doc.motion.parallax), 1] } });
+        cameraDirection: { kind: 'vec3', value: perspective === null
+          ? [drawCamera.x / parallaxMargin(scene.doc.motion.parallax), -drawCamera.y / parallaxMargin(scene.doc.motion.parallax), 1]
+          : [perspective.eye.x / perspective.eye.z, perspective.eye.y / perspective.eye.z, 1] } });
       output = target;
+      if (perspective !== null && coating.refraction > 0 && coating.relief > 0 && liveBuffers !== null && livePrograms !== null) {
+        if (liveWarp === null) {
+          const label = gpu.target(canvas.width, canvas.height);
+          let source: Target | null = null;
+          try {
+            source = gpu.target(canvas.width, canvas.height); gpu.attach(label, source);
+            liveWarp = { label, source };
+          } catch (error) { gpu.release(label); if (source !== null) gpu.release(source); throw error; }
+        }
+        gpu.draw(livePrograms.surfaceLookup, liveWarp.label, { labels: tex(liveBuffers.label), sourceMap: tex(liveBuffers.source),
+          seed: { kind: 'uint', value: scene.doc.seed }, pattern: int(patterns[coating.pattern]),
+          relief: float(coating.relief), refraction: float(coating.refraction), scale: float(coating.scale),
+          phase: float(loopPhase(index, frameCount(scene.doc.motion, LOOP_FPS))) });
+        lastLiveLookup = liveWarp; displayLabel = liveWarp.label;
+      }
     }
     if (style.grain !== 0 || style.colorNoise !== 0) {
       const target = other(output);
-      cameraDraw('grain', programs.grain, target, { src: tex(output), label: tex(inputs.label),
+      cameraDraw('grain', programs.grain, target, { src: tex(output), label: tex(displayLabel),
         seed: { kind: 'uint', value: scene.doc.seed }, hold: { kind: 'uint', value: holdIndex(index, frameCount(scene.doc.motion, LOOP_FPS), style.grainHold) },
         grainSize: int(style.grainSize), amount: float(style.grain), colorNoise: float(style.colorNoise), clarity: { kind: 'floatArray', value: clarity } });
       output = target;
@@ -597,7 +867,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       const box = canvas.getBoundingClientRect();
       // Camera passes swap these targets; never sample the selection target.
       const target = other(output);
-      gpu.draw(programs.select, target, { src: tex(output), label: tex(inputs.label), selected: int(selected + 1),
+      gpu.draw(programs.select, target, { src: tex(output), label: tex(displayLabel), selected: int(selected + 1),
         pixelStep: { kind: 'ivec2', value: [Math.max(1, Math.round(canvas.width / (box.width || canvas.width))),
           Math.max(1, Math.round(canvas.height / (box.height || canvas.height)))] } });
       output = target;
@@ -611,7 +881,33 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       if (error !== gl.NO_ERROR) { checkLive(); throw new Error(`The ${loop ? 'loop' : 'still'} render failed (WebGL 0x${error.toString(16)}).`); }
     }
     if (probe !== null) probe.end(start, loop ? index : null);
-    lastRender = { frame: index, loop, camera, showSelection };
+    lastRender = { frame: index, loop, camera: camera === null ? null : { ...camera }, showSelection, perspective };
+  }
+
+  function hitTest(at: Vec2): PerspectiveHit {
+    checkLive();
+    const request = lastRender.perspective;
+    if (request === null || lastLiveLookup === null || scene === null ||
+      !Number.isFinite(at.x) || !Number.isFinite(at.y) || at.x < 0 || at.x > 1 || at.y < 0 || at.y > 1) return { kind: 'miss' };
+    // Offscreen row zero is the photo's top row; present alone flips for the browser framebuffer.
+    const x = Math.min(canvas.width - 1, Math.floor(at.x * canvas.width));
+    const y = Math.min(canvas.height - 1, Math.floor(at.y * canvas.height));
+    const labelBytes = new Uint8Array(4), uvBytes = new Uint8Array(4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, lastLiveLookup.label.framebuffer);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, labelBytes);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, lastLiveLookup.source.framebuffer);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, uvBytes);
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) throw new Error(`The perspective hit failed (WebGL 0x${error.toString(16)}).`);
+    if (labelBytes[3] !== 255) return { kind: 'miss' };
+    const identity = { sceneGeneration: request.sceneGeneration, viewId: request.viewId };
+    if (labelBytes[1] !== 255) return { ...identity, kind: 'generated', objectId: null };
+    const index = labelBytes[0] ?? 0;
+    const objectId = index === 0 ? null : scene.doc.objects[index - 1]?.id;
+    if (objectId === undefined) return { kind: 'miss' };
+    return { ...identity, kind: 'original', objectId,
+      sourceUV: { x: ((uvBytes[0] ?? 0) * 256 + (uvBytes[1] ?? 0)) / 65535,
+        y: ((uvBytes[2] ?? 0) * 256 + (uvBytes[3] ?? 0)) / 65535 } };
   }
   function selectionPixel(x: number, y: number) {
     checkLive();
@@ -633,13 +929,14 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   }
   function geometryPixel(x: number, y: number): { readonly color: readonly number[]; readonly label: number } {
     checkLive();
-    if (gbuffer === null || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) {
+    const current = lastRender.perspective === null ? gbuffer : liveBuffers;
+    if (current === null || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) {
       throw new Error('The geometry pixel is unavailable.');
     }
     const color = new Uint8Array(4), id = new Uint8Array(4);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, gbuffer.color.framebuffer);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, current.color.framebuffer);
     gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, color);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, gbuffer.label.framebuffer);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, current.label.framebuffer);
     gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, id);
     const error = gl.getError();
     if (error !== gl.NO_ERROR) throw new Error(`The geometry readback failed (WebGL 0x${error.toString(16)}).`);
@@ -647,10 +944,11 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   }
   function readGeometryPatch(x: number, y: number, w: number, h: number): Uint8Array {
     checkLive();
-    if (gbuffer === null || ![x, y, w, h].every(Number.isInteger) || x < 0 || y < 0 || w < 1 || h < 1 ||
+    const target = lastRender.perspective === null ? gbuffer?.label : lastLiveLookup?.label;
+    if (target === undefined || ![x, y, w, h].every(Number.isInteger) || x < 0 || y < 0 || w < 1 || h < 1 ||
       x + w > canvas.width || y + h > canvas.height) throw new Error('The geometry patch is unavailable or outside the master.');
     const bytes = new Uint8Array(w * h * 4);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, gbuffer.label.framebuffer);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
     gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
     const error = gl.getError();
     if (error !== gl.NO_ERROR) throw new Error(`The geometry patch readback failed (WebGL 0x${error.toString(16)}).`);
@@ -659,9 +957,10 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
   function geometryEdgesCovered(): boolean { return exportedEdges ?? readGeometryEdges(); }
   function readGeometryEdges(): boolean {
     checkLive();
-    if (gbuffer === null) throw new Error('Render a moving frame before reading its geometry.');
-    const { width, height } = gbuffer.label;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, gbuffer.label.framebuffer);
+    const target = lastRender.perspective === null ? gbuffer?.label : lastLiveLookup?.label;
+    if (target === undefined) throw new Error('Render a moving frame before reading its geometry.');
+    const { width, height } = target;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
     const row = new Uint8Array(width * 4), column = new Uint8Array(height * 4);
     for (const y of [0, height - 1]) {
       gl.readPixels(0, y, width, 1, gl.RGBA, gl.UNSIGNED_BYTE, row);
@@ -685,7 +984,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         if (blob === null) reject(new Error('The loop PNG could not be encoded.'));
         else resolve(blob);
       }, 'image/png'));
-    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera); }
+    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera, restore.perspective); }
   }
   function exportView(camera: Vec2, frame = 0): Promise<Blob> {
     checkLive();
@@ -696,7 +995,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         if (blob === null) reject(new Error('The view PNG could not be encoded.'));
         else resolve(blob);
       }, 'image/png'));
-    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera); }
+    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera, restore.perspective); }
   }
   function exportStill(): Promise<Blob>;
   function exportStill(capture: LoopCapture): void;
@@ -717,19 +1016,20 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
         if (blob === null) reject(new Error('The rendered PNG could not be encoded.'));
         else resolve(blob);
       }, 'image/png'));
-    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera); }
+    } finally { render(restore.frame, restore.loop, restore.showSelection, restore.camera, restore.perspective); }
   }
   return {
     setScene, renderStill,
-    renderFrame, renderView, exportView,
+    renderFrame, renderView, exportView, renderPerspective, hitTest, endPerspective,
     exportStill,
     dispose(): void {
       if (disposed) return;
       disposed = true;
       canvas.removeEventListener('webglcontextlost', onContextLost);
+      endPerspective();
       gpu.dispose(); scene = null; buffers = null; cellBuffers = null; crunchBuffers = null; finalTarget = null; selectionSource = null; master = null; plate = null; depth = null; lut = null; palette = null;
     },
-    debug: probe === null ? null : { ...probe.debug, readGeometryPatch,
+    debug: probe === null ? null : { ...probe.debug, readGeometryPatch, perspectiveResources,
       motionCamera: () => ({ ...renderedCamera }),
       setMotionFeather: (enabled: boolean): void => { featherEnabled = enabled; },
     },

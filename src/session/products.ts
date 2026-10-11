@@ -3,6 +3,8 @@ import { isAssetId, type AssetId, type ObjectId } from '../core/ids.ts';
 import type { Plane, Rgb8 } from '../core/raster.ts';
 import type { SceneDocument } from '../core/types.ts';
 
+export type LivePlateProduct = Readonly<{ key: string; image: Rgb8; hole: Plane<'u8'>; depth: Plane<'f32'> }>;
+
 /** Content ids include the exact bytes. Raster size/format live in the document reference. */
 export async function productAsset(data: Uint8Array | Float32Array): Promise<AssetId> {
   const bytes = new Uint8Array(data.byteLength);
@@ -18,10 +20,14 @@ export function createProducts() {
   const depths = new Map<AssetId, Plane<'f32'>>();
   const masks = new Map<AssetId, Plane<'u8'>>();
   const plates = new Map<AssetId, Rgb8>();
+  let livePlate: LivePlateProduct | null = null;
   return {
     get depths(): ReadonlyMap<AssetId, Plane<'f32'>> { return depths; },
     get masks(): ReadonlyMap<AssetId, Plane<'u8'>> { return masks; },
     get plates(): ReadonlyMap<AssetId, Rgb8> { return plates; },
+    get livePlate(): LivePlateProduct | null { return livePlate; },
+    putLivePlate(product: LivePlateProduct): void { livePlate = product; },
+    clearLivePlate(): void { livePlate = null; },
     putDepth: (asset: AssetId, plane: Plane<'f32'>): void => { depths.set(asset, plane); },
     putMask: (asset: AssetId, plane: Plane<'u8'>): void => { masks.set(asset, plane); },
     dropMask: (asset: AssetId): void => { masks.delete(asset); },
@@ -29,7 +35,7 @@ export function createProducts() {
       for (const asset of masks.keys()) if (!assets.has(asset)) masks.delete(asset);
     },
     putPlate: (asset: AssetId, image: Rgb8): void => { plates.clear(); plates.set(asset, image); },
-    clear(): void { depths.clear(); masks.clear(); plates.clear(); },
+    clear(): void { depths.clear(); masks.clear(); plates.clear(); livePlate = null; },
     forScene(doc: SceneDocument): { masks: ReadonlyMap<ObjectId, Plane<'u8'>>; depth: Plane<'f32'> | null; plate: Rgb8 | null } {
       const byObject = new Map<ObjectId, Plane<'u8'>>();
       for (const object of doc.objects) {

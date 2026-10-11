@@ -2,6 +2,8 @@ import { bundledLock } from '../analysis/bundled-lock.ts';
 import type { AnalysisEvent, AnalysisService, AnalysisServiceDeps, Decoder, FaceTracker, HeavyStage } from '../analysis/service.ts';
 import type { AnalysisBackend, ComposedAnalysisService } from '../analysis/composed.ts';
 import { holeMask, plateNeeded, reconcile } from '../core/derive.ts';
+import { liveCoverage, liveHoleMask, type LiveCoverage } from '../core/live-coverage.ts';
+import type { PerspectiveGeometry } from '../core/perspective.ts';
 import type { Produce } from '../core/edits.ts';
 import type { ModelId, NonEmpty } from '../core/ids.ts';
 import { sortedMasks } from '../core/produce.ts';
@@ -10,8 +12,14 @@ import type { SceneDocument } from '../core/types.ts';
 import { createBrowserClock } from '../platform/clock.ts';
 import { createDiagnostics } from '../platform/diagnostics.ts';
 import { initialPolicy, nextWake, transition, type PolicyEvent, type Stage } from './policy.ts';
-import { productAsset, type Products } from './products.ts';
-import { windowPlateNeeded } from './window.ts';
+import { productAsset, type Products, type LivePlateProduct } from './products.ts';
+
+export type LivePlateState =
+  | { readonly kind: 'off' }
+  | { readonly kind: 'not-needed' }
+  | { readonly kind: 'limited'; readonly reason: string }
+  | { readonly kind: 'preparing'; readonly identity: string }
+  | { readonly kind: 'ready'; readonly product: LivePlateProduct };
 
 type ServiceFactory = (deps: Pick<AnalysisServiceDeps, 'diag' | 'threads' | 'lock'> & { readonly clock: ReturnType<typeof createBrowserClock> } & { readonly changed: () => void; readonly waiting: (stage: Stage) => void }) => ComposedAnalysisService;
 let serviceFactory: ServiceFactory | null = null;
@@ -34,7 +42,6 @@ type Host = {
   readonly produce: (product: Produce) => void;
   readonly changed: () => void;
   readonly products: Products;
-  readonly windowEnabled: () => boolean;
 };
 const reason = (error: unknown): string => error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error);
 
@@ -139,6 +146,7 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
   let status = 'Fetching models 0%';
   let timer: ReturnType<typeof setTimeout> | null = null;
   let heavy: AbortController | null = null;
+  let liveHeavy: AbortController | null = null;
   let warming: AbortController | null = null;
   let decoder: Decoder | null = null;
   let pendingWarmup: (() => void) | null = null;
@@ -149,6 +157,7 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
   let sequenceFailure: string | null = null;
   let timings: Record<string, number> = {};
   let lastTiming: { stage: string; ms: number } | null = null;
+  let liveGeometry: PerspectiveGeometry | null = null;
   const started = new Map<Stage, number>();
   let waiters: { resolve: () => void; reject: (error: Error) => void }[] = [];
   const fetchController = new AbortController();
@@ -163,10 +172,20 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
     if (NOISY_DEV) void fetch('/api/log', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ event: 'analysis', stage, ms, generation }), signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
     host.changed();
   };
-  const wantsPlate = (): boolean => {
+  const wantsSavedPlate = (): boolean => {
     const scene = host.read();
-    return scene !== null && (host.windowEnabled() ? windowPlateNeeded(scene.doc) : plateNeeded(scene.doc));
+    return scene !== null && plateNeeded(scene.doc);
   };
+  const currentCoverage = (): LiveCoverage | null => {
+    const scene = host.read();
+    return scene === null || liveGeometry === null ? null : liveCoverage(scene.doc, liveGeometry);
+  };
+  const wantsLivePlate = (): boolean => {
+    const scene = host.read(), coverage = currentCoverage();
+    return scene !== null && scene.doc.objects.length > 0 && coverage !== null && host.products.forScene(scene.doc).depth !== null
+      && scene.doc.objects.every((object) => host.products.masks.has(object.produced.mask.asset)) && host.products.livePlate?.key !== coverage.key;
+  };
+  const wantsPlate = (): boolean => wantsSavedPlate() || wantsLivePlate();
   const restingStatus = (): string => tapFailure ?? sequenceFailure ?? (decoderReady ? 'Ready to tap' : embeddings ? 'Warming decoder' : 'Ready');
   const finishProduct = (stage: Stage, generation: number): void => {
     const began = started.get(stage);
@@ -187,10 +206,11 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
     // State changes first: cancelHeavy can synchronously deliver a terminal callback.
     for (const effect of next.effects) {
       switch (effect.kind) {
-        case 'cancel-heavy': heavy?.abort(); heavy = null; service?.cancelHeavy(); break;
+        case 'cancel-heavy': heavy?.abort(); heavy = null; liveHeavy = null; service?.cancelHeavy(); break;
         case 'release-decoder': warming?.abort(); warming = null; decoder?.release(); decoder = null; decoderReady = false; break;
         case 'drop-products':
           settle('The photo was replaced.'); host.products.clear(); guide = null; embeddings = false;
+          liveGeometry = null;
           pendingWarmup = null;
           tapFailure = null; sequenceFailure = null; timings = {}; lastTiming = null; started.clear();
           if (policy.modelsReady) status = 'Waiting to analyze';
@@ -220,11 +240,20 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
     // A plate queued while warming must finish before another decoder starts.
     warming?.abort(); warming = null;
     const needs = reconcile(scene.doc, { embeddings }, new Set(), { objectsActive: true, tapPending: false });
+    const coverage = plate && !wantsSavedPlate() ? currentCoverage() : null;
+    const liveDepth = coverage === null ? null : host.products.forScene(scene.doc).depth;
+    const hole = plate ? coverage === null
+      ? holeMask(scene.doc, host.products.forScene(scene.doc).masks, scene.doc.frame.master.size)
+      : liveHoleMask(scene.doc, host.products.forScene(scene.doc).masks, coverage) : null;
+    if (coverage !== null && liveDepth === null) {
+      dispatch({ kind: 'done', generation, plateNeeded: false }); settle(null); setStatus(restingStatus()); return;
+    }
     const stages: NonEmpty<HeavyStage> = plate
-      ? [{ kind: 'inpaint', hole: holeMask(scene.doc, host.products.forScene(scene.doc).masks, scene.doc.frame.master.size) }]
+      ? [{ kind: 'inpaint', hole: hole ?? holeMask(scene.doc, host.products.forScene(scene.doc).masks, scene.doc.frame.master.size) }]
       : [{ kind: 'depth' }, ...needs.flatMap((need): HeavyStage[] => need.kind === 'encode' ? [{ kind: 'encode' }] : [])];
     const forMasks = sortedMasks(scene.doc);
     const controller = new AbortController(); heavy = controller;
+    liveHeavy = coverage === null ? null : controller;
     const active = (): boolean => valid(generation) && !controller.signal.aborted && heavy === controller;
     const products: Promise<void>[] = [];
     const failed = (stage: Stage, error: unknown): void => {
@@ -288,6 +317,13 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
         onPlate(image) {
           if (!active()) return;
           finishProduct('inpaint', generation);
+          if (coverage !== null) {
+            if (currentCoverage()?.key === coverage.key && hole !== null && liveDepth !== null) {
+              host.products.putLivePlate({ key: coverage.key, image, hole, depth: liveDepth });
+              host.changed();
+            }
+            return;
+          }
           products.push((async () => {
             const asset = await productAsset(image.data);
             if (!active()) return;
@@ -304,10 +340,12 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
             if (!active()) return;
             const needed = wantsPlate();
             const current = host.read();
-            if (plate && needed && current !== null && JSON.stringify(sortedMasks(current.doc)) === JSON.stringify(forMasks)) {
+            const sameRequest = coverage === null ? wantsSavedPlate() && current !== null && JSON.stringify(sortedMasks(current.doc)) === JSON.stringify(forMasks)
+              : wantsLivePlate() && currentCoverage()?.key === coverage.key;
+            if (plate && needed && sameRequest) {
               failed('inpaint', 'The sequence completed without a fresh plate.'); return;
             }
-            heavy = null;
+            heavy = null; liveHeavy = null;
             dispatch({ kind: 'done', generation, plateNeeded: needed });
             if (!valid(generation) || controller.signal.aborted) return;
             if (policy.sequence === 'idle') { settle(null); setStatus(restingStatus()); }
@@ -370,10 +408,39 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
       dispatch({ kind: 'scene-ready', generation });
     },
     requestPlateIfNeeded(): Promise<void> {
-      if (!wantsPlate()) return Promise.resolve();
+      if (!wantsSavedPlate()) return Promise.resolve();
       if (!policy.sceneReady && !policy.pendingImport) return Promise.reject(new Error('Import a photo before requesting a plate.'));
       if (status.startsWith('Models unavailable')) return Promise.reject(new Error(status));
       // An explicit new request can retry inpaint after failure; failures never retry themselves.
+      sequenceFailure = null;
+      const promise = new Promise<void>((resolve, reject) => { waiters.push({ resolve, reject }); });
+      dispatch({ kind: 'plate-request', generation: policy.generation });
+      return promise;
+    },
+    livePlate(): LivePlateState {
+      if (liveGeometry === null) return { kind: 'off' };
+      const coverage = currentCoverage(), scene = host.read();
+      if (coverage === null || scene === null || host.products.forScene(scene.doc).depth === null) return { kind: 'limited', reason: 'Depth is not ready' };
+      if (scene.doc.objects.length === 0) return { kind: 'not-needed' };
+      if (scene.doc.objects.some((object) => !host.products.masks.has(object.produced.mask.asset))) return { kind: 'limited', reason: 'Subject masks are not ready' };
+      const product = host.products.livePlate;
+      if (product?.key === coverage.key) return { kind: 'ready', product };
+      return sequenceFailure === null ? { kind: 'preparing', identity: coverage.key } : { kind: 'limited', reason: sequenceFailure };
+    },
+    requestLivePlate(geometry: PerspectiveGeometry | null): Promise<void> {
+      liveGeometry = geometry === null ? null : { ...geometry, aperture: { ...geometry.aperture, center: { ...geometry.aperture.center } } };
+      if (geometry === null) {
+        host.products.clearLivePlate();
+        if (liveHeavy !== null && heavy === liveHeavy) {
+          liveHeavy.abort(); heavy = null; liveHeavy = null; service?.cancelHeavy();
+          dispatch({ kind: 'done', generation: policy.generation, plateNeeded: wantsSavedPlate() });
+          if (policy.sequence === 'idle') { settle(null); setStatus(restingStatus()); }
+        }
+        return Promise.resolve();
+      }
+      if (!wantsLivePlate()) return Promise.resolve();
+      if (!policy.sceneReady && !policy.pendingImport) return Promise.reject(new Error('Import a photo before requesting a live plate.'));
+      if (status.startsWith('Models unavailable')) return Promise.reject(new Error(status));
       sequenceFailure = null;
       const promise = new Promise<void>((resolve, reject) => { waiters.push({ resolve, reject }); });
       dispatch({ kind: 'plate-request', generation: policy.generation });

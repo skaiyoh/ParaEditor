@@ -1,72 +1,77 @@
 import type { ViewSource } from './view-driver.ts';
 import type { Vec2 } from '../core/motion.ts';
+import { createOrientationTracker, resolveDisplayBasis, rotateTilt, type OrientationSample, type TiltObservation } from '../core/orientation.ts';
 
-export type Orientation = Pick<DeviceOrientationEvent, 'beta' | 'gamma'>;
+export type Orientation = OrientationSample;
 const TRAVEL_DEGREES = 20;
 const FIRST_EVENT_MS = 2000;
 let injectedScreenAngle: number | null = null;
 
-type Axes = readonly [number, number, number, number];
-// PH3's angle mapping is identical for all orientation types until measured on the iPad.
-const PH3_AXES: Readonly<Record<number, Axes>> = {
-  0: [0, 1, 1, 0], 90: [1, 0, 0, -1], 180: [0, -1, -1, 0], 270: [-1, 0, 0, 1],
-};
-const SCREEN_TILT_MAPPING: Readonly<Record<OrientationType, Readonly<Record<number, Axes>>>> = {
-  'portrait-primary': PH3_AXES, 'portrait-secondary': PH3_AXES,
-  'landscape-primary': PH3_AXES, 'landscape-secondary': PH3_AXES,
-};
-
-/** Pure device-to-screen mapping; rows can be corrected from the iPad readings. */
-export function screenTilt(beta: number, gamma: number, angle: number, type: OrientationType = 'portrait-primary'): Vec2 {
-  const [xb, xg, yb, yg] = SCREEN_TILT_MAPPING[type][(angle % 360 + 360) % 360] ?? [0, 1, 1, 0];
-  return { x: xb * beta + xg * gamma, y: yb * beta + yg * gamma };
+/** Accepts a resolved portrait-relative angle; type is retained for older callers. */
+export function screenTilt(beta: number, gamma: number, angle: number, _type?: OrientationType): Vec2 {
+  return rotateTilt(beta, gamma, angle);
 }
 
 export function screenOrientation() {
   const native = window.screen.orientation;
   const angle = Number.isFinite(native?.angle) ? native.angle : null;
   const legacy = typeof window.orientation === 'number' && Number.isFinite(window.orientation) ? window.orientation : null;
-  const effectiveAngle = NOISY_DEV && injectedScreenAngle !== null ? injectedScreenAngle : angle ?? legacy ?? 0;
-  return { type: native?.type ?? null, effectiveType: native?.type ?? 'portrait-primary', angle, legacy, effectiveAngle };
+  const basis = resolveDisplayBasis(angle, native?.type ?? null, legacy);
+  const injected = NOISY_DEV && injectedScreenAngle !== null;
+  return { type: native?.type ?? null, effectiveType: native?.type ?? 'portrait-primary', angle, legacy,
+    effectiveAngle: injected ? injectedScreenAngle ?? basis.angle : basis.angle, basisProvenance: injected ? 'injected' : basis.provenance };
 }
 
-/** Dev-only screen rotation override; null restores the device's angle. */
+/** Dev-only portrait-relative screen rotation override; null restores device metadata. */
 export function injectScreenAngle(angle: number | null): void {
   if (!NOISY_DEV) throw new Error('Screen angle injection is available only in dev builds.');
   if (angle !== null && (!Number.isFinite(angle) || angle % 90 !== 0)) throw new Error('Invalid injected screen angle.');
-  injectedScreenAngle = angle;
+  injectedScreenAngle = angle === null ? null : (angle % 360 + 360) % 360;
 }
 
 export function createTiltSource() {
   let inject: ((orientation: Orientation) => void) | null = null;
-  let raw: Orientation = { beta: null, gamma: null };
+  let raw: Orientation = { alpha: null, beta: null, gamma: null };
+  let corrected: TiltObservation = { delta: { x: 0, y: 0 }, pose: 'unavailable', yawLimited: true, state: 'calibrating', reason: 'neutral' };
+  let sequence = 0, capturedAt = 0;
   const source: ViewSource = async (attempt) => {
-    raw = { beta: null, gamma: null };
+    raw = { alpha: null, beta: null, gamma: null }; sequence = 0; capturedAt = 0;
+    corrected = { delta: { x: 0, y: 0 }, pose: 'unavailable', yawLimited: true, state: 'calibrating', reason: 'neutral' };
     try {
       const orientation = typeof DeviceOrientationEvent === 'undefined' ? null : DeviceOrientationEvent;
       if (orientation !== null && 'requestPermission' in orientation && typeof orientation.requestPermission === 'function') {
-        // Invoke before the first await while transient user activation is still present.
         const permission: unknown = await orientation.requestPermission();
         if (!attempt.valid()) return () => {};
         if (permission !== 'granted') { attempt.failed('Tilt unavailable'); return () => {}; }
       }
       if (!attempt.valid()) return () => {};
       await new Promise<void>((resolve) => {
-        let rest: { beta: number; gamma: number } | null = null;
+        const tracker = createOrientationTracker();
         const clamp = (delta: number): number => Math.max(0, Math.min(1, .5 + delta / (2 * TRAVEL_DEGREES)));
         const timer = window.setTimeout(() => attempt.failed('Tilt unavailable'), FIRST_EVENT_MS);
-        const receive = ({ beta, gamma }: Orientation): void => {
-          if (!attempt.valid() || beta === null || gamma === null || !Number.isFinite(beta) || !Number.isFinite(gamma)) return;
-          raw = { beta, gamma };
-          const screen = screenOrientation();
-          if (rest === null) { rest = { beta, gamma }; clearTimeout(timer); resolve(); }
-          const delta = screenTilt(beta - rest.beta, gamma - rest.gamma, screen.effectiveAngle, screen.effectiveType);
-          attempt.target({ x: clamp(delta.x), y: clamp(delta.y) });
+        const receive = (sample: Orientation, eventTime = performance.now()): void => {
+          if (!attempt.valid()) return;
+          raw = { alpha: sample.alpha ?? null, beta: sample.beta, gamma: sample.gamma };
+          capturedAt = eventTime; sequence++;
+          corrected = tracker.observe(raw, screenOrientation().effectiveAngle, capturedAt);
+          if (corrected.state !== 'lost') { clearTimeout(timer); resolve(); }
+          attempt.target({ x: clamp(corrected.delta.x), y: clamp(corrected.delta.y) },
+            { capturedAt, sequence, state: corrected.state, quality: corrected.pose === 'full' ? 1 : .6 });
         };
+        const event = (sample: DeviceOrientationEvent): void => {
+          const now = performance.now();
+          const timestamp = sample.timeStamp > now + 60_000 ? sample.timeStamp - performance.timeOrigin : sample.timeStamp;
+          receive(sample, Number.isFinite(timestamp) && timestamp >= 0 ? timestamp : now);
+        };
+        attempt.onRecenter?.(() => {
+          tracker.recenter();
+          corrected = { ...corrected, delta: { x: 0, y: 0 }, state: 'calibrating', reason: 'neutral' };
+          attempt.target({ x: .5, y: .5 }, { capturedAt: performance.now(), sequence: ++sequence, state: 'calibrating' });
+        });
         inject = receive;
-        window.addEventListener('deviceorientation', receive);
+        window.addEventListener('deviceorientation', event);
         attempt.dispose(() => {
-          clearTimeout(timer); window.removeEventListener('deviceorientation', receive);
+          clearTimeout(timer); window.removeEventListener('deviceorientation', event);
           if (inject === receive) inject = null;
           resolve();
         });
@@ -76,10 +81,10 @@ export function createTiltSource() {
   };
   return {
     source,
-    readings: () => ({ ...raw, ...screenOrientation() }),
+    readings: () => ({ ...raw, ...screenOrientation(), ...corrected, sequence, capturedAt, preclamp: corrected.delta }),
     injectOrientation(orientation: Orientation): void {
       if (!NOISY_DEV) throw new Error('Orientation injection is available only in dev builds.');
-      if (![orientation.beta, orientation.gamma].every((v) => v === null || Number.isFinite(v))) throw new Error('Invalid injected orientation.');
+      if (![orientation.alpha, orientation.beta, orientation.gamma].every((v) => v === undefined || v === null || Number.isFinite(v))) throw new Error('Invalid injected orientation.');
       inject?.(orientation);
     },
   };

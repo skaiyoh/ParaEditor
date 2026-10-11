@@ -3,16 +3,16 @@ import type { Scenario } from '../scenario.ts';
 
 const pointSchema = z.object({ x: z.number(), y: z.number() });
 const resultSchema = z.object({
-  center: z.number(), positive: z.number(), negative: z.number(),
+  center: z.number(), positive: z.number(), negative: z.number(), branchContinuous: z.boolean(),
   positiveY: z.number(), negativeY: z.number(), centerY: z.number(), clamped: z.boolean(),
   stillMatches: z.boolean(), bothSources: z.boolean(),
   tracksStopped: z.boolean(), timedOut: z.boolean(), timeoutMs: z.number(),
-  motionAdvances: z.boolean(), motionOffZero: z.boolean(), loopResumes: z.boolean(),
+  motionAdvances: z.boolean(), motionElapsed: z.number(), motionFrames: z.array(z.number()), motionOffZero: z.boolean(), loopResumes: z.boolean(),
   deniedSafe: z.boolean(), stalePermissionSafe: z.boolean(), permissionInGesture: z.boolean(),
   recentered: z.boolean(), cameraInput: z.boolean(), cameraImported: z.boolean(), desktopUnchanged: z.boolean(),
   plateJoined: z.boolean(), sampleTimings: z.record(z.string(), z.number()),
   rotations: z.array(z.object({ angle: z.number(), center: pointSchema, gamma: pointSchema, beta: pointSchema })),
-  activeRotation: pointSchema,
+  activeRotation: pointSchema, rotationBefore: pointSchema, rotationAfter: pointSchema,
 });
 
 const phoneBoxSchema = z.object({ left: z.number(), top: z.number(), right: z.number(), bottom: z.number(), width: z.number(), height: z.number() });
@@ -62,7 +62,7 @@ function phoneLayout(): unknown {
 }
 
 export const scenarios: readonly Scenario[] = [{
-  id: 'phone.tilt', title: 'Touch photo capture, Parallax orientation, fusion and source cancellation', target: 'dev', covers: ['PH1', 'PH3', 'POL1b-5'], timeoutMs: 300_000,
+  id: 'phone.tilt', title: 'Touch photo capture, continuous Parallax orientation, fusion and source cancellation', target: 'dev', covers: ['PH1', 'PH3', 'POL1b-5'], timeoutMs: 300_000,
   async run(t) {
     const { page } = t;
     await page.goto('/');
@@ -94,7 +94,12 @@ export const scenarios: readonly Scenario[] = [{
         const stage = document.querySelector('[data-testid="stage"]');
         if (!(tilt instanceof HTMLButtonElement) ||
             !(takePhoto instanceof HTMLButtonElement) || !(stage instanceof HTMLCanvasElement)) throw new Error('No phone controls or stage.');
-        const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+        let held: import('../../../src/session/tilt.ts').Orientation | null = null;
+        const hold = (value: import('../../../src/session/tilt.ts').Orientation): void => { held = value; demo.injectOrientation(value); };
+        const sleep = async (ms: number): Promise<void> => {
+          const end = performance.now() + ms;
+          do { if (held !== null) demo.injectOrientation(held); await new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, Math.max(0, end - performance.now())))); } while (performance.now() < end);
+        };
         const next = <T>(read: () => T): Promise<T> => new Promise((resolve) => requestAnimationFrame(() => resolve(read())));
         const wait = async (ready: () => boolean, timeoutMs = 60_000): Promise<void> => {
           const start = performance.now();
@@ -131,36 +136,49 @@ export const scenarios: readonly Scenario[] = [{
         };
         const media = navigator.mediaDevices, getUserMedia = media.getUserMedia;
         media.getUserMedia = () => Promise.reject(new DOMException('Scenario isolates tilt.', 'NotAllowedError'));
-        const rest = { beta: 35, gamma: 8 };
+        const rest = { alpha: 0, beta: 0, gamma: 0 };
         try {
           demo.injectScreenAngle(0);
           permission(() => { permissionInGesture = true; return Promise.resolve('granted'); });
           tilt.click();
           // The permission call must already have run in the click stack, before yielding.
           const calledSynchronously = permissionInGesture;
-          await sleep(0); window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', rest));
-          await wait(() => on(tilt) && demo.analysis().plate && !demo.products().plateNeeded);
+          await sleep(0); held = rest; window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', rest));
+          await wait(() => on(tilt) && demo.parallaxDebug().preparation === 'ready');
           await sleep(700); const center = await next(centroid);
-          demo.injectOrientation({ beta: rest.beta, gamma: rest.gamma + 15 });
+          hold({ alpha: 0, beta: rest.beta, gamma: rest.gamma + 15 });
           await sleep(700); const positive = await next(centroid);
-          demo.injectOrientation({ beta: rest.beta, gamma: rest.gamma - 15 });
+          hold({ alpha: 0, beta: rest.beta, gamma: rest.gamma - 15 });
           await sleep(700); const negative = await next(centroid);
-          demo.injectOrientation({ beta: rest.beta + 15, gamma: rest.gamma });
+          hold({ alpha: 0, beta: rest.beta + 15, gamma: rest.gamma });
           await sleep(700); const positiveY = await next(centroid);
-          demo.injectOrientation({ beta: rest.beta - 15, gamma: rest.gamma });
+          hold({ alpha: 0, beta: rest.beta - 15, gamma: rest.gamma });
           await sleep(700); const negativeY = await next(centroid);
-          demo.injectOrientation({ beta: rest.beta, gamma: rest.gamma + 20 });
+          hold({ alpha: 0, beta: rest.beta, gamma: rest.gamma + 20 });
           await sleep(900); const reach = await next(centroid);
-          demo.injectOrientation({ beta: rest.beta, gamma: rest.gamma + 100 });
+          hold({ alpha: 0, beta: rest.beta, gamma: rest.gamma + 60 });
           await sleep(900); const beyond = await next(centroid);
           const clamped = Math.abs(reach.x - beyond.x) < 1;
-          demo.setMotion({ enabled: true }); const before = demo.frame(); await sleep(120);
-          const motionAdvances = demo.frame() !== before;
+          // Compare the two sides of this display-basis change before unrelated
+          // Motion/plate edits can replace the geometry used by the earlier reach probe.
+          const rotationBefore = { ...demo.parallaxDebug().preclamp };
+          const beforeRotation = await next(centroid);
+          demo.injectScreenAngle(90); hold(rest);
+          await sleep(700); const afterRotation = await next(centroid);
+          const rotationAfter = { ...demo.parallaxDebug().preclamp };
+          const activeRotation = { x: afterRotation.x - beforeRotation.x, y: afterRotation.y - beforeRotation.y };
+          demo.injectScreenAngle(0); hold(rest);
+          demo.setMotion({ enabled: true });
+          const motionStart = performance.now(), motionFrames = [demo.frame()];
+          // One first frame establishes the loop origin. Observe a later advancing
+          // frame instead of assuming two software-rendered frames fit in 120ms.
+          while (performance.now() - motionStart < 2000 && motionFrames.every((frame) => frame === motionFrames[0])) {
+            await sleep(50); motionFrames.push(demo.frame());
+          }
+          const motionElapsed = performance.now() - motionStart;
+          const motionAdvances = motionFrames.some((frame) => frame !== motionFrames[0]);
           demo.setMotion({ enabled: false }); await next(() => undefined); const motionOffZero = demo.frame() === 0;
-          const plateJoined = demo.analysis().plate;
-          demo.injectScreenAngle(90); demo.injectOrientation(rest);
-          await sleep(700); const activeRotation = await next(centroid);
-          demo.injectScreenAngle(0); demo.injectOrientation(rest);
+          const plateJoined = demo.parallaxDebug().preparation === 'ready';
           tilt.click();
           const canvas = document.createElement('canvas'); canvas.width = stage.width; canvas.height = stage.height;
           const ctx = canvas.getContext('2d', { willReadFrequently: true }); if (ctx === null) throw new Error('No capture context.');
@@ -172,36 +190,46 @@ export const scenarios: readonly Scenario[] = [{
           const restored = sample(); renderer.renderFrame(0); const reference = sample();
           const stillMatches = restored.every((v, i) => v === reference[i]) && restored.filter((_, i) => i % 4 === 3).every((v) => v === 255);
           await next(() => undefined);
-          demo.setMotion({ enabled: true }); await sleep(100); const loopAt = demo.frame(); await sleep(100);
+          demo.setMotion({ enabled: true }); await wait(() => !demo.products().plateNeeded && !demo.analysis().alive.heavy); await sleep(100); const loopAt = demo.frame(); await sleep(100);
           const loopResumes = demo.frame() !== loopAt; demo.setMotion({ enabled: false });
 
           const rotations: { angle: number; center: { x: number; y: number }; gamma: { x: number; y: number }; beta: { x: number; y: number } }[] = [];
           for (const angle of [90, 180, 270]) {
             demo.injectScreenAngle(angle);
-            tilt.click(); await sleep(0); demo.injectOrientation(rest);
+            held = null; tilt.click(); await sleep(0); hold(rest);
+            await wait(() => demo.parallaxDebug().preparation === 'ready');
             await sleep(700); const rotatedCenter = await next(centroid);
-            demo.injectOrientation({ beta: rest.beta, gamma: rest.gamma + 15 });
+            hold({ alpha: 0, beta: rest.beta, gamma: rest.gamma + 15 });
             await sleep(700); const gamma = await next(centroid);
-            demo.injectOrientation({ beta: rest.beta + 15, gamma: rest.gamma });
+            hold({ alpha: 0, beta: rest.beta + 15, gamma: rest.gamma });
             await sleep(700); const beta = await next(centroid);
             rotations.push({ angle, center: rotatedCenter, gamma, beta });
             tilt.click(); await next(() => undefined);
           }
           demo.injectScreenAngle(0);
+          held = null; tilt.click(); await sleep(0);
+          hold({ alpha: null, beta: 1.04, gamma: -86.02 }); await sleep(350);
+          const beforeBranch = demo.parallaxDebug().preclamp;
+          hold({ alpha: null, beta: 179.49, gamma: 84.84 }); await sleep(150);
+          const afterBranch = demo.parallaxDebug().preclamp;
+          const branchContinuous = Math.hypot(afterBranch.x - beforeBranch.x, afterBranch.y - beforeBranch.y) < 12;
+          tilt.click(); held = null; await next(() => undefined);
 
-          tilt.click(); await sleep(0); demo.injectOrientation({ beta: 60, gamma: -12 });
+          held = null; tilt.click(); await sleep(0); hold({ alpha: 0, beta: 60, gamma: -12 });
+          demo.recenterParallax();
+          await wait(() => demo.parallaxDebug().preparation === 'ready');
           await sleep(700); const freshCenter = await next(centroid);
           const recentered = Math.abs(freshCenter.x - center.x) < 1 && Math.abs(freshCenter.y - center.y) < 1;
           tilt.click(); await next(() => undefined);
           media.getUserMedia = getUserMedia;
-          tilt.click(); await sleep(0); demo.injectOrientation(rest);
+          held = null; tilt.click(); await sleep(0); hold(rest);
           await wait(() => on(tilt) && demo.windowReady() && demo.parallaxDebug().tiltRunning);
-          const bothSources = document.querySelector('[data-testid="status"]')?.textContent?.startsWith('Parallax: camera and tilt') === true;
+          const bothSources = demo.parallaxDebug().cameraRunning && demo.parallaxDebug().tiltRunning;
           const tracks = demo.windowTracks();
           tilt.click(); await next(() => undefined);
           const tracksStopped = tracks.length > 0 && tracks.every((track) => track.readyState === 'ended');
           media.getUserMedia = () => Promise.reject(new DOMException('Scenario isolates tilt.', 'NotAllowedError'));
-          const timeoutStart = performance.now(); tilt.click();
+          held = null; const timeoutStart = performance.now(); tilt.click();
           await wait(() => !on(tilt) && document.querySelector('[data-testid="status"]')?.textContent?.includes('Tilt unavailable') === true, 5000);
           const timeoutMs = performance.now() - timeoutStart, timedOut = timeoutMs >= 1900 && timeoutMs < 5000;
 
@@ -212,7 +240,7 @@ export const scenarios: readonly Scenario[] = [{
           let allow = (_: string): void => {};
           permission(() => new Promise<string>((resolve) => { allow = resolve; }));
           tilt.click(); await next(() => undefined); tilt.click(); allow('granted'); await sleep(50);
-          demo.injectOrientation(rest); await next(() => undefined); const stalePermissionSafe = !on(tilt);
+          hold(rest); await next(() => undefined); const stalePermissionSafe = !on(tilt);
           permission(() => Promise.resolve('granted'));
 
           const camera = document.querySelector('input[capture="environment"]');
@@ -235,9 +263,9 @@ export const scenarios: readonly Scenario[] = [{
           desktopUnchanged &&= document.querySelector('[data-testid="take-photo"]') === null &&
             Array.from(document.querySelectorAll('.bottom-bar .mode-rail button')).map((button) => button.textContent).join(',') === 'Motion,Symbols,Parallax';
           return { center: center.x, centerY: center.y, positive: positive.x, negative: negative.x, positiveY: positiveY.y, negativeY: negativeY.y,
-            clamped, stillMatches, bothSources, tracksStopped, timedOut, timeoutMs,
-            motionAdvances, motionOffZero, loopResumes, deniedSafe, stalePermissionSafe, permissionInGesture: calledSynchronously,
-            recentered, cameraInput, cameraImported, desktopUnchanged, plateJoined, sampleTimings, rotations, activeRotation };
+            clamped, branchContinuous, stillMatches, bothSources, tracksStopped, timedOut, timeoutMs,
+            motionAdvances, motionElapsed, motionFrames, motionOffZero, loopResumes, deniedSafe, stalePermissionSafe, permissionInGesture: calledSynchronously,
+            recentered, cameraInput, cameraImported, desktopUnchanged, plateJoined, sampleTimings, rotations, activeRotation, rotationBefore, rotationAfter };
         } finally {
           media.getUserMedia = getUserMedia;
           demo.injectScreenAngle(null);
@@ -255,7 +283,7 @@ export const scenarios: readonly Scenario[] = [{
         return true;
       });
       await page.screenshot('phone');
-      t.ok('gamma +15 moves the near object left and -15 moves it right around the rest pose', result.positive - result.center < -2 && result.negative - result.center > 2, result);
+      t.ok('screen-window lateral control moves the near object in opposite directions around neutral', result.positive - result.center > 2 && result.negative - result.center < -2, result);
       t.ok('beta moves in opposite vertical directions and travel clamps at 20 degrees', (result.positiveY - result.centerY) * (result.negativeY - result.centerY) < 0 && result.clamped, result);
       for (const rotation of result.rotations) {
         const { angle, center, gamma, beta } = rotation;
@@ -268,14 +296,16 @@ export const scenarios: readonly Scenario[] = [{
           Math.abs(gamma.x - expectedGammaX) < 1 && Math.abs(gamma.y - expectedGammaY) < 1 &&
           Math.abs(beta.x - expectedBetaX) < 1 && Math.abs(beta.y - expectedBetaY) < 1, rotation);
       }
-      t.ok('rotating an active Parallax session preserves its physical rest pose', Math.abs(result.activeRotation.x - result.center) < 1 &&
-        Math.abs(result.activeRotation.y - result.centerY) < 1, result.activeRotation);
+      t.ok('rotating an active Parallax session preserves its displayed pose', Math.abs(result.activeRotation.x) < 1 &&
+        Math.abs(result.activeRotation.y) < 1 && Math.hypot(result.rotationAfter.x - result.rotationBefore.x, result.rotationAfter.y - result.rotationBefore.y) < .001,
+        { pixels: result.activeRotation, beforeDegrees: result.rotationBefore, afterDegrees: result.rotationAfter });
       t.ok('Parallax off restores frame zero at four opaque sampled points', result.stillMatches, result);
       t.ok('camera and tilt run together and Parallax off ends the camera tracks', result.bothSources && result.tracksStopped, result);
       t.ok('no orientation within two seconds reports Tilt unavailable and turns off', result.timedOut, result);
       t.ok('Parallax uses the shared motion clock, plate request and stop path', result.motionAdvances && result.motionOffZero && result.loopResumes && result.plateJoined, result);
       t.ok('permission runs in the click stack, denial stays off and late grants cannot restart', result.permissionInGesture && result.deniedSafe && result.stalePermissionSafe, result);
-      t.ok('each enable captures a fresh rest pose', result.recentered, result);
+      t.ok('Recenter captures a fresh rest pose', result.recentered, result);
+      t.ok('recorded beta/gamma branch crossing stays below 12 degrees instead of saturating', result.branchContinuous, result);
       t.ok('Take a photo opens an environment capture input and its JPEG imports through the change event', result.cameraInput && result.cameraImported, result);
       t.ok('without touch the action and mode rails retain their existing desktop controls', result.desktopUnchanged, result);
     } finally {
@@ -345,14 +375,14 @@ export const scenarios: readonly Scenario[] = [{
       };
 
       const checkProjects = async (label: string): Promise<void> => {
-        // Object selection can still be finishing its plate after the worker
-        // exits. Compare the return task after that product is committed.
+        // Wait for any requested saved plate before comparing the snapshot.
+        // Parallax coverage is transient, so objects with Motion off need no saved plate.
         await page.waitFor(`${label}: analysis settled before the Projects snapshot`, z.literal(true), () => {
           const demo = window.__noisyTest?.demo;
           if (demo === undefined) return null;
           const analysis = demo.analysis();
           return analysis.depth && analysis.decoderReady && !analysis.alive.heavy &&
-            (demo.products().masks === 0 || analysis.plate) ? true : null;
+            !demo.products().plateNeeded ? true : null;
         }, { timeoutMs: 180_000 });
         const before = await page.evaluate(z.string(), () => JSON.stringify({ document: window.__noisyTest?.demo.document(), selected: window.__noisyTest?.demo.objects().filter((object) => object.selected) }));
         await page.click('[data-testid="projects-toggle"]');
@@ -441,7 +471,7 @@ export const scenarios: readonly Scenario[] = [{
         if (!(panel instanceof HTMLElement) || !(frame instanceof HTMLCanvasElement)) return null;
         const box = panel.getBoundingClientRect(), status = document.querySelector('.sheet-handle')?.getBoundingClientRect();
         const pixel = frame.getContext('2d')?.getImageData(0, 0, 1, 1).data;
-        return box.width === 200 && box.left >= 0 && box.right === innerWidth - 12 && status !== undefined &&
+        return box.width >= 148 && box.width <= Math.min(300, innerWidth - 24) && box.left >= 12 && Math.abs(box.right - (innerWidth - 12)) < 1 && status !== undefined &&
           Math.abs(status.top - box.bottom - 12) < 1 && document.querySelector('[data-testid="parallax-beta"]')?.textContent === '35.00' &&
           document.querySelector('[data-testid="parallax-gamma"]')?.textContent === '12.00' && pixel?.[0] === 80 && pixel[3] === 255 ? true : null;
       });

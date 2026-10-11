@@ -5,7 +5,7 @@ import { grainHashGlsl } from './grain.ts';
 // Geometry. Circular caps are cut just before their vertical tangent so the
 // largest slope is one: refraction at 1 then reaches 2% of the long edge.
 // Pattern keys use the grain's integer finalizer and the document's seed.
-export const surface = head + oklab + grainHashGlsl + `
+const surfaceFields = oklab + grainHashGlsl + `
 uniform sampler2D src;
 uniform uint seed;
 uniform int pattern;
@@ -109,6 +109,9 @@ vec4 sampleColor(vec2 pixel, ivec2 size) {
     mix(texelFetch(src, ivec2(lo.x, hi.y), 0), texelFetch(src, hi, 0), f.x), f.y);
 }
 
+`;
+
+export const surface = head + surfaceFields + `
 void main() {
   ivec2 size = textureSize(src, 0), pixel = ivec2(gl_FragCoord.xy);
   vec4 color = texelFetch(src, pixel, 0);
@@ -138,3 +141,40 @@ void main() {
   o = vec4(clamp(color.rgb, 0., 1.), color.a);
 }
 `;
+
+/** Reuse the exact refracting field for live labels and packed source coordinates. */
+export const surfaceLookup = `#version 300 es
+precision highp float;
+precision highp int;
+layout(location=0) out vec4 mappedLabel;
+layout(location=1) out vec4 mappedSource;
+uniform sampler2D labels;
+uniform sampler2D sourceMap;
+` + surfaceFields + `
+vec2 decodeUV(vec4 value) {
+  vec4 bytes = round(value * 255.);
+  return vec2(bytes.x * 256. + bytes.y, bytes.z * 256. + bytes.w) / 65535.;
+}
+void main() {
+  ivec2 size = textureSize(sourceMap, 0);
+  Field field;
+  if (pattern == 0) field = bars(gl_FragCoord.xy, vec2(size));
+  else if (pattern == 1) field = cracks(gl_FragCoord.xy, vec2(size));
+  else field = scales(gl_FragCoord.xy, vec2(size));
+  vec2 position = gl_FragCoord.xy + refraction * 0.02 * float(max(size.x,size.y)) * relief * field.gradient;
+  vec2 q = clamp(position - .5, vec2(0.), vec2(size - 1));
+  ivec2 nearest = ivec2(floor(q + .5));
+  mappedLabel = texelFetch(labels, nearest, 0);
+  // At blended layer edges there is no single original sample. Pick the dominant texel.
+  vec2 uv = decodeUV(texelFetch(sourceMap, nearest, 0));
+  ivec2 lo = ivec2(floor(q)), hi = min(lo + 1, size - 1);
+  vec4 l00 = texelFetch(labels,lo,0), l10 = texelFetch(labels,ivec2(hi.x,lo.y),0);
+  vec4 l01 = texelFetch(labels,ivec2(lo.x,hi.y),0), l11 = texelFetch(labels,hi,0);
+  if (all(equal(l00,l10)) && all(equal(l00,l01)) && all(equal(l00,l11))) {
+    vec2 f = fract(q);
+    uv = mix(mix(decodeUV(texelFetch(sourceMap,lo,0)), decodeUV(texelFetch(sourceMap,ivec2(hi.x,lo.y),0)), f.x),
+      mix(decodeUV(texelFetch(sourceMap,ivec2(lo.x,hi.y),0)), decodeUV(texelFetch(sourceMap,hi,0)), f.x), f.y);
+  }
+  uvec2 encoded = uvec2(round(clamp(uv,0.,1.) * 65535.));
+  mappedSource = vec4(float(encoded.x >> 8u), float(encoded.x & 255u), float(encoded.y >> 8u), float(encoded.y & 255u)) / 255.;
+}`;

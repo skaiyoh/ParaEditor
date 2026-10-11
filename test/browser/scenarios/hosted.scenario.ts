@@ -36,7 +36,7 @@ function savedProjectId(): string | null {
   const id = document.body.dataset['hostedProjectId'];
   const panel = document.querySelector('[data-testid="projects-panel"]');
   const state = document.querySelector('[data-testid="projects-state"]')?.textContent?.trim() ?? '';
-  if (id === undefined || panel === null || !/^Saved\b/.test(state)) return null;
+  if (id === undefined || panel === null || state !== 'Current photo saved.') return null;
   const row = [...panel.querySelectorAll('[data-testid="project-row"]')].find((item) =>
     [...item.querySelectorAll<HTMLImageElement>('img')].some((image) => image.src.includes(`/api/projects/${id}/thumbnail`)));
   return row === undefined ? null : id;
@@ -166,7 +166,7 @@ export const scenarios: readonly Scenario[] = [{
       }
       throw new Error('The saved project Delete action is missing.');
     }, id);
-    await t.page.click(remove);
+    // POL1b: one press deletes at once and offers Undo; the store's DELETE follows when the undo window closes.
     await t.page.click(remove);
     await t.page.waitFor('the project row is removed from the panel', z.literal(true), () => {
       const projectId = document.body.dataset['hostedProjectId'];
@@ -174,7 +174,12 @@ export const scenarios: readonly Scenario[] = [{
       if (projectId === undefined || panel === null) return null;
       return [...panel.querySelectorAll<HTMLImageElement>('[data-testid="project-row"] img')].some((image) => image.src.includes(`/api/projects/${projectId}/thumbnail`)) ? null : true;
     }, { timeoutMs: 30_000 });
-    const after = await list();
+    const deadline = Date.now() + 30_000;
+    let after = await list();
+    while (after.projects.some((project) => project.id === id) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      after = await list();
+    }
     t.ok('the hosted store no longer lists the deleted project', !after.projects.some((project) => project.id === id), { id, projects: after.projects.map((project) => project.id) });
     t.equal('other shared projects survive the scenario', after.projects.filter((project) => before.projects.some((old) => old.id === project.id)).map((project) => project.id).sort(), before.projects.map((project) => project.id).sort());
     await t.page.screenshot('hosted-projects-deleted');

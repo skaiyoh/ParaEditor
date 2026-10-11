@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { minimalDocument } from './fixtures/documents.ts';
-import { parallaxClamp } from '../src/core/derive.ts';
-import { createViewDriver, fuseTargets, type ViewAttempt } from '../src/session/view-driver.ts';
-import { screenTilt } from '../src/session/tilt.ts';
+import { createViewDriver, type ViewAttempt } from '../src/session/view-driver.ts';
+import { createTiltSource, screenTilt } from '../src/session/tilt.ts';
 
 // The application build supplies this constant; the pure rotation checks never read it.
 declare global { const NOISY_DEV: boolean; }
@@ -29,23 +28,6 @@ test('screen-axis rest deltas preserve portrait signs and swap landscape axes', 
   }
 });
 
-for (const type of ['portrait-primary', 'portrait-secondary', 'landscape-primary', 'landscape-secondary'] satisfies readonly OrientationType[]) {
-  test(`PH3 axis mapping is retained for ${type}, independent of the device's natural orientation`, () => {
-    for (const [angle, expected] of [[0, { x: 8, y: 35 }], [90, { x: 35, y: -8 }],
-      [180, { x: -8, y: -35 }], [270, { x: -35, y: 8 }]] satisfies readonly (readonly [number, { x: number; y: number }])[]) {
-      assert.deepEqual(screenTilt(35, 8, angle, type), expected);
-    }
-  });
-}
-
-test('Parallax adds centered source targets, clamps each input, then clamps their sum', () => {
-  const sum = fuseTargets({ x: .6, y: .4 }, { x: .7, y: .3 });
-  assert.ok(Math.abs(sum.x - .8) < 1e-12 && Math.abs(sum.y - .2) < 1e-12);
-  assert.deepEqual(fuseTargets({ x: 1, y: 0 }, { x: 1, y: 0 }), { x: 1, y: 0 });
-  assert.deepEqual(fuseTargets({ x: 2, y: -1 }, { x: 0, y: 1 }), { x: .5, y: .5 });
-  assert.deepEqual(fuseTargets({ x: .8, y: .2 }, { x: .5, y: .5 }), { x: .8, y: .2 });
-});
-
 function viewClock(t: TestContext) {
   const requestDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'requestAnimationFrame');
   const cancelDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'cancelAnimationFrame');
@@ -67,36 +49,6 @@ function viewClock(t: TestContext) {
   } };
 }
 
-test('one Parallax clock fuses inputs and keeps tilt alive when the running camera fails', async (t) => {
-  const clock = viewClock(t), doc = minimalDocument();
-  const camera: { attempt: ViewAttempt | null } = { attempt: null };
-  const tilt: { attempt: ViewAttempt | null } = { attempt: null };
-  let cameraDisposed = 0, tiltDisposed = 0, draws = 0;
-  const failures: string[] = [];
-  const view = createViewDriver({ read: () => doc, generation: () => 1,
-    draw: () => { draws++; }, changed: () => {}, failed: (status) => failures.push(status) }, {
-    camera: async (attempt) => { camera.attempt = attempt; attempt.dispose(() => cameraDisposed++); return () => {}; },
-    tilt: async (attempt) => { tilt.attempt = attempt; attempt.dispose(() => tiltDisposed++); return () => {}; },
-  });
-  await view.start(); t.after(view.stop);
-  assert.equal(view.status(), 'Parallax: camera and tilt');
-  assert.equal(clock.pending(), 1);
-  camera.attempt?.target({ x: .6, y: .4 }); tilt.attempt?.target({ x: .7, y: .3 });
-  clock.tick();
-  assert.equal(draws, 1);
-  assert.ok(Math.abs(view.camera().x + .6 * parallaxClamp(doc)) < 1e-12);
-  assert.ok(Math.abs(view.camera().y - .6 * parallaxClamp(doc)) < 1e-12);
-  camera.attempt?.failed('Camera unavailable');
-  assert.equal(view.enabled(), true); assert.equal(view.ready('camera'), false); assert.equal(view.ready('tilt'), true);
-  assert.equal(view.status(), 'Parallax: tilt');
-  assert.equal(cameraDisposed, 1); assert.equal(tiltDisposed, 0);
-  assert.deepEqual(view.targets().faceTarget, { x: .5, y: .5 });
-  assert.deepEqual(failures, []);
-  view.stop();
-  assert.equal(clock.pending(), 0); assert.equal(tiltDisposed, 1); assert.equal(cameraDisposed, 1);
-  assert.deepEqual(view.camera(), { x: 0, y: 0 });
-});
-
 test('both sources start synchronously; cancelling a pending source rejects stale input and disposes late resources', async (t) => {
   const clock = viewClock(t), order: string[] = [];
   const camera: { attempt: ViewAttempt | null; resolve: ((poll: (now: number) => void) => void) | null } = { attempt: null, resolve: null };
@@ -111,11 +63,52 @@ test('both sources start synchronously; cancelling a pending source rejects stal
   assert.deepEqual(order, ['camera', 'tilt']);
   await Promise.resolve();
   assert.equal(view.ready('tilt'), true); assert.equal(view.ready('camera'), false);
-  assert.equal(view.status(), 'Parallax: tilt');
+  assert.equal(view.status(), 'Parallax: calibrating');
   view.stop();
   camera.attempt?.target({ x: 1, y: 1 });
   camera.attempt?.dispose(() => disposed++);
   camera.resolve?.(() => {}); await starting;
   assert.equal(disposed, 1); assert.equal(view.enabled(), false); assert.equal(view.ready('camera'), false);
   assert.equal(clock.pending(), 0); assert.deepEqual(view.targets().faceTarget, { x: .5, y: .5 });
+});
+
+
+test('tilt source exposes preclamp evidence, supports recenter and removes disposed listeners', async (t) => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const originalDev = Object.getOwnPropertyDescriptor(globalThis, 'NOISY_DEV');
+  const events = new EventTarget();
+  let listenerCount = 0;
+  Object.defineProperty(globalThis, 'NOISY_DEV', { configurable: true, value: true });
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    screen: { orientation: { angle: 0, type: 'landscape-primary' } }, orientation: 90,
+    setTimeout, addEventListener(type: string, listener: EventListener) { listenerCount++; events.addEventListener(type, listener); },
+    removeEventListener(type: string, listener: EventListener) { listenerCount--; events.removeEventListener(type, listener); },
+  } });
+  t.after(() => {
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (originalDev) Object.defineProperty(globalThis, 'NOISY_DEV', originalDev); else Reflect.deleteProperty(globalThis, 'NOISY_DEV');
+  });
+  let valid = true;
+  const disposers: (() => void)[] = [], recenter: (() => void)[] = [];
+  const targets: { center: { x: number; y: number }; metadata: Parameters<ViewAttempt['target']>[1] }[] = [];
+  const tilt = createTiltSource();
+  const starting = tilt.source({ valid: () => valid, dispose: (action) => disposers.push(action),
+    onRecenter: (action) => recenter.push(action), failed: (message) => assert.fail(message),
+    target: (center, metadata) => targets.push({ center, metadata }) });
+  tilt.injectOrientation({ beta: 1.04, gamma: -86.02 }); await starting;
+  tilt.injectOrientation({ beta: 179.49, gamma: 84.84 });
+  const reading = tilt.readings();
+  assert.equal(reading.effectiveAngle, 90); assert.equal(reading.basisProvenance, 'legacy-aligned-native');
+  assert.equal(reading.sequence, 2); assert.equal(reading.pose, 'gravity'); assert.equal(reading.yawLimited, true);
+  assert.ok(Math.abs(reading.preclamp.x) < 10 && Math.abs(reading.preclamp.y) < 10);
+  assert.equal(targets.at(-1)?.metadata?.state, 'tracking');
+  assert.ok((targets.at(-1)?.metadata?.capturedAt ?? 0) > 0);
+  recenter.forEach((action) => action());
+  tilt.injectOrientation({ beta: 179.49, gamma: 84.84 });
+  assert.deepEqual(targets.at(-1)?.center, { x: .5, y: .5 });
+  valid = false; disposers.forEach((action) => action());
+  assert.equal(listenerCount, 0);
+  const count = targets.length;
+  tilt.injectOrientation({ beta: 40, gamma: 40 });
+  assert.equal(targets.length, count);
 });

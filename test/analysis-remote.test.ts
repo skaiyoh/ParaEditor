@@ -214,7 +214,7 @@ test('a GPU plate queued before warming can fail without losing the pending devi
   }] };
   const master = { ...size, colorSpace: 'srgb', data: new Uint8ClampedArray(16) } satisfies ImageData;
   const products = createProducts(); products.putMask(object.produced.mask.asset, { format: 'u8', size, data: new Uint8Array(4).fill(255) });
-  const driver = createDriver({ read: () => ({ doc, masterPixels: master }), products, produce() {}, changed() {}, windowEnabled: () => true }, {
+  const driver = createDriver({ read: () => ({ doc, masterPixels: master }), products, produce() {}, changed() {} }, {
     clock: { now: () => performance.now() }, diag: { events: [], log() {} }, service, threads: 2, prepareGuide: async () => guide,
     models: { kind: 'ready', ids: [model], depth: model, inpaint: model, count: 1 },
   });

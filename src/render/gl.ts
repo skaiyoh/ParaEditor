@@ -45,27 +45,32 @@ export function createGl(canvas: HTMLCanvasElement) {
     const program = gl.createProgram();
     if (program === null) throw new Error('The WebGL program could not be created.');
     programs.add(program);
-    const vs = shader(gl.VERTEX_SHADER, vertexSource);
-    let fs: WebGLShader;
-    try { fs = shader(gl.FRAGMENT_SHADER, source); }
-    catch (error) { gl.deleteShader(vs); throw error; }
-    gl.attachShader(program, vs);
-    gl.attachShader(program, fs);
-    gl.linkProgram(program);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`The render program failed: ${gl.getProgramInfoLog(program)}`);
-    const uniforms = new Map<string, WebGLUniformLocation>();
-    const count: unknown = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
-    if (typeof count !== 'number') throw new Error('The render program has no uniform inventory.');
-    for (let i = 0; i < count; i++) {
-      const info = gl.getActiveUniform(program, i);
-      if (info === null) continue;
-      const location = gl.getUniformLocation(program, info.name);
-      if (location !== null) uniforms.set(info.name.replace(/\[0\]$/, ''), location);
+    try {
+      const vs = shader(gl.VERTEX_SHADER, vertexSource);
+      let fs: WebGLShader;
+      try { fs = shader(gl.FRAGMENT_SHADER, source); }
+      catch (error) { gl.deleteShader(vs); throw error; }
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`The render program failed: ${gl.getProgramInfoLog(program)}`);
+      const uniforms = new Map<string, WebGLUniformLocation>();
+      const count: unknown = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
+      if (typeof count !== 'number') throw new Error('The render program has no uniform inventory.');
+      for (let i = 0; i < count; i++) {
+        const info = gl.getActiveUniform(program, i);
+        if (info === null) continue;
+        const location = gl.getUniformLocation(program, info.name);
+        if (location !== null) uniforms.set(info.name.replace(/\[0\]$/, ''), location);
+      }
+      return { program, uniforms };
+    } catch (error) {
+      gl.deleteProgram(program); programs.delete(program); throw error;
     }
-    return { program, uniforms };
   }
+  function releaseProgram(value: Program): void { gl.deleteProgram(value.program); programs.delete(value.program); }
   function texture(width: number, height: number, format: 'rgba8' | 'rgba16f' | 'r8' | 'r16f' | 'rg16f', data: Uint8Array | Float32Array | null, linear = false): Texture {
     const texture = gl.createTexture();
     if (texture === null) throw new Error('The WebGL texture could not be created.');
@@ -91,12 +96,14 @@ export function createGl(canvas: HTMLCanvasElement) {
   function target(width: number, height: number, format: boolean | 'r16f' | 'rg16f' = false, linear = false): Target {
     const tex = texture(width, height, typeof format === 'boolean' ? format ? 'rgba16f' : 'rgba8' : format, null, linear);
     const framebuffer = gl.createFramebuffer();
-    if (framebuffer === null) throw new Error('The WebGL framebuffer could not be created.');
+    if (framebuffer === null) { release(tex); throw new Error('The WebGL framebuffer could not be created.'); }
     framebuffers.add(framebuffer);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex.texture, 0);
-    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('The render framebuffer is incomplete.');
-    return { ...tex, framebuffer };
+    try {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex.texture, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('The render framebuffer is incomplete.');
+      return { ...tex, framebuffer };
+    } catch (error) { gl.deleteFramebuffer(framebuffer); framebuffers.delete(framebuffer); release(tex); throw error; }
   }
   function draw(program: Program, destination: Target | null, uniforms: Readonly<Record<string, Uniform>>, mesh: Mesh | null = null): void {
     gl.useProgram(program.program);
@@ -193,5 +200,5 @@ export function createGl(canvas: HTMLCanvasElement) {
     gl.deleteVertexArray(vao);
     framebuffers.clear(); textures.clear(); programs.clear();
   }
-  return { gl, program, texture, bitmap, target, draw, mesh, releaseMesh, attach, attachMany, attachDepth, release, dispose };
+  return { gl, program, releaseProgram, texture, bitmap, target, draw, mesh, releaseMesh, attach, attachMany, attachDepth, release, dispose };
 }

@@ -23,13 +23,16 @@ import { labelAt, plateNeeded } from '../core/derive.ts';
 import { bundledLock } from '../analysis/bundled-lock.ts';
 import { maskedDepth, objectProduced } from './objects.ts';
 import { createLoopStepper, loopTapPoint, loopCanvas, encodeLoopGif } from './loop.ts';
-import { frameCount, effectiveOrbit, loopZoom, type Vec2 } from '../core/motion.ts';
+import { frameCount, effectiveOrbit, loopZoom, parallaxMargin, type Vec2 } from '../core/motion.ts';
 import { LOOP_FPS } from '../render/loop.ts';
 import { movieFormat, recordMovie, exportWait } from '../export/movie.ts';
 import { GIF_FPS, GIF_LONG_EDGE } from '../export/gif.ts';
 import { createWindowSource } from './window.ts';
 import { createTiltSource, type Orientation } from './tilt.ts';
-import { createViewDriver, type ViewHost } from './view-driver.ts';
+import { liveCoverage } from '../core/live-coverage.ts';
+import { apertureFromRect, containedImageRect, createPerspectiveGeometry, constrainEye, lateralEnvelope } from '../core/perspective.ts';
+import type { PerspectiveRenderResult } from '../render/types.ts';
+import { createViewDriver, type ViewHost, type ViewSubmission } from './view-driver.ts';
 import { createProjectSession } from './projects.ts';
 import { anchoredSize, candidateSize, draggedSize, maskArea, rankCandidates, refinementChoice, thresholdMask } from './refine.ts';
 
@@ -154,6 +157,7 @@ export function createDemoSession() {
       if (refuseOnRenderError) throw error;
       status = error instanceof Error ? error.message : String(error);
     }
+    if (viewEnabled() && liveResult.kind === 'limited') status = `${view.status()} - ${liveResult.reason}`;
     state = { exportProgress: state.exportProgress, status, scene, analysisStatus: analysis.snapshot().status, analysisTiming: analysis.lastTiming(), parallaxEnabled: view.enabled(), refiningObject: refinement?.id ?? null, refinementSize: refinement?.size ?? null };
     if (scene !== null && readyScene?.generation === generation) projects.observe(scene.doc, products.masks);
     for (const listener of listeners) listener(state);
@@ -180,7 +184,7 @@ export function createDemoSession() {
       const scene = state.scene;
       if (scene === null || scene.doc.analysis.plate === null || products.plates.has(scene.doc.analysis.plate.image.asset)) return scene;
       return { ...scene, doc: { ...scene.doc, analysis: { ...scene.doc.analysis, plate: null } } };
-    }, products, changed: () => publish(state), windowEnabled: () => viewEnabled(),
+    }, products, changed: () => publish(state),
     produce(product) {
       if (state.scene === null) return;
       if (product.kind === 'plate' && state.scene.doc.objects.length === 0) return;
@@ -203,27 +207,67 @@ export function createDemoSession() {
       setDocument(doc);
     },
   });
+  let liveKey: string | null = null, liveViewId = 0;
+  let liveResult: PerspectiveRenderResult = { kind: 'limited', reason: 'Parallax is off' };
+  function liveGeometry(doc: SceneDocument) {
+    const rect = stageCanvas?.getBoundingClientRect();
+    if (rect === undefined || rect.width <= 0 || rect.height <= 0) return null;
+    return createPerspectiveGeometry({
+      aperture: apertureFromRect(containedImageRect(rect, doc.frame.master.size), { width: window.innerWidth, height: window.innerHeight }),
+      crop: parallaxMargin(doc.motion.parallax), neutralDistance: 1, nearFactor: 1.1, farFactor: 2,
+    });
+  }
+  function renderLive(scene: DemoScene, frame: number): ViewSubmission | void {
+    if (renderer === null) return;
+    const geometry = liveGeometry(scene.doc);
+    if (geometry === null) return;
+    const key = JSON.stringify([scene.doc.frame.master.asset, scene.doc.analysis.depth?.map.asset,
+      sortedMasks(scene.doc), geometry]);
+    if (key !== liveKey) {
+      liveKey = key;
+      const current = generation;
+      // Publishing installs the new document after drawing; request against that installed state.
+      queueMicrotask(() => {
+        if (current !== generation || !viewEnabled() || liveKey !== key) return;
+        void analysis.requestLivePlate(geometry).catch((error: unknown) => {
+          if (current === generation && viewEnabled()) publish({ ...state, status: error instanceof Error ? error.message : String(error) });
+        });
+      });
+    }
+    const envelope = lateralEnvelope(geometry), center = view.diagnostics().center;
+    const eye = constrainEye({ x: (center.x - .5) * 2 * envelope.max.x,
+      y: -2 * (center.y - .5) * envelope.max.y }, geometry);
+    liveResult = renderer.renderPerspective({ geometry, eye, sceneGeneration: generation, viewId: ++liveViewId, frame });
+    return { eye: liveResult.kind === 'limited' ? { x: 0, y: 0, z: geometry.neutralDistance } : liveResult.eye,
+      viewId: liveViewId, limitation: liveResult.reason };
+  }
   const viewHost = {
     read: () => state.scene?.doc ?? null,
     generation: () => generation,
-    draw: (camera, frame) => { if (recordingJob === null) renderer?.renderView(camera, frame); },
-    changed: () => publish({ ...state, status: view.status() }),
-    failed: (status) => publish({ ...state, status }),
+    draw: (_camera, frame) => { if (recordingJob === null && state.scene !== null) return renderLive(state.scene, frame); },
+    changed: () => {
+      if (!view.enabled()) { stopView(); publish({ ...state, status: view.status() }); return; }
+      // Source status does not change scene products. The live clock owns drawing;
+      // publishing the full scene here would prepare and draw a second frame.
+      loop.stop();
+      const status = liveKey !== null && liveResult.kind === 'limited' ? `${view.status()} - ${liveResult.reason}` : view.status();
+      state = { ...state, status, parallaxEnabled: true };
+      for (const listener of listeners) listener(state);
+    },
+    failed: (status) => { stopView(); publish({ ...state, status }); },
   } satisfies ViewHost;
   const cameraSource = createWindowSource({ openTracker: () => analysis.openFaceTracker() });
   const tiltSource = createTiltSource();
   const view = createViewDriver(viewHost, { camera: cameraSource.source, tilt: tiltSource.source });
   function viewEnabled(): boolean { return view.enabled(); }
-  function stopView(): void { view.stop(); }
+  function stopView(): void {
+    view.stop(); renderer?.endPerspective(); liveKey = null; liveResult = { kind: 'limited', reason: 'Parallax is off' };
+    void analysis.requestLivePlate(null);
+  }
   async function setParallax(enabled: boolean): Promise<void> {
     if (!enabled) { stopView(); publish({ ...state, status: 'Ready' }); return; }
     if (state.scene === null || readyScene?.generation !== generation || !analysis.snapshot().modelsReady) return;
-    const current = generation;
     const starting = view.start();
-    // Plate preparation and a running source need not wait on the other permission.
-    if (view.enabled()) void requestPlateIfNeeded().catch((error: unknown) => {
-      if (current === generation && view.enabled()) publish({ ...state, status: error instanceof Error ? error.message : String(error) });
-    });
     await starting;
   }
   function draw(scene: DemoScene): void {
@@ -237,9 +281,12 @@ export function createDemoSession() {
     };
     const masks = preview === null || preview === undefined ? scene.masks : products.forScene(doc).masks;
     const selected = doc.objects.some((object) => object.id === scene.selected && !object.hidden) ? scene.selected : null;
-    renderer.setScene({ doc, master: scene.master, masks, depth: scene.depth, plate: scene.plate, selected });
+    const live = analysis.livePlate(), geometry = liveGeometry(doc);
+    const matchingLive = live.kind === 'ready' && geometry !== null && live.product.key === liveCoverage(doc, geometry)?.key ? live.product : null;
+    renderer.setScene({ doc, master: scene.master, masks, depth: scene.depth, plate: scene.plate, selected,
+      livePlate: matchingLive });
     if (viewEnabled()) {
-      loop.stop(); renderer.renderView(view.camera(), view.frame());
+      loop.stop(); renderLive(scene, view.frame());
     } else if (scene.doc.motion.enabled && readyScene?.generation === generation && readyScene.id === scene.doc.id && !plateNeeded(scene.doc) &&
       (scene.doc.analysis.plate === null || scene.plate !== null)) {
       if (loop.running()) renderer.renderFrame(loop.frame());
@@ -307,10 +354,17 @@ export function createDemoSession() {
     const decoder = analysis.decoder();
     if (state.scene === null || readyScene?.generation !== generation) return Promise.resolve();
     if (decoder === null) { publish({ ...state, status: 'Still analyzing…' }); return Promise.resolve(); }
-    // Undo the preview zoom only. Parallax displacement is not undone;
-    // the remaining error is bounded by the document's parallax margin.
-    const zoomed = (viewEnabled() && state.scene.depth !== null) || (loop.running() && effectiveOrbit(state.scene.doc.motion) > 0);
-    const point = zoomed ? loopTapPoint(at, loopZoom(state.scene.doc.motion.parallax)) : at;
+    const liveHit = viewEnabled() ? renderer?.hitTest(at) : null;
+    if (viewEnabled() && (liveHit === null || liveHit === undefined || liveHit.kind === 'miss'
+      || liveHit.sceneGeneration !== generation || liveHit.viewId !== liveViewId)) return Promise.resolve();
+    if (liveHit?.kind === 'generated') {
+      publish({ ...state, status: 'This revealed background cannot be selected. Recenter to select the original photo.' });
+      return Promise.resolve();
+    }
+    if (liveHit?.kind === 'original' && liveHit.objectId !== null) { select(liveHit.objectId); return Promise.resolve(); }
+    const zoomed = loop.running() && effectiveOrbit(state.scene.doc.motion) > 0;
+    const point = liveHit?.kind === 'original' ? liveHit.sourceUV
+      : zoomed ? loopTapPoint(at, loopZoom(state.scene.doc.motion.parallax)) : at;
     const current = generation, epoch = objectEpoch;
     const controller = new AbortController(); tapControllers.add(controller);
     const valid = (): boolean => current === generation && epoch === objectEpoch && !controller.signal.aborted;
@@ -351,7 +405,11 @@ export function createDemoSession() {
   function objectAt(at: ImagePoint): ObjectId | null {
     const scene = state.scene;
     if (scene === null || readyScene?.generation !== generation) return null;
-    const zoomed = (viewEnabled() && scene.depth !== null) || (loop.running() && effectiveOrbit(scene.doc.motion) > 0);
+    if (viewEnabled()) {
+      const hit = renderer?.hitTest(at);
+      return hit?.kind === 'original' && hit.sceneGeneration === generation && hit.viewId === liveViewId ? hit.objectId : null;
+    }
+    const zoomed = loop.running() && effectiveOrbit(scene.doc.motion) > 0;
     return labelAt(scene.doc, scene.masks, zoomed ? loopTapPoint(at, loopZoom(scene.doc.motion.parallax)) : at);
   }
   function refineValid(current: Refinement): boolean {
@@ -708,10 +766,26 @@ export function createDemoSession() {
     },
     requestPlateIfNeeded,
     setParallax,
+    recenterParallax: (): void => view.recenter(),
+    setParallaxSource: view.setSourceMode,
+    parallaxTrace: () => ({ ...view.trace(), stage: (() => {
+      const rect = stageCanvas?.getBoundingClientRect();
+      return rect === undefined ? null : { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        viewportWidth: window.innerWidth, viewportHeight: window.innerHeight, dpr: window.devicePixelRatio };
+    })() }),
+    downloadParallaxTrace(): void {
+      const rect = stageCanvas?.getBoundingClientRect();
+      const data = { ...view.trace(), build: readBuildId(), userAgent: navigator.userAgent, tilt: tiltSource.readings(),
+        stage: rect === undefined ? null : { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        viewport: { width: window.innerWidth, height: window.innerHeight, dpr: devicePixelRatio }, coverage: liveResult };
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a'); link.href = url; link.download = 'parallax-trace.json'; link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
     injectOrientation: (orientation: Orientation): void => tiltSource.injectOrientation(orientation),
     injectFace: (center: Vec2 | null): void => cameraSource.injectFace(center),
     injectCameraFrame: cameraSource.injectCameraFrame,
-    parallaxDebug: () => ({ ...tiltSource.readings(), ...view.targets(), ...cameraSource.preview(),
+    parallaxDebug: () => ({ ...tiltSource.readings(), ...view.targets(), ...cameraSource.preview(), ...view.diagnostics(), coverage: liveResult, preparation: analysis.livePlate().kind, viewId: liveViewId,
       offset: view.camera(), cameraRunning: view.ready('camera'), tiltRunning: view.ready('tilt') }),
     windowReady: (): boolean => view.ready('camera'),
     windowFrames: (): number => cameraSource.trackedFrames(),

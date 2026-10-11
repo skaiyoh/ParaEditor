@@ -3,13 +3,12 @@ import type { AnalysisDriver, AnalysisSnapshot } from './driver.ts';
 import type { SceneDocument } from '../core/types.ts';
 import { plateNeeded } from '../core/derive.ts';
 import type { StylePatch } from '../core/edits.ts';
-import type { RendererDebug } from '../render/types.ts';
+import type { PerspectivePlate, RendererDebug } from '../render/types.ts';
 import type { SelectionDebug } from '../render/debug.ts';
 import { isObjectId, isSceneId } from '../core/ids.ts';
 import type { Oklch, Plane } from '../core/raster.ts';
 import { applyEdit } from '../core/reduce.ts';
 import type { Vec2 } from '../core/motion.ts';
-import { windowPlateNeeded } from './window.ts';
 import { injectScreenAngle, type Orientation } from './tilt.ts';
 
 export type DemoTestSurface = {
@@ -50,6 +49,9 @@ export type DemoTestSurface = {
   injectFace(center: Vec2 | null): void;
   injectCameraFrame(frame: ImageData, face: Parameters<DemoSession['injectCameraFrame']>[1]): void;
   parallaxDebug(): ReturnType<DemoSession['parallaxDebug']>;
+  recenterParallax(): void;
+  setParallaxSource: DemoSession['setParallaxSource'];
+  parallaxTrace: DemoSession['parallaxTrace'];
   injectOrientation(orientation: Orientation): void;
   injectScreenAngle(angle: number | null): void;
   windowReady(): boolean;
@@ -61,6 +63,7 @@ export type DemoTestSurface = {
 export function demoTestHooks(session: DemoSession): DemoTestSurface {
   let injectedRenderer: ReturnType<DemoSession['renderer']> = null;
   let injectedDepth: Plane<'f32'> | null = null;
+  let injectedPlates = new WeakMap<PerspectivePlate, PerspectivePlate>();
   return {
     importFile: (file) => session.importFile(file),
     scene() {
@@ -134,7 +137,7 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
     products() {
       const scene = session.snapshot().scene;
       const state = session.snapshot();
-      return { generation: session.analysis.generation(), depth: session.products.depths.size, masks: session.products.masks.size, plates: session.products.plates.size, plateSize: scene?.plate?.size ?? null, guideSize: session.analysis.guide()?.size ?? null, plateNeeded: scene !== null && (state.parallaxEnabled ? windowPlateNeeded(scene.doc) : plateNeeded(scene.doc)) };
+      return { generation: session.analysis.generation(), depth: session.products.depths.size, masks: session.products.masks.size, plates: session.products.plates.size, plateSize: scene?.plate?.size ?? null, guideSize: session.analysis.guide()?.size ?? null, plateNeeded: scene !== null && (state.parallaxEnabled ? session.analysis.livePlate().kind === 'preparing' : plateNeeded(scene.doc)) };
     },
     setStyle: (patch) => session.setStyle(patch),
     setSymbols: (patch) => {
@@ -147,6 +150,9 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
     injectFace: (center) => session.injectFace(center),
     injectCameraFrame: (frame, face) => session.injectCameraFrame(frame, face),
     parallaxDebug: () => session.parallaxDebug(),
+    recenterParallax: () => session.recenterParallax(),
+    setParallaxSource: session.setParallaxSource,
+    parallaxTrace: session.parallaxTrace,
     injectOrientation: (orientation) => session.injectOrientation(orientation),
     injectScreenAngle,
     windowReady: () => session.windowReady(),
@@ -157,10 +163,24 @@ export function demoTestHooks(session: DemoSession): DemoTestSurface {
       if (renderer === null) throw new Error('Open a photo before injecting depth.');
       // Install only on explicit injection. The driver still owns real scene
       // construction; this dev-only override follows its subsequent edits.
+      if (injectedDepth !== plane) injectedPlates = new WeakMap();
       injectedDepth = plane;
       if (injectedRenderer !== renderer) {
         const setScene = renderer.setScene.bind(renderer);
-        renderer.setScene = (scene) => setScene({ ...scene, depth: injectedDepth });
+        renderer.setScene = (scene) => {
+          const original = scene.livePlate;
+          let livePlate: PerspectivePlate | null = null;
+          if (original != null && injectedDepth !== null) {
+            livePlate = injectedPlates.get(original) ?? null;
+            if (livePlate === null) {
+              livePlate = { ...original, depth: injectedDepth };
+              injectedPlates.set(original, livePlate);
+            }
+          }
+          // Preserve the production cache identity across unchanged scene updates.
+          // Replacing either the prepared product or injected depth invalidates it.
+          setScene({ ...scene, depth: injectedDepth, livePlate });
+        };
         injectedRenderer = renderer;
       }
       session.setStyle({});

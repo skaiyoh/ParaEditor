@@ -23,6 +23,9 @@ import { scenarios as cameraStage } from './camera-stage.scenario.ts';
 import { scenarios as motionEdges } from './motion-edges.scenario.ts';
 import { scenarios as loop } from './loop.scenario.ts';
 import { scenarios as view } from './view.scenario.ts';
+import { scenarios as parallaxReal } from './parallax-real.scenario.ts';
+import { scenarios as parallax } from './parallax.scenario.ts';
+import { scenarios as parallaxControls } from './parallax-controls.scenario.ts';
 import { scenarios as windowScenarios } from './window.scenario.ts';
 import { scenarios as phone } from './phone.scenario.ts';
 import { scenarios as projects } from './projects.scenario.ts';
@@ -62,6 +65,9 @@ export const SCENARIO_FILES = {
   'motion-edges.scenario.ts': motionEdges,
   'view.scenario.ts': view,
   'window.scenario.ts': windowScenarios,
+  'parallax-controls.scenario.ts': parallaxControls,
+  'parallax.scenario.ts': parallax,
+  'parallax-real.scenario.ts': parallaxReal,
   'phone.scenario.ts': phone,
   'projects.scenario.ts': projects,
   'stereo.scenario.ts': stereo,

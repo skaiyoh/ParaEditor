@@ -2,17 +2,23 @@ import { z } from '../../../src/core/zod.ts';
 import type { Scenario } from '../scenario.ts';
 
 const resultSchema = z.object({
-  status: z.string(), tracks: z.number(), live: z.boolean(), ended: z.boolean(), pressedOff: z.boolean(),
+  status: z.string(), live: z.boolean(), ended: z.boolean(), pressedOff: z.boolean(), trackedFrames: z.number(),
   center: z.number(), rightHead: z.number(), leftHead: z.number(), stillMatches: z.boolean(),
+  stillComparedPixels: z.number(), stillMismatchedPixels: z.number(),
   motionAdvances: z.boolean(), motionOffZero: z.boolean(), loopResumes: z.boolean(),
-  preparing: z.boolean(), plateJoined: z.boolean(), noToggleFetch: z.boolean(),
-  deniedSafe: z.boolean(), trackedFrames: z.number(),
-  deniedCameraTilt: z.boolean(), sumMatches: z.boolean(), debugMatches: z.boolean(), debugExportSafe: z.boolean(),
-  faceOnly: z.number(), tiltOnly: z.number(), fused: z.number(), fusedCenter: z.number(),
+  preparing: z.boolean(), plateJoined: z.boolean(), savedUnchanged: z.boolean(), noToggleFetch: z.boolean(),
+  deniedSafe: z.boolean(), deniedCameraTilt: z.boolean(), cameraAuthority: z.boolean(), fallback: z.boolean(), recovered: z.boolean(),
+  recentered: z.boolean(), stalePermissionSafe: z.boolean(), debugMatches: z.boolean(), debugExportSafe: z.boolean(),
+  transitionTrace: z.string(), unchangedSceneAllocations: z.number(), unchangedSceneUpdates: z.number(), statusSceneUpdates: z.number(),
+  statusDraws: z.number(), statusPerspectiveDraws: z.number(), statusDrawFrames: z.number(),
+  phases: z.array(z.object({ name: z.string(), passed: z.boolean(), elapsedMs: z.number(), source: z.string(),
+    center: z.object({ x: z.number(), y: z.number() }), preclamp: z.object({ x: z.number(), y: z.number() }),
+    tiltTarget: z.object({ x: z.number(), y: z.number() }), faceTarget: z.object({ x: z.number(), y: z.number() }),
+    cameraState: z.string().nullable(), tiltState: z.string().nullable(), cameraAgeMs: z.number().nullable(), tiltAgeMs: z.number().nullable() })),
 });
 
 export const scenarios: readonly Scenario[] = [{
-  id: 'window.track', title: 'Parallax fuses camera and tilt, shows diagnostics and restores still/loop', target: 'dev', covers: ['H1'], timeoutMs: 300_000,
+  id: 'window.track', title: 'Calibrated camera authority, continuous fallback, live preparation and export isolation', target: 'dev', covers: ['H1'], timeoutMs: 300_000,
   async run(t) {
     const { page } = t;
     await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
@@ -34,6 +40,8 @@ export const scenarios: readonly Scenario[] = [{
         await new Promise<void>((resolve) => setTimeout(resolve, 20));
       }
       demo.injectDepth({ format: 'f32', size, data: depth }); demo.select(null);
+      // This analytical x-axis fixture is independent of the host screen's natural orientation.
+      demo.injectScreenAngle(0);
       demo.setMotion({ enabled: false }); demo.setSymbols({ enabled: false });
       demo.setStyle({ simplify: 0, grain: 0, colorNoise: 0, clipping: 0, crunch: 0, outline: 0 });
       document.body.dataset['windowPreparing'] = 'false';
@@ -49,136 +57,186 @@ export const scenarios: readonly Scenario[] = [{
     const result = await page.evaluate(resultSchema, async (modelRequestsBefore: number) => {
       const test = window.__noisyTest, renderer = test?.session?.renderer(), demo = test?.demo;
       if (renderer === null || renderer === undefined || demo === undefined) throw new Error('No renderer.');
-      const button = document.querySelector('[data-testid="parallax-enabled"]');
-      const stage = document.querySelector('[data-testid="stage"]');
-      if (!(button instanceof HTMLButtonElement) || !(stage instanceof HTMLCanvasElement)) throw new Error('No Window button or stage.');
+      const button = document.querySelector('[data-testid="parallax-enabled"]'), stage = document.querySelector('[data-testid="stage"]');
+      if (!(button instanceof HTMLButtonElement) || !(stage instanceof HTMLCanvasElement)) throw new Error('No Parallax controls.');
       const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-      const wait = async (ready: () => boolean) => { const start = performance.now(); while (!ready()) {
-        if (performance.now() - start > 60_000) throw new Error(`Window timeout: ${document.querySelector('[data-testid="status"]')?.textContent}`);
-        await sleep(20);
-      } };
-      await wait(() => demo.windowReady() && demo.windowFrames() > 0 && demo.analysis().plate && !demo.products().plateNeeded);
-      const trackedFrames = demo.windowFrames();
+      const next = <T>(read: () => T): Promise<T> => new Promise((resolve) => requestAnimationFrame(() => resolve(read())));
+      const wait = async (ready: () => boolean, timeout = 60_000): Promise<void> => {
+        const start = performance.now(); while (!ready()) {
+          if (performance.now() - start > timeout) throw new Error(`Parallax timeout: ${document.querySelector('[data-testid="status"]')?.textContent}`);
+          await sleep(20);
+        }
+      };
+      const savedBefore = JSON.stringify(demo.document()?.analysis.plate);
+      await wait(() => {
+        demo.injectOrientation({ alpha: 0, beta: 0, gamma: 0 });
+        return demo.windowReady() && demo.windowFrames() > 0 && demo.parallaxDebug().preparation === 'ready';
+      });
+      const trackedFrames = demo.windowFrames(), tracks = demo.windowTracks();
+      const live = tracks.length > 0 && tracks.every((track) => track.readyState === 'live');
+      const plateJoined = demo.parallaxDebug().preparation === 'ready';
+      const savedUnchanged = savedBefore === JSON.stringify(demo.document()?.analysis.plate);
       const preparing = document.body.dataset['windowPreparing'] === 'true';
       document.dispatchEvent(new Event('window-scenario-cleanup'));
-      demo.injectFace(null); // Real bitmap transfer/inference happened before injection replaces it.
-      const status = document.querySelector('[data-testid="status"]')?.textContent ?? '';
-      const tracks = demo.windowTracks();
-      const live = tracks.length > 0 && tracks.every((track) => track.readyState === 'live');
       const centroid = () => {
         const labels = renderer.debug?.readGeometryPatch?.(0, 0, stage.width, stage.height);
         if (labels === undefined) throw new Error('No geometry probe.');
         let sum = 0, count = 0;
         for (let i = 0; i < labels.length; i += 4) if (labels[i] === 1 && labels[i + 3] === 255) { sum += (i / 4) % stage.width; count++; }
-        if (count === 0) throw new Error('No injected object pixels.');
+        if (count === 0) throw new Error('No rendered object.');
         return sum / count;
       };
-      // Sample in a frame callback, after the driver's draw, before canvas clearing.
-      const next = <T>(read: () => T): Promise<T> => new Promise((resolve) => requestAnimationFrame(() => resolve(read())));
-      await sleep(700); const center = await next(centroid);
-      demo.injectFace({ x: .7, y: .5 }); await sleep(700); const rightHead = await next(centroid);
-      demo.injectFace({ x: .3, y: .5 }); await sleep(700); const leftHead = await next(centroid);
-      demo.setMotion({ enabled: true }); const before = demo.frame(); await sleep(120); const motionAdvances = demo.frame() !== before;
-      demo.setMotion({ enabled: false }); await next(() => undefined); const motionOffZero = demo.frame() === 0;
-      button.click();
-      const ended = tracks.every((track) => track.readyState === 'ended');
-      const canvas = document.createElement('canvas'); canvas.width = stage.width; canvas.height = stage.height;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true }); if (ctx === null) throw new Error('No capture context.');
-      const points = [[.125, .125], [.875, .125], [.125, .875], [.875, .875], [.375, .5], [.625, .5]];
-      const sample = () => {
-        ctx.drawImage(stage, 0, 0);
-        return points.flatMap(([x = 0, y = 0]) => Array.from(ctx.getImageData(Math.floor(x * stage.width), Math.floor(y * stage.height), 1, 1).data));
+      let face: { x: number; y: number } | null = { x: .5, y: .5 };
+      let pose = { alpha: 0, beta: 0, gamma: 0 };
+      let cameraFrame: ImageData | null = null;
+      let frameFace = { center: { x: .4, y: .5 }, size: .25, confidence: .95 };
+      const pump = (): void => {
+        if (cameraFrame === null) demo.injectFace(face); else demo.injectCameraFrame(cameraFrame, frameFace);
+        demo.injectOrientation(pose);
       };
-      // Window-off publishes and draws synchronously. Compare that draw before
-      // an explicit frame-zero reference can hide a failed restoration.
-      const restored = sample(); renderer.renderFrame(0); const reference = sample();
-      const stillMatches = restored.every((v, i) => v === reference[i]) && restored.filter((_, i) => i % 4 === 3).every((v) => v === 255);
-      await next(() => undefined); const pressedOff = button.getAttribute('aria-pressed') === 'false';
-      demo.setMotion({ enabled: true }); await sleep(100); const loopAt = demo.frame(); await sleep(100); const loopResumes = demo.frame() !== loopAt;
-      demo.setMotion({ enabled: false });
+      const timer = setInterval(pump, 60); pump();
+      const phases: { name: string; passed: boolean; elapsedMs: number; source: string;
+        center: { x: number; y: number }; preclamp: { x: number; y: number };
+        tiltTarget: { x: number; y: number }; faceTarget: { x: number; y: number };
+        cameraState: string | null; tiltState: string | null; cameraAgeMs: number | null; tiltAgeMs: number | null }[] = [];
+      const settle = async (name: string, ready: () => boolean): Promise<boolean> => {
+        const start = performance.now();
+        while (!ready() && performance.now() - start < 2000) await sleep(20);
+        const debug = demo.parallaxDebug(), now = performance.now(), passed = ready();
+        phases.push({ name, passed, elapsedMs: now - start, source: debug.source, center: { ...debug.center },
+          preclamp: { ...debug.preclamp }, tiltTarget: { ...debug.tilt }, faceTarget: { ...debug.faceTarget },
+          cameraState: debug.samples.camera?.state ?? null, tiltState: debug.samples.tilt?.state ?? null,
+          cameraAgeMs: debug.samples.camera === null ? null : now - debug.samples.camera.capturedAt,
+          tiltAgeMs: debug.samples.tilt === null ? null : now - debug.samples.tilt.capturedAt });
+        return passed;
+      };
       const media = navigator.mediaDevices, getUserMedia = media.getUserMedia;
-      let deniedSafe = false;
+      const setScene = renderer.setScene, renderPerspective = renderer.renderPerspective;
+      let statusSceneUpdates = 0, statusDraws = 0, statusPerspectiveDraws = 0, statusDrawFrames = 0;
+      let drawsSinceFrame = 0, drawProbe = 0;
+      let unchangedSceneAllocations = 0, unchangedSceneUpdates = 0;
+      let deniedSafe = false, deniedCameraTilt = false, stalePermissionSafe = false;
       try {
-        media.getUserMedia = () => Promise.reject(new DOMException('Scenario denied camera.', 'NotAllowedError'));
+        await sleep(500); const center = await next(centroid);
+        // Reapplying unchanged input must retain the prepared live textures.
+        const gl = stage.getContext('webgl2');
+        if (gl === null) throw new Error('No stage WebGL context.');
+        const createTexture = gl.createTexture;
+        gl.createTexture = () => { unchangedSceneAllocations++; return createTexture.call(gl); };
+        renderer.setScene = (scene) => { unchangedSceneUpdates++; setScene(scene); };
+        try { demo.select(null); await next(centroid); }
+        finally { gl.createTexture = createTexture; renderer.setScene = setScene; }
+        renderer.setScene = (scene) => { statusSceneUpdates++; setScene(scene); };
+        renderer.renderPerspective = (request) => { drawsSinceFrame++; statusPerspectiveDraws++; return renderPerspective(request); };
+        // Only source observations change in this interval. The live clock owns one
+        // draw per animation frame; a status callback drawing again is an extra draw.
+        // This probe runs after the clock and keeps that order on subsequent frames.
+        const probeDraws = (): void => {
+          statusDraws += Math.max(0, drawsSinceFrame - 1); statusDrawFrames++; drawsSinceFrame = 0;
+          drawProbe = requestAnimationFrame(probeDraws);
+        };
+        drawProbe = requestAnimationFrame(probeDraws);
+        face = { x: .7, y: .5 }; await sleep(500); const rightHead = await next(centroid);
+        face = { x: .3, y: .5 }; await sleep(500); const leftHead = await next(centroid);
+        face = { x: .65, y: .5 }; pose = { alpha: 0, beta: 0, gamma: -15 };
+        const cameraAuthority = await settle('camera-authority', () => demo.parallaxDebug().source === 'camera' && demo.parallaxDebug().center.x > .63);
+        face = null;
+        const fallback = await settle('face-loss-tilt-fallback', () => demo.parallaxDebug().source === 'tilt' && demo.parallaxDebug().center.x < .25);
+        face = { x: .65, y: .5 };
+        const recovered = await settle('camera-recovery', () => demo.parallaxDebug().source === 'camera' && demo.parallaxDebug().center.x > .63);
+        await next(() => undefined); cancelAnimationFrame(drawProbe);
+        renderer.setScene = setScene; renderer.renderPerspective = renderPerspective;
+        // Exercise the real calibration path with a paired frame, then explicitly recenter off-neutral.
+        cameraFrame = new ImageData(320, 240);
+        for (let i = 0; i < cameraFrame.data.length; i += 4) { cameraFrame.data[i] = 80; cameraFrame.data[i + 1] = 120; cameraFrame.data[i + 2] = 160; cameraFrame.data[i + 3] = 255; }
+        demo.recenterParallax();
+        const calibrated = await settle('paired-frame-neutral', () => demo.parallaxDebug().source === 'camera' &&
+          demo.parallaxDebug().samples.camera?.state === 'tracking' && Math.abs(demo.parallaxDebug().center.x - .5) < .015);
+        frameFace = { ...frameFace, center: { x: .35, y: .5 } };
+        const movedBeforeRecenter = await settle('paired-frame-relative-move', () => demo.parallaxDebug().source === 'camera' && demo.parallaxDebug().center.x > .58);
+        demo.recenterParallax();
+        const centeredAfter = await settle('explicit-recenter', () => demo.parallaxDebug().source === 'camera' &&
+          demo.parallaxDebug().samples.camera?.state === 'tracking' && Math.abs(demo.parallaxDebug().center.x - .5) < .015);
+        const recentered = calibrated && movedBeforeRecenter && centeredAfter;
+        const toggle = document.querySelector('[data-testid="parallax-debug-toggle"]');
+        if (!(toggle instanceof HTMLButtonElement)) throw new Error('No debug toggle.');
+        const exportBefore = new Uint8Array(await (await demo.downloadPng()).arrayBuffer());
+        toggle.click(); await sleep(200);
+        const preview = document.querySelector('[data-testid="parallax-debug-frame"]');
+        const pixel = preview instanceof HTMLCanvasElement ? preview.getContext('2d')?.getImageData(0, 0, 1, 1).data : null;
+        const debug = demo.parallaxDebug();
+        const debugMatches = document.querySelector('[data-testid="parallax-debug"]') !== null && pixel?.[0] === 80 && pixel[3] === 255 &&
+          debug.samples.camera?.state === 'tracking' && debug.samples.camera.capturedAt <= performance.now() && debug.face !== null;
+        const exportAfter = new Uint8Array(await (await demo.downloadPng()).arrayBuffer());
+        const debugExportSafe = exportBefore.length === exportAfter.length && exportBefore.every((v, i) => v === exportAfter[i]);
+        const transitionTrace = JSON.stringify(demo.parallaxTrace());
+        const status = document.querySelector('[data-testid="status"]')?.textContent ?? '';
+        demo.setMotion({ enabled: true }); const before = demo.frame();
+        const motionAdvances = await settle('motion-first-advance', () => demo.frame() !== before);
+        demo.setMotion({ enabled: false }); await next(() => undefined); const motionOffZero = demo.frame() === 0;
+        button.click(); clearInterval(timer);
+        const ended = tracks.every((track) => track.readyState === 'ended');
+        const canvas = document.createElement('canvas'); canvas.width = stage.width; canvas.height = stage.height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true }); if (ctx === null) throw new Error('No capture context.');
+        const capture = () => { ctx.drawImage(stage, 0, 0); return ctx.getImageData(0, 0, stage.width, stage.height).data; };
+        const restored = capture(); renderer.renderFrame(0); const reference = capture();
+        const stillComparedPixels = stage.width * stage.height;
+        let stillMismatchedPixels = 0;
+        for (let i = 0; i < reference.length; i += 4) {
+          if (restored[i] !== reference[i] || restored[i + 1] !== reference[i + 1] ||
+            restored[i + 2] !== reference[i + 2] || restored[i + 3] !== reference[i + 3]) stillMismatchedPixels++;
+        }
+        const stillMatches = restored.length === reference.length && stillMismatchedPixels === 0 && restored[3] === 255;
+        await next(() => undefined); const pressedOff = button.getAttribute('aria-pressed') === 'false';
+        demo.setMotion({ enabled: true }); await wait(() => !demo.products().plateNeeded && !demo.analysis().alive.heavy); await sleep(100); const loopAt = demo.frame(); await sleep(100); const loopResumes = demo.frame() !== loopAt;
+        demo.setMotion({ enabled: false });
+        media.getUserMedia = () => Promise.reject(new DOMException('Scenario denial.', 'NotAllowedError'));
         button.click();
-        await wait(() => document.querySelector('[data-testid="status"]')?.textContent?.startsWith('Camera unavailable') === true);
-        await next(() => undefined);
-        deniedSafe = button.getAttribute('aria-pressed') === 'false' && demo.windowTracks().length === 0;
-      } finally { media.getUserMedia = getUserMedia; }
-      // Camera denial removes only its input: orientation still drives this view.
-      let deniedCameraTilt = false;
-      try {
-        media.getUserMedia = () => Promise.reject(new DOMException('Scenario denied camera.', 'NotAllowedError'));
+        // Off is also the pre-click DOM state. Wait for the actual terminal result,
+        // not a stale aria value before Preact commits the starting state.
+        await wait(() => button.getAttribute('aria-pressed') === 'false' &&
+          /Camera unavailable/.test(demo.scene().status) && /Tilt unavailable/.test(demo.scene().status), 5000);
+        deniedSafe = demo.windowTracks().length === 0 && /Camera unavailable/.test(demo.scene().status);
         button.click();
-        // Native requestPermission is asynchronous, including in desktop Chrome.
-        // Deliver the rest sample after the source has installed its listener.
-        await wait(() => {
-          demo.injectOrientation({ beta: 35, gamma: 8 });
-          return demo.parallaxDebug().tiltRunning && document.querySelector('[data-testid="status"]')?.textContent?.startsWith('Parallax: tilt') === true;
-        });
-        await sleep(700); const rest = await next(centroid);
-        demo.injectOrientation({ beta: 35, gamma: 23 }); await sleep(700); const moved = await next(centroid);
-        deniedCameraTilt = moved - rest < -2 && button.getAttribute('aria-pressed') === 'true' && demo.windowTracks().length === 0;
-        button.click();
-        await next(() => undefined);
-      } finally { media.getUserMedia = getUserMedia; }
-      // Both inputs use the same render clock and contribute their centered sum.
-      button.click();
-      await wait(() => {
-        demo.injectOrientation({ beta: 35, gamma: 8 });
-        return demo.windowReady() && demo.parallaxDebug().tiltRunning;
-      });
-      demo.injectFace(null); await sleep(900); const fusedCenter = await next(centroid);
-      demo.injectFace({ x: .6, y: .5 }); await sleep(900); const faceOnly = await next(centroid);
-      demo.injectFace(null); demo.injectOrientation({ beta: 35, gamma: 12 });
-      await sleep(900); const tiltOnly = await next(centroid);
-      const pixels = new ImageData(320, 240);
-      for (let i = 0; i < pixels.data.length; i += 4) { pixels.data[i] = 80; pixels.data[i + 1] = 120; pixels.data[i + 2] = 160; pixels.data[i + 3] = 255; }
-      demo.injectCameraFrame(pixels, { center: { x: .4, y: .5 }, size: .25 });
-      await sleep(900); const fused = await next(centroid);
-      demo.select(null);
-      const sourcesNamedAfterSelection = demo.scene().status === 'Parallax: camera and tilt';
-      const sumMatches = Math.abs((fused - fusedCenter) - ((faceOnly - fusedCenter) + (tiltOnly - fusedCenter))) < 1;
-      const debugToggle = document.querySelector('[data-testid="parallax-debug-toggle"]');
-      if (!(debugToggle instanceof HTMLButtonElement)) throw new Error('No Debug toggle.');
-      const exportBefore = new Uint8Array(await (await demo.downloadPng()).arrayBuffer());
-      debugToggle.click(); await sleep(250);
-      const debug = demo.parallaxDebug(), preview = document.querySelector('[data-testid="parallax-debug-frame"]');
-      const panel = document.querySelector('[data-testid="parallax-debug"]');
-      const box = panel?.getBoundingClientRect(), area = document.querySelector('.stage-area')?.getBoundingClientRect();
-      const context = preview instanceof HTMLCanvasElement ? preview.getContext('2d') : null;
-      const pixel = context?.getImageData(0, 0, 1, 1).data;
-      const edge = context?.getImageData(88, 120, 1, 1).data;
-      const text = (id: string) => document.querySelector(`[data-testid="parallax-${id}"]`)?.textContent;
-      const debugMatches = box?.width === 200 && area !== undefined && Math.abs(area.right - box.right - 12) < 1 && Math.abs(area.bottom - box.bottom - 12) < 1 &&
-        sourcesNamedAfterSelection && text('beta') === '35.00' && text('gamma') === '12.00' && text('screen-type') === (debug.type ?? 'Unavailable') &&
-        text('screen-angle') === (debug.angle === null ? 'Unavailable' : debug.angle.toFixed(2)) &&
-        text('window-angle') === (debug.legacy === null ? 'Unavailable' : debug.legacy.toFixed(2)) &&
-        text('tilt-target') === '0.600, 0.500' && text('face-target') === '0.600, 0.500' &&
-        text('fused-offset') === `${debug.offset.x.toFixed(3)}, ${debug.offset.y.toFixed(3)}` &&
-        pixel?.[0] === 80 && pixel[3] === 255 && edge?.[0] === 255 && edge[1] === 61 && edge[2] === 127;
-      const exportAfter = new Uint8Array(await (await demo.downloadPng()).arrayBuffer());
-      const debugExportSafe = exportBefore.length === exportAfter.length && exportBefore.every((value, i) => value === exportAfter[i]);
-      const modelRequestsAfter = performance.getEntriesByType('resource').filter((entry) => new URL(entry.name).pathname.startsWith('/models/')).length;
-      // The face file was cached at boot; toggles add no face-model requests.
-      return { status, tracks: tracks.length, live, ended, pressedOff, center, rightHead, leftHead, stillMatches,
-        motionAdvances, motionOffZero, loopResumes, preparing, plateJoined: demo.analysis().plate, noToggleFetch: modelRequestsAfter === modelRequestsBefore, deniedSafe, trackedFrames, deniedCameraTilt, sumMatches, debugMatches, debugExportSafe, faceOnly, tiltOnly, fused, fusedCenter };
+        const tiltTimer = setInterval(() => demo.injectOrientation({ alpha: 0, beta: 0, gamma: 0 }), 60);
+        try { await wait(() => demo.parallaxDebug().source === 'tilt', 5000); deniedCameraTilt = demo.windowTracks().length === 0; }
+        finally { clearInterval(tiltTimer); button.click(); }
+        await wait(() => button.getAttribute('aria-pressed') === 'false', 5000);
+        // A permission result arriving after rapid off/on must not attach its obsolete stream.
+        let grant = (_stream: MediaStream): void => { throw new Error('No pending permission.'); };
+        media.getUserMedia = () => new Promise<MediaStream>((resolve) => { grant = resolve; });
+        button.click(); await wait(() => button.getAttribute('aria-pressed') === 'true', 5000); button.click();
+        await wait(() => button.getAttribute('aria-pressed') === 'false', 5000);
+        const obsolete = await getUserMedia.call(media, { video: true });
+        grant(obsolete);
+        await sleep(100); stalePermissionSafe = obsolete.getTracks().every((track) => track.readyState === 'ended') && button.getAttribute('aria-pressed') === 'false';
+        media.getUserMedia = getUserMedia;
+        button.click(); await wait(() => demo.windowReady()); const reopened = demo.windowTracks(); button.click();
+        stalePermissionSafe &&= reopened.length > 0 && reopened.every((track) => track.readyState === 'ended');
+        const modelRequestsAfter = performance.getEntriesByType('resource').filter((entry) => new URL(entry.name).pathname.startsWith('/models/')).length;
+        return { status, live, ended, pressedOff, center, rightHead, leftHead, stillMatches, stillComparedPixels, stillMismatchedPixels, motionAdvances, motionOffZero, loopResumes,
+          preparing, plateJoined, savedUnchanged, noToggleFetch: modelRequestsAfter === modelRequestsBefore, deniedSafe, trackedFrames,
+          deniedCameraTilt, cameraAuthority, fallback, recovered, recentered, stalePermissionSafe, debugMatches, debugExportSafe, phases, transitionTrace, unchangedSceneAllocations, unchangedSceneUpdates, statusSceneUpdates, statusDraws, statusPerspectiveDraws, statusDrawFrames };
+      } finally { clearInterval(timer); cancelAnimationFrame(drawProbe); renderer.setScene = setScene; renderer.renderPerspective = renderPerspective; media.getUserMedia = getUserMedia; demo.injectScreenAngle(null); }
     }, modelRequestsBefore);
-    await t.file('window.json', JSON.stringify(result, null, 2));
+    const { transitionTrace, ...observed } = result;
+    await t.file('window.json', JSON.stringify(observed, null, 2));
+    await t.file('transition-trace.json', transitionTrace);
     await page.screenshot('parallax-debug-1440');
-    t.ok('fake getUserMedia resolves with live tracks and a non-error status', result.live && !/unavailable|failed|error/i.test(result.status), result);
-    t.ok('the real face worker consumes a transferred webcam frame before injection', result.trackedFrames > 0, result);
-    t.ok('leaning right moves the near object left by more than two pixels', result.rightHead - result.center < -2, result);
-    t.ok('leaning left moves the near object right by more than two pixels', result.leftHead - result.center > 2, result);
-    t.ok('Parallax off ends every track and clears aria-pressed', result.ended && result.pressedOff, result);
-    t.ok('Parallax off restores frame zero at four opaque sampled points', result.stillMatches, result);
-    t.ok('Motion advances in Parallax, stops at zero, and resumes the existing loop', result.motionAdvances && result.motionOffZero && result.loopResumes, result);
-    t.ok('Parallax requests its missing plate and it joins the view', result.preparing && result.plateJoined, result);
-    t.ok('Parallax does not fetch its face model at toggle time', result.noToggleFetch, result);
-    t.ok('both sources move the centroid by their sum', result.sumMatches, result);
-    t.ok('Debug shows injected readings, the matching camera frame and the accent face box', result.debugMatches, result);
-    t.ok('Debug never enters the still export', result.debugExportSafe, result);
-    t.ok('camera denial leaves tilt driving Parallax and names tilt alone', result.deniedCameraTilt, result);
-    t.ok('a denied camera reports Camera unavailable and leaves Parallax off', result.deniedSafe, result);
+    t.ok('unchanged live scene retains its prepared textures', result.unchangedSceneUpdates > 0 && result.unchangedSceneAllocations === 0, { updates: result.unchangedSceneUpdates, allocations: result.unchangedSceneAllocations });
+    t.equal('source status transitions do not reinstall the scene', result.statusSceneUpdates, 0);
+    t.ok('source status transitions do not draw outside the live clock', result.statusDraws === 0 && result.statusDrawFrames > 0 && result.statusPerspectiveDraws === result.statusDrawFrames,
+      { extraDraws: result.statusDraws, perspectiveDraws: result.statusPerspectiveDraws, animationFrames: result.statusDrawFrames });
+    t.ok('real webcam frame reaches inference before deterministic injection', result.live && result.trackedFrames > 0, observed);
+    t.ok('screen-window camera travel moves foreground in opposite directions', result.rightHead - result.center > 2 && result.leftHead - result.center < -2, observed);
+    t.ok('camera is authoritative over opposing tilt, with loss fallback and recovery', result.cameraAuthority && result.fallback && result.recovered, observed);
+    t.ok('paired-frame calibration and explicit recenter establish neutral', result.recentered, observed);
+    t.ok('live plate preparation joins without mutating saved plate', result.plateJoined && result.savedUnchanged, observed);
+    t.ok('off restores the full still frame', result.stillMatches, { comparedPixels: result.stillComparedPixels, mismatchedPixels: result.stillMismatchedPixels });
+    t.ok('off releases tracks; rapid restart discards old permission', result.ended && result.pressedOff && result.stalePermissionSafe, observed);
+    t.ok('Motion uses the existing clock and resumes after Parallax', result.motionAdvances && result.motionOffZero && result.loopResumes, observed);
+    t.ok('camera denial permits tilt; both unavailable leaves Parallax off', result.deniedCameraTilt && result.deniedSafe, observed);
+    t.ok('debug shows matching camera pixels and timestamped observations without entering export', result.debugMatches && result.debugExportSafe, observed);
+    t.ok('toggles reuse cached face model', result.noToggleFetch, observed);
   },
 }];

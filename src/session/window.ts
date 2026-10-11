@@ -1,25 +1,38 @@
 import type { FaceTracker } from '../analysis/service.ts';
-import { plateNeeded } from '../core/derive.ts';
+import { createFaceView, faceCaptureTransform, faceFromCapture } from '../core/face-view.ts';
 import type { Vec2 } from '../core/motion.ts';
-import type { SceneDocument } from '../core/types.ts';
-import type { ViewSource } from './view-driver.ts';
-import type { FaceDetection } from '../analysis/protocol.ts';
+import type { ViewAttempt, ViewSource } from './view-driver.ts';
+import { parseFaceReply, type FaceDetection } from '../analysis/protocol.ts';
 
 const CAPTURE_MS = 1000 / 15;
 const WORKER_TIMEOUT_MS = 15_000;
 
-/** A supplied view camera can uncover layers even when the loop is disabled. */
-export function windowPlateNeeded(doc: SceneDocument): boolean {
-  return plateNeeded({ ...doc, motion: { ...doc.motion, enabled: true, drift: { ...doc.motion.drift, amount: 1 } } });
-}
-
 /** Face tracking supplies mirrored selfie targets to the shared view clock. */
 export function createWindowSource(host: { openTracker(): FaceTracker }) {
-  type FaceInput = { injected: boolean; trackedFrames: number; tracks: readonly MediaStreamTrack[]; target(center: Vec2): void; frame: HTMLCanvasElement | null; face: FaceDetection | null };
+  type FaceInput = { injected: boolean; trackedFrames: number; tracks: readonly MediaStreamTrack[]; target: ViewAttempt['target']; receive(face: FaceDetection | null, width: number, height: number, capturedAt: number): void; sequence: number; frame: HTMLCanvasElement | null; face: FaceDetection | null };
   let input: FaceInput | null = null;
   const source: ViewSource = async (attempt) => {
-    const current: FaceInput = { injected: false, trackedFrames: 0, tracks: [], target: attempt.target, frame: null, face: null };
+    const calibration = createFaceView();
+    let calibrationGeneration = 0, dimensions = '';
+    const current: FaceInput = { injected: false, trackedFrames: 0, tracks: [], target: attempt.target, sequence: 0, frame: null, face: null,
+      receive(face, width, height, capturedAt) {
+        const nextDimensions = `${width}x${height}`;
+        if (dimensions !== nextDimensions) { calibration.recenter(); dimensions = nextDimensions; }
+        const transform = faceCaptureTransform(width, height);
+        const candidates = (face?.candidates ?? (face === null ? [] : [face])).flatMap((raw) => {
+          const mapped = faceFromCapture(raw, transform); return mapped === null ? [] : [{ raw, mapped }];
+        });
+        const mapped = calibration.select(candidates.map((candidate) => candidate.mapped));
+        current.face = candidates.find((candidate) => candidate.mapped === mapped)?.raw ?? null;
+        const sample = calibration.observe(mapped, capturedAt, ++current.sequence);
+        if (sample !== null) attempt.target(sample.center, sample);
+      },
+    };
     input = current;
+    attempt.onRecenter?.(() => {
+      calibrationGeneration++; calibration.recenter();
+      attempt.target({ x: .5, y: .5 }, { capturedAt: performance.now(), sequence: ++current.sequence, state: 'calibrating' });
+    });
     attempt.dispose(() => { if (input === current) input = null; });
     let failureStatus = 'Camera unavailable';
     try {
@@ -51,30 +64,30 @@ export function createWindowSource(host: { openTracker(): FaceTracker }) {
       if (!attempt.valid()) return () => {};
       const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 240;
       const context = canvas.getContext('2d', { willReadFrequently: true }); if (context === null) throw new Error('Camera canvas unavailable.');
-      let lastCapture = -Infinity, lastFaceAt = performance.now(), inFlight = false;
+      let lastCapture = -Infinity, inFlight = false;
       const capture = async (): Promise<void> => {
         inFlight = true;
+        const capturedAt = performance.now(), captureGeneration = calibrationGeneration;
+        const width = video.videoWidth, height = video.videoHeight;
         try {
-          context.drawImage(video, 0, 0, 320, 240);
+          const transform = faceCaptureTransform(width, height);
+          context.fillStyle = 'rgb(127,127,127)'; context.fillRect(0, 0, 320, 240);
+          context.drawImage(video, transform.x, transform.y, transform.drawWidth, transform.drawHeight);
           const bitmap = await createImageBitmap(canvas);
           if (!attempt.valid() || current.injected) { bitmap.close(); return; }
           const face = await within(tracker.track(bitmap));
           if (attempt.valid()) current.trackedFrames++;
-          if (attempt.valid() && !current.injected) {
+          if (attempt.valid() && !current.injected && captureGeneration === calibrationGeneration) {
             current.frame ??= document.createElement('canvas');
             current.frame.width = canvas.width; current.frame.height = canvas.height;
             current.frame.getContext('2d', { willReadFrequently: true })?.drawImage(canvas, 0, 0); current.face = face;
-            const now = performance.now();
-            if (face !== null) {
-              // Front-camera pixels are unmirrored; physical right becomes selfie right.
-              attempt.target({ x: 1 - face.center.x, y: face.center.y }); lastFaceAt = now;
-            } else if (now - lastFaceAt >= 500) attempt.target({ x: .5, y: .5 });
+            current.receive(face, width, height, capturedAt);
           }
-        } catch { attempt.failed('Face tracking unavailable'); }
+        } catch { if (attempt.valid()) attempt.failed('Face tracking unavailable'); }
         finally { inFlight = false; }
       };
       return (now) => {
-        if (!current.injected && !inFlight && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && now - lastCapture >= CAPTURE_MS) {
+        if (!current.injected && !inFlight && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0 && now - lastCapture >= CAPTURE_MS) {
           lastCapture = now; void capture();
         }
       };
@@ -87,19 +100,22 @@ export function createWindowSource(host: { openTracker(): FaceTracker }) {
     tracks: (): readonly MediaStreamTrack[] => input?.tracks ?? [],
     injectCameraFrame(frame: ImageData, face: FaceDetection | null): void {
       if (!NOISY_DEV) throw new Error('Camera frame injection is available only in dev builds.');
-      if (face !== null && (![face.center.x, face.center.y, face.size].every(Number.isFinite) ||
-          face.center.x < 0 || face.center.x > 1 || face.center.y < 0 || face.center.y > 1 || face.size <= 0 || face.size > 1)) throw new Error('Invalid injected face.');
+      if (!parseFaceReply({ type: 'tracked', jobId: 1, face }).ok) throw new Error('Invalid injected face.');
       if (input === null) return;
       const canvas = document.createElement('canvas'); canvas.width = frame.width; canvas.height = frame.height;
       const context = canvas.getContext('2d'); if (context === null) throw new Error('Camera canvas unavailable.');
       context.putImageData(frame, 0, 0);
       input.injected = true; input.frame = canvas; input.face = face;
-      input.target(face === null ? { x: .5, y: .5 } : { x: 1 - face.center.x, y: face.center.y });
+      input.receive(face, frame.width, frame.height, performance.now());
     },
     injectFace(next: Vec2 | null): void {
       if (!NOISY_DEV) throw new Error('Face injection is available only in dev builds.');
       if (next !== null && ![next.x, next.y].every((v) => Number.isFinite(v) && v >= 0 && v <= 1)) throw new Error('Invalid injected face center.');
-      if (input !== null) { input.injected = true; input.target(next ?? { x: .5, y: .5 }); }
+      if (input !== null) {
+        // Compatibility fixture: this is an already calibrated control target.
+        input.injected = true;
+        input.target(next ?? { x: .5, y: .5 }, { capturedAt: performance.now(), sequence: ++input.sequence, state: next === null ? 'lost' : 'tracking', quality: next === null ? 0 : 1 });
+      }
     },
   };
 }

@@ -49,10 +49,12 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
       </div></div>}
     </section>
     <section class="phone-sheet" aria-label="Photo controls" hidden={projectsOpen}>
-      <button class="sheet-handle" type="button" aria-expanded={expanded} aria-controls="phone-tools"
+      <div class="phone-sheet-heading"><button class="sheet-handle" type="button" aria-expanded={expanded} aria-controls="phone-tools"
         aria-label={expanded ? 'Hide photo controls' : 'Show photo controls'} onClick={() => setExpanded((open) => !open)}>
         <span class="status-line" data-testid="status" role="status">{status}</span>
       </button>
+      {parallaxEnabled && <button type="button" data-testid="parallax-recenter-quick" onClick={() => session.recenterParallax()}>Recenter</button>}
+      </div>
       <div id="phone-tools" class="phone-tools" hidden={!expanded || projectsOpen}>
         {inspector}
       </div>
@@ -69,7 +71,8 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
 }
 
 /** Same node and toggle state in the inspector and the phone's tool sheet. */
-export function ParallaxNode({ enabled, available, onParallax, debug, onDebug }: {
+export function ParallaxNode({ session, strength, enabled, available, onParallax, debug, onDebug }: {
+  readonly session: DemoSession; readonly strength: number;
   readonly enabled: boolean; readonly available: boolean; readonly onParallax: () => void;
   readonly debug: boolean; readonly onDebug: () => void;
 }) {
@@ -78,7 +81,11 @@ export function ParallaxNode({ enabled, available, onParallax, debug, onDebug }:
     toggle={<label class="enable-switch" title="Parallax on or off">
       <input data-testid="parallax-node-enabled" type="checkbox" aria-label="Parallax" checked={enabled} disabled={!available} onChange={onParallax} />
     </label>}>
-    <div class="parallax-actions"><button type="button" data-testid="parallax-debug-toggle" aria-pressed={debug}
+    <RangeControl id="parallax-strength" label="Strength" min={RANGES['motion.parallax'].min} max={RANGES['motion.parallax'].max} step={0.1}
+      value={strength} onInput={(parallax) => session.setMotion({ parallax })} />
+    <p class="parallax-help">{enabled ? 'Hold still to center, then move your head. Recenter after changing position.' : 'Move your head to look into the photo. Tilt is used when face tracking is unavailable.'}</p>
+    <div class="parallax-actions"><button type="button" data-testid="parallax-recenter" disabled={!enabled}
+      onClick={() => session.recenterParallax()}>Recenter</button><button type="button" data-testid="parallax-debug-toggle" aria-pressed={debug}
       aria-controls="parallax-debug-panel" onClick={onDebug}>Debug</button></div>
   </Node>;
 }
