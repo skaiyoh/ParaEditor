@@ -35,8 +35,53 @@ function byteRange(value: string | null, size: number): RangeResult {
   return { kind: 'range', range: { offset: first, length: end - first + 1 } };
 }
 
+// The edge cache revalidates with the stored ETag, and ASSETS answers 304 for unchanged
+// bytes, so a header-policy change would never reach the cached copy. Folding a tag of
+// the route's header map into the validator makes a changed policy a different validator.
+function policyTag(headers: HeaderMap): string {
+  const canonical = Object.entries(headers).map(([name, value]) => `${name.toLowerCase()}:${value}`).sort().join('\n');
+  let hash = 0x811c9dc5;
+  for (const byte of new TextEncoder().encode(canonical)) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+  return hash.toString(16).padStart(8, '0');
+}
+
+const ENTITY_TAG = /(W\/)?"([^"]*)"/g;
+
+function tagETag(etag: string, tag: string): string {
+  const match = /^(W\/)?"([^"]*)"$/.exec(etag);
+  return match === null ? etag : `${match[1] ?? ''}"${match[2]}-${tag}"`;
+}
+
+// Keeps the entity tags that carry `tag`, with the tag removed; null when none remain.
+function untagETags(value: string, tag: string): string | null {
+  const suffix = `-${tag}`;
+  const kept: string[] = [];
+  for (const match of value.matchAll(ENTITY_TAG)) {
+    const opaque = match[2] ?? '';
+    if (opaque.endsWith(suffix)) kept.push(`${match[1] ?? ''}"${opaque.slice(0, -suffix.length)}"`);
+  }
+  return kept.length === 0 ? null : kept.join(', ');
+}
+
+// Rewrites the conditional headers of an asset request into the validators ASSETS knows.
+function untagConditions(request: Request, tag: string): void {
+  const conditions = request.headers;
+  conditions.delete('If-Modified-Since');
+  const none = conditions.get('If-None-Match');
+  if (none !== null && none.trim() !== '*') {
+    const kept = untagETags(none, tag);
+    if (kept === null) conditions.delete('If-None-Match'); else conditions.set('If-None-Match', kept);
+  }
+  const ifRange = conditions.get('If-Range');
+  if (ifRange !== null) {
+    const kept = untagETags(ifRange, tag);
+    if (kept !== null) conditions.set('If-Range', kept);
+  }
+}
+
 export function createHandler(config: HostingConfig): { fetch(request: Request, env: HostingEnv): Promise<Response> } {
   const routes = new Map(Object.entries(config.routes));
+  const tags = new Map(Object.values(config.routes).flatMap((route) => route.kind === 'asset' ? [[route, policyTag(route.headers)] as const] : []));
   function error(request: Request, status: number, message: string, extra: HeaderMap = {}): Response {
     return new Response(request.method === 'HEAD' ? null : `${message}\n`, {
       status,
@@ -62,13 +107,18 @@ export function createHandler(config: HostingConfig): { fetch(request: Request, 
           // Pages redirects /index.html; the local production contract serves it directly.
           const url = new URL(request.url);
           if (pathname === '/index.html') url.pathname = '/';
-          const asset = await env.ASSETS.fetch(new Request(url, request));
+          const tag = tags.get(route) ?? policyTag(route.headers);
+          const forwarded = new Request(url, request);
+          untagConditions(forwarded, tag);
+          const asset = await env.ASSETS.fetch(forwarded);
           if (asset.status >= 400) {
             await asset.body?.cancel();
             return error(request, asset.status, 'Asset unavailable.');
           }
           const headers = new Headers(asset.headers);
           for (const [name, value] of Object.entries(route.headers)) headers.set(name, value);
+          const etag = headers.get('ETag');
+          if (etag !== null) headers.set('ETag', tagETag(etag, tag));
           return new Response(request.method === 'HEAD' ? null : asset.body, { status: asset.status, headers });
         }
         const info = await env.MODELS.head(route.key);

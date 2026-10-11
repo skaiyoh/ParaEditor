@@ -1,0 +1,525 @@
+{
+  "ready": "Ready to tap (warmup: 228 ms)",
+  "master": {
+    "width": 1600,
+    "height": 1000
+  },
+  "taps": [
+    {
+      "point": {
+        "target": "pump",
+        "x": 740,
+        "y": 590
+      },
+      "normalized": {
+        "x": 0.4625,
+        "y": 0.59
+      },
+      "result": {
+        "status": "Ready",
+        "objectCount": 1,
+        "selected": true,
+        "bounds": {
+          "x": 704,
+          "y": 576,
+          "width": 71,
+          "height": 73
+        },
+        "newReplies": [
+          "{\"kind\":\"decoded\",\"worker\":1,\"jobId\":1,\"points\":[{\"x\":0.4625,\"y\":0.59,\"label\":\"include\"}],\"candidates\":[{\"rank\":0,\"score\":0.9593358039855957,\"width\":1024,\"height\":640,\"inside\":1696,\"areaFraction\":0.002587890625,\"bounds\":{\"x\":451,\"y\":369,\"width\":45,\"height\":46}},{\"rank\":1,\"score\":0.4984467029571533,\"width\":1024,\"height\":640,\"inside\":3600,\"areaFraction\":0.0054931640625,\"bounds\":{\"x\":447,\"y\":318,\"width\":54,\"height\":98}},{\"rank\":2,\"score\":0.2967594265937805,\"width\":1024,\"height\":640,\"inside\":5761,\"areaFraction\":0.00879058837890625,\"bounds\":{\"x\":421,\"y\":318,\"width\":109,\"height\":115}}]}"
+        ],
+        "errors": []
+      },
+      "replies": [
+        {
+          "worker": 1,
+          "jobId": 1,
+          "points": [
+            {
+              "x": 0.4625,
+              "y": 0.59,
+              "label": "include"
+            }
+          ],
+          "kind": "decoded",
+          "candidates": [
+            {
+              "rank": 0,
+              "score": 0.9593358039855957,
+              "width": 1024,
+              "height": 640,
+              "inside": 1696,
+              "areaFraction": 0.002587890625,
+              "bounds": {
+                "x": 451,
+                "y": 369,
+                "width": 45,
+                "height": 46
+              }
+            },
+            {
+              "rank": 1,
+              "score": 0.4984467029571533,
+              "width": 1024,
+              "height": 640,
+              "inside": 3600,
+              "areaFraction": 0.0054931640625,
+              "bounds": {
+                "x": 447,
+                "y": 318,
+                "width": 54,
+                "height": 98
+              }
+            },
+            {
+              "rank": 2,
+              "score": 0.2967594265937805,
+              "width": 1024,
+              "height": 640,
+              "inside": 5761,
+              "areaFraction": 0.00879058837890625,
+              "bounds": {
+                "x": 421,
+                "y": 318,
+                "width": 109,
+                "height": 115
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "point": {
+        "target": "canopy",
+        "x": 850,
+        "y": 360
+      },
+      "normalized": {
+        "x": 0.53125,
+        "y": 0.36
+      },
+      "result": {
+        "status": "Ready",
+        "objectCount": 1,
+        "selected": true,
+        "bounds": {
+          "x": 414,
+          "y": 264,
+          "width": 726,
+          "height": 233
+        },
+        "newReplies": [
+          "{\"kind\":\"decoded\",\"worker\":1,\"jobId\":2,\"points\":[{\"x\":0.53125,\"y\":0.36,\"label\":\"include\"}],\"candidates\":[{\"rank\":0,\"score\":0.9780377745628357,\"width\":1024,\"height\":640,\"inside\":30735,\"areaFraction\":0.04689788818359375,\"bounds\":{\"x\":265,\"y\":169,\"width\":464,\"height\":149}},{\"rank\":1,\"score\":0.9599712491035461,\"width\":1024,\"height\":640,\"inside\":29639,\"areaFraction\":0.04522552490234375,\"bounds\":{\"x\":268,\"y\":170,\"width\":460,\"height\":145}},{\"rank\":2,\"score\":0.25108057260513306,\"width\":1024,\"height\":640,\"inside\":119204,\"areaFraction\":0.181890869140625,\"bounds\":{\"x\":93,\"y\":170,\"width\":802,\"height\":399}}]}"
+        ],
+        "errors": []
+      },
+      "replies": [
+        {
+          "worker": 1,
+          "jobId": 2,
+          "points": [
+            {
+              "x": 0.53125,
+              "y": 0.36,
+              "label": "include"
+            }
+          ],
+          "kind": "decoded",
+          "candidates": [
+            {
+              "rank": 0,
+              "score": 0.9780377745628357,
+              "width": 1024,
+              "height": 640,
+              "inside": 30735,
+              "areaFraction": 0.04689788818359375,
+              "bounds": {
+                "x": 265,
+                "y": 169,
+                "width": 464,
+                "height": 149
+              }
+            },
+            {
+              "rank": 1,
+              "score": 0.9599712491035461,
+              "width": 1024,
+              "height": 640,
+              "inside": 29639,
+              "areaFraction": 0.04522552490234375,
+              "bounds": {
+                "x": 268,
+                "y": 170,
+                "width": 460,
+                "height": 145
+              }
+            },
+            {
+              "rank": 2,
+              "score": 0.25108057260513306,
+              "width": 1024,
+              "height": 640,
+              "inside": 119204,
+              "areaFraction": 0.181890869140625,
+              "bounds": {
+                "x": 93,
+                "y": 170,
+                "width": 802,
+                "height": 399
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "point": {
+        "target": "sign",
+        "x": 460,
+        "y": 390
+      },
+      "normalized": {
+        "x": 0.2875,
+        "y": 0.39
+      },
+      "result": {
+        "status": "Ready",
+        "objectCount": 1,
+        "selected": true,
+        "bounds": {
+          "x": 400,
+          "y": 334,
+          "width": 127,
+          "height": 131
+        },
+        "newReplies": [
+          "{\"kind\":\"decoded\",\"worker\":1,\"jobId\":3,\"points\":[{\"x\":0.2875,\"y\":0.39,\"label\":\"include\"}],\"candidates\":[{\"rank\":0,\"score\":0.8938227891921997,\"width\":1024,\"height\":640,\"inside\":5473,\"areaFraction\":0.00835113525390625,\"bounds\":{\"x\":256,\"y\":214,\"width\":81,\"height\":83}},{\"rank\":1,\"score\":0.8871129751205444,\"width\":1024,\"height\":640,\"inside\":4317,\"areaFraction\":0.00658721923828125,\"bounds\":{\"x\":257,\"y\":222,\"width\":75,\"height\":74}},{\"rank\":2,\"score\":0.05019918084144592,\"width\":1024,\"height\":640,\"inside\":267,\"areaFraction\":0.00040740966796875,\"bounds\":{\"x\":276,\"y\":236,\"width\":32,\"height\":27}}]}"
+        ],
+        "errors": []
+      },
+      "replies": [
+        {
+          "worker": 1,
+          "jobId": 3,
+          "points": [
+            {
+              "x": 0.2875,
+              "y": 0.39,
+              "label": "include"
+            }
+          ],
+          "kind": "decoded",
+          "candidates": [
+            {
+              "rank": 0,
+              "score": 0.8938227891921997,
+              "width": 1024,
+              "height": 640,
+              "inside": 5473,
+              "areaFraction": 0.00835113525390625,
+              "bounds": {
+                "x": 256,
+                "y": 214,
+                "width": 81,
+                "height": 83
+              }
+            },
+            {
+              "rank": 1,
+              "score": 0.8871129751205444,
+              "width": 1024,
+              "height": 640,
+              "inside": 4317,
+              "areaFraction": 0.00658721923828125,
+              "bounds": {
+                "x": 257,
+                "y": 222,
+                "width": 75,
+                "height": 74
+              }
+            },
+            {
+              "rank": 2,
+              "score": 0.05019918084144592,
+              "width": 1024,
+              "height": 640,
+              "inside": 267,
+              "areaFraction": 0.00040740966796875,
+              "bounds": {
+                "x": 276,
+                "y": 236,
+                "width": 32,
+                "height": 27
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "point": {
+        "target": "red-tree",
+        "x": 1230,
+        "y": 330
+      },
+      "normalized": {
+        "x": 0.76875,
+        "y": 0.33
+      },
+      "result": {
+        "status": "Ready",
+        "objectCount": 1,
+        "selected": true,
+        "bounds": {
+          "x": 1126,
+          "y": 212,
+          "width": 192,
+          "height": 193
+        },
+        "newReplies": [
+          "{\"kind\":\"decoded\",\"worker\":1,\"jobId\":4,\"points\":[{\"x\":0.76875,\"y\":0.33,\"label\":\"include\"}],\"candidates\":[{\"rank\":0,\"score\":0.689768373966217,\"width\":1024,\"height\":640,\"inside\":9301,\"areaFraction\":0.01419219970703125,\"bounds\":{\"x\":721,\"y\":136,\"width\":122,\"height\":123}},{\"rank\":1,\"score\":0.5154798626899719,\"width\":1024,\"height\":640,\"inside\":16185,\"areaFraction\":0.02469635009765625,\"bounds\":{\"x\":725,\"y\":136,\"width\":178,\"height\":163}},{\"rank\":2,\"score\":0.4526987671852112,\"width\":1024,\"height\":640,\"inside\":32922,\"areaFraction\":0.0502349853515625,\"bounds\":{\"x\":686,\"y\":119,\"width\":245,\"height\":285}}]}"
+        ],
+        "errors": []
+      },
+      "replies": [
+        {
+          "worker": 1,
+          "jobId": 4,
+          "points": [
+            {
+              "x": 0.76875,
+              "y": 0.33,
+              "label": "include"
+            }
+          ],
+          "kind": "decoded",
+          "candidates": [
+            {
+              "rank": 0,
+              "score": 0.689768373966217,
+              "width": 1024,
+              "height": 640,
+              "inside": 9301,
+              "areaFraction": 0.01419219970703125,
+              "bounds": {
+                "x": 721,
+                "y": 136,
+                "width": 122,
+                "height": 123
+              }
+            },
+            {
+              "rank": 1,
+              "score": 0.5154798626899719,
+              "width": 1024,
+              "height": 640,
+              "inside": 16185,
+              "areaFraction": 0.02469635009765625,
+              "bounds": {
+                "x": 725,
+                "y": 136,
+                "width": 178,
+                "height": 163
+              }
+            },
+            {
+              "rank": 2,
+              "score": 0.4526987671852112,
+              "width": 1024,
+              "height": 640,
+              "inside": 32922,
+              "areaFraction": 0.0502349853515625,
+              "bounds": {
+                "x": 686,
+                "y": 119,
+                "width": 245,
+                "height": 285
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "chosen": {
+    "target": "pump",
+    "x": 740,
+    "y": 590
+  },
+  "selected": {
+    "status": "Ready",
+    "objectCount": 1,
+    "selected": true,
+    "bounds": {
+      "x": 704,
+      "y": 576,
+      "width": 71,
+      "height": 73
+    },
+    "newReplies": [
+      "{\"kind\":\"decoded\",\"worker\":1,\"jobId\":5,\"points\":[{\"x\":0.4625,\"y\":0.59,\"label\":\"include\"}],\"candidates\":[{\"rank\":0,\"score\":0.9593358039855957,\"width\":1024,\"height\":640,\"inside\":1696,\"areaFraction\":0.002587890625,\"bounds\":{\"x\":451,\"y\":369,\"width\":45,\"height\":46}},{\"rank\":1,\"score\":0.4984467029571533,\"width\":1024,\"height\":640,\"inside\":3600,\"areaFraction\":0.0054931640625,\"bounds\":{\"x\":447,\"y\":318,\"width\":54,\"height\":98}},{\"rank\":2,\"score\":0.2967594265937805,\"width\":1024,\"height\":640,\"inside\":5761,\"areaFraction\":0.00879058837890625,\"bounds\":{\"x\":421,\"y\":318,\"width\":109,\"height\":115}}]}"
+    ],
+    "errors": []
+  },
+  "selectedReplies": [
+    {
+      "worker": 1,
+      "jobId": 5,
+      "points": [
+        {
+          "x": 0.4625,
+          "y": 0.59,
+          "label": "include"
+        }
+      ],
+      "kind": "decoded",
+      "candidates": [
+        {
+          "rank": 0,
+          "score": 0.9593358039855957,
+          "width": 1024,
+          "height": 640,
+          "inside": 1696,
+          "areaFraction": 0.002587890625,
+          "bounds": {
+            "x": 451,
+            "y": 369,
+            "width": 45,
+            "height": 46
+          }
+        },
+        {
+          "rank": 1,
+          "score": 0.4984467029571533,
+          "width": 1024,
+          "height": 640,
+          "inside": 3600,
+          "areaFraction": 0.0054931640625,
+          "bounds": {
+            "x": 447,
+            "y": 318,
+            "width": 54,
+            "height": 98
+          }
+        },
+        {
+          "rank": 2,
+          "score": 0.2967594265937805,
+          "width": 1024,
+          "height": 640,
+          "inside": 5761,
+          "areaFraction": 0.00879058837890625,
+          "bounds": {
+            "x": 421,
+            "y": 318,
+            "width": 109,
+            "height": 115
+          }
+        }
+      ]
+    }
+  ],
+  "selection": {
+    "x": 704,
+    "y": 576,
+    "width": 71,
+    "height": 73
+  },
+  "edits": {
+    "before": 0.6,
+    "after": 0.72,
+    "recolored": true
+  },
+  "png": {
+    "name": "autumn-stop.png",
+    "bytes": 2819698
+  },
+  "gif": {
+    "name": "autumn-stop-loop.gif",
+    "bytes": 7840073
+  },
+  "details": {
+    "seed": 2844706995,
+    "analysis": {
+      "backend": {
+        "kind": "device"
+      },
+      "status": "Ready to tap",
+      "modelsReady": true,
+      "depth": true,
+      "embeddings": true,
+      "decoderReady": true,
+      "plate": true,
+      "alive": {
+        "heavy": false,
+        "decoder": true
+      },
+      "timings": {
+        "depth": 1814.780000001192,
+        "depth-hash": 3.324999999254942,
+        "encode": 2204,
+        "warmup": 227.93000000342727,
+        "inpaint": 617.964999999851
+      }
+    },
+    "objects": [
+      {
+        "id": "9b085e5b-c666-4d17-a759-af30f1db70d5",
+        "name": "Object 1",
+        "hidden": false,
+        "subject": true,
+        "recolor": {
+          "kind": "target",
+          "color": {
+            "l": 0.7,
+            "c": 0.18,
+            "h": 145
+          }
+        },
+        "bounds": {
+          "x": 704,
+          "y": 576,
+          "width": 71,
+          "height": 73
+        },
+        "depth": {
+          "p10": 0.6090738773345947,
+          "median": 0.6209339499473572,
+          "p90": 0.6364432573318481
+        },
+        "selected": true
+      }
+    ],
+    "style": {
+      "fry": 0.72,
+      "colors": 6,
+      "saturation": 0.704,
+      "harmony": {
+        "kind": "auto",
+        "strength": 0.5
+      },
+      "paletteTargets": [],
+      "bands": 4,
+      "simplify": 0.604,
+      "outline": 0.4,
+      "subjectClarity": 0.6,
+      "grain": 0.604,
+      "colorNoise": 0.374,
+      "grainSize": 2,
+      "grainHold": 2,
+      "crunch": 0.504,
+      "clipping": 0.36
+    },
+    "motion": {
+      "enabled": true,
+      "drift": {
+        "direction": "side",
+        "amount": 0.3
+      },
+      "parallax": 1,
+      "loopSeconds": 3,
+      "focus": null
+    }
+  }
+}

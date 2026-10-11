@@ -135,3 +135,87 @@ test('hosting handles missing, wrong-sized, changing and failed R2 objects with 
   const failedAsset = await request('/', { method: 'HEAD' }, { ...env, ASSETS: { async fetch() { return new Response('missing', { status: 404 }); } } });
   assert.equal(failedAsset.status, 404); assert.equal(await failedAsset.text(), ''); headers(failedAsset, config.errors);
 });
+
+// A fake ASSETS binding that validates like Pages: a stored strong ETag, 304 when
+// If-None-Match matches (weakly) or is "*", and 304 for any If-Modified-Since.
+function validatingAssets(etag: string, seen: Request[] = []): HostingEnv['ASSETS'] {
+  const opaque = (tag: string): string => tag.trim().replace(/^W\//, '');
+  return {
+    async fetch(request) {
+      seen.push(request);
+      const none = request.headers.get('If-None-Match');
+      const matches = none !== null && none.split(',').some((tag) => tag.trim() === '*' || opaque(tag) === opaque(etag));
+      if (matches || request.headers.has('If-Modified-Since')) return new Response(null, { status: 304, headers: { ETag: etag } });
+      return new Response(request.method === 'HEAD' ? null : 'asset-body', { headers: { ETag: etag, 'Cache-Control': 'public, max-age=0' } });
+    },
+  };
+}
+const policyHeaders: Readonly<Record<string, string>> = { ...contract.all, 'Cache-Control': 'no-cache', 'Content-Type': 'image/jpeg' };
+const policyHandler = createHandler({
+  routes: {
+    '/a.jpg': { kind: 'asset', headers: policyHeaders },
+    '/same.jpg': { kind: 'asset', headers: { ...policyHeaders } },
+    '/other.jpg': { kind: 'asset', headers: { ...policyHeaders, 'Content-Security-Policy': `${policyHeaders['Content-Security-Policy']} https://gpu.nathan.fish` } },
+  },
+  errors: config.errors,
+});
+const policyRequest = (path: string, init?: RequestInit, assets: HostingEnv['ASSETS'] = validatingAssets('"abc123"')): Promise<Response> =>
+  policyHandler.fetch(new Request(`https://example.test${path}`, init), { ...env, ASSETS: assets });
+const tagOf = (response: Response): string => {
+  const match = /^"abc123-([0-9a-f]+)"$/.exec(response.headers.get('ETag') ?? '');
+  assert.ok(match?.[1] !== undefined, `tagged ETag, got ${response.headers.get('ETag')}`);
+  return match[1];
+};
+
+test('asset validators carry the header policy, so a policy change forces a full response', async () => {
+  const first = await policyRequest('/a.jpg');
+  assert.equal(first.status, 200); assert.equal(await first.text(), 'asset-body'); headers(first, policyHeaders);
+  const tag = tagOf(first);
+  // An edge entry stored before the policy existed holds the untagged ETag from ASSETS.
+  const stale = await policyRequest('/a.jpg', { headers: { 'If-None-Match': '"abc123"' } });
+  assert.equal(stale.status, 200); assert.equal(await stale.text(), 'asset-body'); headers(stale, policyHeaders); assert.equal(tagOf(stale), tag);
+  // An entry for a different policy is stale too.
+  const other = await policyRequest('/a.jpg', { headers: { 'If-None-Match': `"abc123-${tagOf(await policyRequest('/other.jpg'))}"` } });
+  assert.equal(other.status, 200); assert.equal(await other.text(), 'asset-body');
+  const current = await policyRequest('/a.jpg', { headers: { 'If-None-Match': `"abc123-${tag}"` } });
+  assert.equal(current.status, 304); assert.equal(await current.text(), ''); headers(current, policyHeaders); assert.equal(current.headers.get('ETag'), `"abc123-${tag}"`);
+});
+
+test('asset policy tags are deterministic per header map and differ between maps', async () => {
+  const [a, same, other, again] = await Promise.all(['/a.jpg', '/same.jpg', '/other.jpg', '/a.jpg'].map(async (path) => tagOf(await policyRequest(path))));
+  assert.equal(a, same); assert.equal(a, again); assert.notEqual(a, other);
+});
+
+test('asset validators keep W/ and translate only the current tag out of a list', async () => {
+  const tag = tagOf(await policyRequest('/a.jpg'));
+  const weak = await policyRequest('/a.jpg', { headers: { 'If-None-Match': `W/"abc123-${tag}"` } }, validatingAssets('W/"abc123"'));
+  assert.equal(weak.status, 304); assert.equal(weak.headers.get('ETag'), `W/"abc123-${tag}"`); headers(weak, policyHeaders);
+  const seen: Request[] = [];
+  const list = await policyRequest('/a.jpg', { headers: { 'If-None-Match': `"old", W/"abc123-${tag}", "abc123-ffffffff"` } }, validatingAssets('"abc123"', seen));
+  assert.equal(list.status, 304); assert.equal(seen[0]?.headers.get('If-None-Match'), 'W/"abc123"');
+});
+
+test('asset requests drop If-Modified-Since, pass * and translate If-Range for the current tag only', async () => {
+  const tag = tagOf(await policyRequest('/a.jpg'));
+  const seen: Request[] = [];
+  const since = await policyRequest('/a.jpg', { headers: { 'If-Modified-Since': 'Sat, 10 Oct 2026 12:00:00 GMT' } }, validatingAssets('"abc123"', seen));
+  assert.equal(since.status, 200); assert.equal(await since.text(), 'asset-body'); assert.equal(seen[0]?.headers.has('If-Modified-Since'), false);
+  const star = await policyRequest('/a.jpg', { headers: { 'If-None-Match': '*' } }, validatingAssets('"abc123"', seen));
+  assert.equal(star.status, 304); assert.equal(seen[1]?.headers.get('If-None-Match'), '*'); headers(star, policyHeaders);
+  await policyRequest('/a.jpg', { headers: { Range: 'bytes=0-1', 'If-Range': `"abc123-${tag}"` } }, validatingAssets('"abc123"', seen));
+  assert.equal(seen[2]?.headers.get('If-Range'), '"abc123"');
+  await policyRequest('/a.jpg', { headers: { Range: 'bytes=0-1', 'If-Range': '"abc123-ffffffff"' } }, validatingAssets('"abc123"', seen));
+  assert.equal(seen[3]?.headers.get('If-Range'), '"abc123-ffffffff"');
+  await policyRequest('/a.jpg', { headers: { Range: 'bytes=0-1', 'If-Range': 'Sat, 10 Oct 2026 12:00:00 GMT' } }, validatingAssets('"abc123"', seen));
+  assert.equal(seen[4]?.headers.get('If-Range'), 'Sat, 10 Oct 2026 12:00:00 GMT');
+});
+
+test('asset HEAD keeps the route headers and tagged ETag without a body', async () => {
+  const tag = tagOf(await policyRequest('/a.jpg'));
+  const head = await policyRequest('/a.jpg', { method: 'HEAD' });
+  assert.equal(head.status, 200); assert.equal(await head.text(), ''); headers(head, policyHeaders); assert.equal(tagOf(head), tag);
+  const stale = await policyRequest('/a.jpg', { method: 'HEAD', headers: { 'If-None-Match': '"abc123"' } });
+  assert.equal(stale.status, 200); assert.equal(await stale.text(), '');
+  const current = await policyRequest('/a.jpg', { method: 'HEAD', headers: { 'If-None-Match': `"abc123-${tag}"` } });
+  assert.equal(current.status, 304); assert.equal(await current.text(), '');
+});
