@@ -117,7 +117,7 @@ export function createHandler(config: HostingConfig): { fetch(request: Request, 
         if (route.kind === 'asset') {
           // Pages redirects /index.html; the local production contract serves it directly.
           const url = new URL(request.url);
-          if (galleryAlias) url.pathname = '/gallery';
+          if (galleryAlias || pathname === '/gallery.html') url.pathname = '/gallery';
           if (pathname === '/index.html') url.pathname = '/';
           const tag = tags.get(route) ?? policyTag(route.headers);
           const forwarded = new Request(url, request);

@@ -473,14 +473,8 @@ const color: Scenario = {
       const input = document.querySelector('[data-testid="color-hex"]'); return input instanceof HTMLInputElement ? input.value : '';
     }), '#aabbcc');
     await t.page.emulate({ width: 390, height: 844, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
-    await t.page.waitFor('phone Color node', z.literal(true), () => document.querySelector('.phone-editor .node[aria-label="Color"]') !== null ? true : null);
-    await t.page.evaluate(z.literal(true), () => {
-      const sheet = document.querySelector('.sheet-handle');
-      if (sheet instanceof HTMLButtonElement && sheet.getAttribute('aria-expanded') !== 'true') sheet.click();
-      const disclosure = document.querySelector('.node[aria-label="Color"] .node-disclosure');
-      if (!(disclosure instanceof HTMLButtonElement)) throw new Error('No phone Color disclosure.');
-      if (disclosure.getAttribute('aria-expanded') !== 'true') disclosure.click(); return true;
-    });
+    await t.page.waitFor('phone Color opener', z.literal(true), () => document.querySelector('.phone-editor [data-testid="tool-color"]') !== null ? true : null);
+    await t.page.click('[data-testid="tool-color"]');
     await settleCapture(t);
     await t.page.evaluate(z.literal(true), () => { document.querySelector('[data-testid="color-sv"]')?.scrollIntoView({ block: 'center', behavior: 'instant' }); return true; });
     await settleCapture(t);

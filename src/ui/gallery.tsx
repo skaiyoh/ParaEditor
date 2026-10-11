@@ -30,6 +30,13 @@ function MakeOne({ href }: { readonly href: string }) {
 type ListState = { kind: 'loading' } | { kind: 'listed'; pieces: readonly ListedPiece[] } | { kind: 'failed'; sentence: string };
 function Grid({ context, ready }: { readonly context: GalleryUiContext; readonly ready: () => void }) {
   const [state, setState] = useState<ListState>({ kind: 'loading' });
+  const [touch, setTouch] = useState(() => navigator.maxTouchPoints > 0 || matchMedia('(any-pointer: coarse)').matches);
+  useLayoutEffect(() => {
+    const query = matchMedia('(any-pointer: coarse)');
+    const update = (): void => setTouch(navigator.maxTouchPoints > 0 || query.matches);
+    query.addEventListener('change', update); addEventListener('resize', update);
+    return () => { query.removeEventListener('change', update); removeEventListener('resize', update); };
+  }, []);
   const [attempt, setAttempt] = useState(0);
   const grid = useRef<HTMLUListElement>(null);
   const [columnWidth, setColumnWidth] = useState(170);
@@ -65,13 +72,14 @@ function Grid({ context, ready }: { readonly context: GalleryUiContext; readonly
     {state.kind === 'failed' && <div class="gallery-message"><p data-testid="gallery-status" role="status">{state.sentence}</p><button type="button" onClick={() => setAttempt(attempt + 1)}>Retry</button></div>}
     {state.kind === 'listed' && (state.pieces.length === 0
       ? <div class="gallery-message" data-testid="gallery-empty"><p role="status">Nothing published yet</p><MakeOne href={context.editorUrl} /></div>
-      : <ul ref={grid} class="gallery-grid" data-testid="gallery-grid" aria-label="Published pieces">{state.pieces.map((piece) =>
+      : <><ul ref={grid} class="gallery-grid" data-testid="gallery-grid" aria-label="Published pieces">{state.pieces.map((piece) =>
         <li key={piece.id} style={{ gridRowEnd: `span ${Math.ceil(columnWidth * piece.height / piece.width + 34)}` }}>
           <a class="gallery-piece-link" data-testid="gallery-piece-link" href={`/gallery/${piece.id}`}>
             <img src={piece.posterUrl} width={piece.width} height={piece.height} loading="lazy" decoding="async" alt={`Published piece, ${timeLabel(piece.publishedAt)}`} />
             <time dateTime={piece.publishedAt}>{timeLabel(piece.publishedAt)}</time>
           </a>
-        </li>)}</ul>)}
+        </li>)}</ul>
+        <p class="gallery-hint">{touch ? 'Tap a piece to step into it. Tilt your phone to look around.' : 'Click a piece to step into it.'}</p></>)}
   </main>;
 }
 

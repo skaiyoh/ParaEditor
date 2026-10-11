@@ -179,7 +179,7 @@ async function runShell(t: ScenarioContext): Promise<void> {
     const empty = await page.evaluate(z.object({ actions: z.array(z.string()), disabled: z.boolean(), full: z.boolean() }), () => ({
       actions: [...document.querySelectorAll('.empty-stage .empty-actions button')].map((button) => button.textContent?.trim() ?? ''),
       disabled: [...document.querySelectorAll('button')].filter((button) => button.textContent?.trim() === 'Download').every((button) => button.disabled),
-      full: document.querySelector('[data-testid="tool-actions"]') !== null,
+      full: document.querySelector('.full-editor') !== null,
     }));
     t.ok(`${frame.name}: empty stage has capture/open and sample, with no enabled Download`, ['Open', 'Take a photo'].includes(empty.actions[0] ?? '') && empty.actions[1] === 'Try a sample' && empty.disabled, empty);
     t.equal(`${frame.name}: tier boundary`, empty.full, frame.width >= 744 && frame.height > 500);

@@ -7,7 +7,8 @@ import { createCleanup } from '../driver/processes.ts';
 import type {} from '../../../src/app/gallery-page.ts';
 
 const sizes = [{ width: 390, height: 844 }, { width: 1180, height: 820 }, { width: 1440, height: 900 }];
-async function captures(page: BrowserPage, name: string): Promise<void> {
+async function captures(t: ScenarioContext, name: string): Promise<void> {
+  const { page } = t;
   for (const size of sizes) {
     await page.emulate({ ...size, deviceScaleFactor: 1, mobile: size.width === 390, colorScheme: 'dark' });
     await page.evaluate(z.literal(true), async (touch) => {
@@ -19,6 +20,39 @@ async function captures(page: BrowserPage, name: string): Promise<void> {
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       return true;
     }, size.width === 390);
+    if (name === 'grid-with-pieces') {
+      t.equal(`${size.width}: grid hint matches the input device`, await page.evaluate(z.string(), () => {
+        const hint = document.querySelector<HTMLElement>('.gallery-hint');
+        return hint?.innerText ?? '';
+      }), size.width === 390 ? 'Tap a piece to step into it. Tilt your phone to look around.' : 'Click a piece to step into it.');
+      t.ok(`${size.width}: grid hint is centered 11 px secondary text after the grid`, await page.evaluate(z.boolean(), () => {
+        const hint = document.querySelector('.gallery-hint');
+        if (hint === null) return false;
+        const style = getComputedStyle(hint);
+        return hint.previousElementSibling?.matches('.gallery-grid') === true && style.fontSize === '11px' && style.textAlign === 'center' && style.color === 'rgb(163, 163, 163)';
+      }));
+    } else if (name === 'grid-empty') {
+      t.equal(`${size.width}: empty gallery has no piece hint`, await page.evaluate(z.boolean(), () => document.querySelector('.gallery-hint') === null), true);
+    } else if (name === 'piece-running') {
+      t.ok(`${size.width}: quiet piece controls have a hairline`, await page.evaluate(z.boolean(), () => {
+        const controls = [...document.querySelectorAll('.gallery-piece-controls button:not(.primary-action)')];
+        return controls.length > 0 && controls.every((node) => {
+          const style = getComputedStyle(node);
+          return style.borderTopWidth === '1px' && style.borderTopStyle === 'solid' && style.borderTopColor === 'rgb(58, 58, 58)';
+        });
+      }));
+      t.ok(`${size.width}: piece timestamp aligns with its 44 px neighbors`, await page.evaluate(z.boolean(), () => {
+        const time = document.querySelector('.gallery-piece-top time'), back = document.querySelector('[data-testid="gallery-back"]');
+        if (time === null || back === null) return false;
+        const box = time.getBoundingClientRect(), neighbor = back.getBoundingClientRect();
+        return box.height === 44 && Math.abs(box.top - neighbor.top) < .5 && getComputedStyle(time).alignItems === 'center';
+      }));
+    } else if (name === 'piece-fallback') {
+      t.equal(`${size.width}: piece status uses the floating radius`, await page.evaluate(z.string(), () => {
+        const status = document.querySelector('.gallery-piece-status');
+        return status === null ? '' : getComputedStyle(status).borderRadius;
+      }), '12px');
+    }
     await page.screenshot(`${name}-${size.width}`);
   }
 }
@@ -81,28 +115,22 @@ export const scenarios: readonly Scenario[] = [{
       await page.screenshot('editor-published-1440');
       await page.emulate({ width: 1180, height: 820, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
       await page.screenshot('editor-published-1180');
-      // The phone hosts the same Share group in its Actions node.
+      // The phone hosts the same Share group in its Actions tab.
       await page.emulate({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await page.waitFor('phone sheet', z.literal(true), () => document.querySelector('.phone-sheet') !== null ? true : null);
-      await page.evaluate(z.literal(true), () => {
-        const handle = document.querySelector<HTMLButtonElement>('.sheet-handle');
-        if (handle?.getAttribute('aria-expanded') === 'false') handle.click();
-        return true;
-      });
-      await page.waitFor('phone Actions node', z.literal(true), () => document.querySelector('.phone-sheet [aria-controls="node-actions"]') !== null ? true : null);
-      await page.evaluate(z.literal(true), () => {
-        const disclosure = document.querySelector<HTMLButtonElement>('.phone-sheet [aria-controls="node-actions"]');
-        if (disclosure?.getAttribute('aria-expanded') === 'false') disclosure.click();
-        return true;
-      });
+      await page.click('[data-testid="tool-actions"]');
       await page.waitFor('phone Share reachable', z.literal(true), () => {
-        const share = document.querySelector<HTMLElement>('.phone-sheet #node-actions [data-testid="share-publish"], .phone-sheet #node-actions [data-testid="share-link"]');
+        const share = document.querySelector<HTMLElement>('.phone-sheet #panel-actions [data-testid="share-publish"], .phone-sheet #panel-actions [data-testid="share-link"]');
         if (share === null) return null;
         share.scrollIntoView({ block: 'center' });
         const box = share.getBoundingClientRect();
         return box.width > 0 && box.height > 0 && box.bottom <= innerHeight ? true : null;
       });
-      t.ok('the phone Actions node hosts the Share group', true);
+      t.ok('the phone Actions tab hosts the Share group', await page.evaluate(z.boolean(), () => {
+        const group = document.querySelector('.phone-sheet #panel-actions .share-group');
+        const opener = document.querySelector('[data-testid="tool-actions"]');
+        return group !== null && group.getBoundingClientRect().height > 0 && opener?.getAttribute('aria-expanded') === 'true';
+      }));
       await page.screenshot('editor-share-390');
       await page.emulate({ width: 1180, height: 820, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
       // Real publications with varied source ratios make the masonry capture meaningful.
@@ -134,7 +162,7 @@ export const scenarios: readonly Scenario[] = [{
       await page.waitFor('published piece in the grid', z.literal(true), () => document.querySelector('[data-testid="gallery-piece-link"]') ? true : null);
       t.ok('grid contains the published piece', await page.evaluate(z.boolean(), (url) => [...document.querySelectorAll<HTMLAnchorElement>('[data-testid="gallery-piece-link"]')].some((link) => link.getAttribute('href') === url), href));
       t.equal('posters are lazy and have time alt text', await page.evaluate(z.boolean(), () => [...document.querySelectorAll<HTMLImageElement>('[data-testid="gallery-grid"] img')].every((image) => image.loading === 'lazy' && image.alt.startsWith('Published piece, '))), true);
-      await captures(page, 'grid-with-pieces');
+      await captures(t, 'grid-with-pieces');
       await page.click(`[data-testid="gallery-piece-link"][href="${href}"]`); await running(page);
       const center = await canvasHash(page);
       await page.evaluate(z.literal(true), async () => {
@@ -145,7 +173,7 @@ export const scenarios: readonly Scenario[] = [{
         await new Promise((resolve) => setTimeout(resolve, 500)); return true;
       });
       t.ok('desktop pointer changes the rendered view', center !== await canvasHash(page));
-      await captures(page, 'piece-running');
+      await captures(t, 'piece-running');
       await page.emulate({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await page.evaluate(z.literal(true), () => {
         Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 5 });
@@ -185,7 +213,7 @@ export const scenarios: readonly Scenario[] = [{
         const poster = document.querySelector<HTMLImageElement>('[data-testid="gallery-poster"]');
         return poster !== null && !poster.hidden && poster.complete && poster.naturalWidth > 0 && document.querySelector('[data-testid="gallery-status"]')?.textContent?.includes('poster') ? true : null;
       });
-      await captures(page, 'piece-fallback');
+      await captures(t, 'piece-fallback');
       await noInference(t, requestStart);
       await page.click('[data-testid="gallery-unpublish"]');
       await page.click('.gallery-confirm button');
@@ -195,7 +223,7 @@ export const scenarios: readonly Scenario[] = [{
       await page.intercept([{ method: 'GET', path: '/api/gallery', action: { kind: 'respond', status: 200, body: JSON.stringify({ pieces: [] }) } }]);
       await page.reload();
       await page.waitFor('empty sentence', z.literal(true), () => document.querySelector('[data-testid="gallery-empty"]')?.textContent?.includes('Nothing published yet') ? true : null);
-      await captures(page, 'grid-empty');
+      await captures(t, 'grid-empty');
       t.expectMessage({ because: 'list failure is intentional', channel: 'log', source: 'network', level: 'error', url: /\/api\/gallery$/ });
       await page.intercept([{ method: 'GET', path: '/api/gallery', action: { kind: 'respond', status: 503, body: '{}' } }]);
       await page.reload();

@@ -185,16 +185,19 @@ export const scenarios: readonly Scenario[] = [{
         list.scrollTop = list.scrollHeight;
         const last = list.querySelector('[data-testid="project-row"]:last-child .project-open'), bounds = last?.getBoundingClientRect();
         const hit = bounds === undefined ? null : document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-        const buttons = Array.from(document.querySelectorAll('.phone-strip .action-rail button'), (button) => button.textContent);
+        // RS1b: the strip is icon tools (Projects first); Take a photo lives in Actions and in the Projects panel's own import action.
+        const toggle = document.querySelector<HTMLElement>('[data-testid="projects-toggle"]'), first = document.querySelector('.phone-strip button');
+        const toggleBox = toggle?.getBoundingClientRect(), toggleHit = toggleBox === undefined ? null : document.elementFromPoint(toggleBox.x + toggleBox.width / 2, toggleBox.y + toggleBox.height / 2);
         return { fits: document.documentElement.scrollWidth === innerWidth && panel !== undefined && panel.left >= 0 && panel.right <= innerWidth,
           stageFilled: panel !== undefined && stage !== undefined && panel.width === stage.width && panel.height === stage.height,
-          toggleBeforeCapture: buttons[0] === 'Projects' && buttons[1] === 'Take a photo', controlsHidden: document.querySelector('.phone-tools')?.hasAttribute('hidden') ?? false,
+          toggleBeforeCapture: toggle !== null && first === toggle && toggle.getAttribute('aria-pressed') === 'true' && toggleHit !== null && toggle.contains(toggleHit),
+          controlsHidden: (document.getElementById('phone-tools')?.hasAttribute('hidden') ?? false) && document.querySelector('.phone-editor .primary-action')?.hasAttribute('disabled') === true,
           sheetHidden: sheet instanceof HTMLElement && sheet.hidden && getComputedStyle(sheet).display === 'none',
-          railAbsent: document.querySelector('.phone-toolbar') === null,
+          railAbsent: document.querySelector('.phone-editor .fry-rail, .phone-editor .mode-pill, .phone-editor .context-bar') === null,
           scrolled: list.scrollHeight > list.clientHeight && list.scrollTop > 0 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1,
           lastTappable: last instanceof HTMLButtonElement && !last.disabled && hit !== null && last.contains(hit) };
       });
-      t.ok('phone panel fills the stage, fits, and keeps Projects left of capture', phone.fits && phone.stageFilled && phone.toggleBeforeCapture && phone.controlsHidden, phone);
+      t.ok('phone panel fills the stage, fits, keeps its Projects toggle first and reachable, and hides the editing controls', phone.fits && phone.stageFilled && phone.toggleBeforeCapture && phone.controlsHidden, phone);
       t.ok('Projects hides the editing sheet and rail, and its last row remains tappable at maximum scroll', phone.sheetHidden && phone.railAbsent && phone.scrolled && phone.lastTappable, phone);
       await page.waitFor('phone thumbnail loaded', z.literal(true), () => {
         const image = document.querySelector('[data-testid="project-row"]:last-child img');

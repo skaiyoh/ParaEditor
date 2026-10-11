@@ -31,6 +31,7 @@ import { scenarios as parallax } from './parallax.scenario.ts';
 import { scenarios as parallaxControls } from './parallax-controls.scenario.ts';
 import { scenarios as windowScenarios } from './window.scenario.ts';
 import { scenarios as phone } from './phone.scenario.ts';
+import { scenarios as rs1Compact } from './rs1-compact.scenario.ts';
 import { scenarios as rs1Shell } from './rs1-shell.scenario.ts';
 import { scenarios as projects } from './projects.scenario.ts';
 import { scenarios as stereo } from './stereo.scenario.ts';
@@ -76,6 +77,7 @@ export const SCENARIO_FILES = {
   'parallax-real.scenario.ts': parallaxReal,
   'phone.scenario.ts': phone,
   'rs1-shell.scenario.ts': rs1Shell,
+  'rs1-compact.scenario.ts': rs1Compact,
   'creative-c1.scenario.ts': creativeC1,
   'projects.scenario.ts': projects,
   'stereo.scenario.ts': stereo,

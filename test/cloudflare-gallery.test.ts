@@ -222,7 +222,7 @@ test('Worker rejects otherwise consistent oversized masks, depth and plate plane
 
 test('gallery page aliases use the prepared gallery route headers and only valid UUID paths', async () => {
   const present = harness(undefined, true), absent = harness();
-  for (const route of ['/gallery', `/gallery/${uuid(1)}`]) {
+  for (const route of ['/gallery', `/gallery/${uuid(1)}`, '/gallery.html']) {
     const response = await present.request(route); assert.equal(response.status, 200); assert.equal(response.headers.get('X-Gallery-Test'), 'page'); assert.equal(await response.text(), 'gallery page');
     assert.equal(response.headers.get('Location'), null, 'the alias serves in place, retaining the piece URL');
     assert.equal((await absent.request(route)).status, 404);
@@ -230,7 +230,8 @@ test('gallery page aliases use the prepared gallery route headers and only valid
     assert.equal(head.status, 200); assert.equal(head.headers.get('Location'), null);
     assert.equal(head.headers.get('X-Gallery-Test'), 'page'); assert.equal((await head.arrayBuffer()).byteLength, 0);
   }
-  assert.deepEqual(present.fetched, ['/gallery', '/gallery', '/gallery', '/gallery']);
+  // The direct /gallery.html file path (verify.mjs requests every built file) must not reach Pages' .html redirect.
+  assert.deepEqual(present.fetched, ['/gallery', '/gallery', '/gallery', '/gallery', '/gallery', '/gallery']);
   for (const route of ['/gallery/nope', `/gallery/${uuid(1)}/extra`]) assert.equal((await present.request(route)).status, 404);
 });
 

@@ -5,7 +5,7 @@ import type { SceneDocument, Style } from '../core/types.ts';
 import { containedImageRect } from '../core/perspective.ts';
 import { RANGES } from '../core/ranges.ts';
 import { EnableSwitch, GestureRange, Node, RangeControl } from './controls.tsx';
-import { ContextBar, Layers, ObjectInspector } from './layers.tsx';
+import { ContextBar, Layers } from './layers.tsx';
 import { MotionControls, MotionExport, ParallaxNode, PhoneFrame } from './phone.tsx';
 import { Projects } from './projects.tsx';
 import { Share } from './share.tsx';
@@ -33,7 +33,7 @@ function usePhoneFrame(): boolean {
 }
 
 /** A fresh node, never given a 2D context. The session owns its renderer. */
-function Stage({ scene, session, onFit, refinementSize, contained = false, visible = true, notice, activeTool = 'select', onColorSample }: {
+function Stage({ scene, session, onFit, refinementSize, contained = false, visible = true, notice, activeTool = 'select', onColorSample, onTap }: {
   readonly scene: DemoScene | null; readonly session: DemoSession; readonly onFit: (percent: number) => void;
   readonly refinementSize: number | null;
   readonly contained?: boolean;
@@ -41,6 +41,8 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
   readonly notice?: string | null;
   readonly activeTool?: ActiveTool;
   readonly onColorSample: (color: InputColor) => void;
+  /** Compact frame handles the completion of its own selection action. */
+  readonly onTap?: DemoSession['tap'];
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   type Gesture = {
@@ -171,7 +173,7 @@ function Stage({ scene, session, onFit, refinementSize, contained = false, visib
       if (activeTool === 'sample') {
         const sampled = session.sampleColor(point);
         if (sampled.kind === 'sampled') onColorSample(sampled.color);
-      } else void session.tap(point);
+      } else void (onTap ?? session.tap)(point);
     }} />
     <div class="notice-slot" data-testid="notice">
       {meter}
@@ -284,13 +286,11 @@ const surfaceControls = [
   { field: 'scale', label: 'Scale' },
 ] satisfies readonly { field: keyof Omit<SceneDocument['surface'], 'enabled' | 'pattern'>; label: string }[];
 
-function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, debug, onDebug, portrait = false, color, onColorApplied, share }: {
+function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, debug, onDebug, portrait = false }: {
   readonly scene: DemoScene | null; readonly session: DemoSession;
   readonly parallaxEnabled: boolean; readonly modelsReady: boolean; readonly onParallax: () => void;
   readonly debug: boolean; readonly onDebug: () => void;
   readonly portrait?: boolean;
-  /** The phone hosts the editor's Share group in its Actions node. */
-  readonly share?: ComponentChildren;
   readonly color: (active: boolean) => ComponentChildren;
   readonly onColorApplied: (color: Oklch | null) => void;
 }) {
@@ -301,23 +301,10 @@ function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, d
   useLayoutEffect(() => {
     if (portrait && motionEnabled) setExpanded((current) => current.Motion ? current : { ...current, Motion: true });
   }, [portrait, motionEnabled, scene?.doc.id]);
-  const selected = scene?.doc.objects.find((object) => object.id === scene.selected);
   const expand = (name: NodeName): void => setExpanded((current) => ({ ...current, [name]: !current[name] }));
   return <aside class={portrait ? 'sheet-inspector' : 'inspector'} aria-label="Inspector">
     {scene !== null && <div class="node-stack">
-      {portrait && <Node name="Fry" expanded={expanded.Fry} onExpand={() => expand('Fry')} toggle={<span class="node-scope">Scene</span>}>
-        {controls.filter((control) => control.group === 'Fry').map(({ field, label, min, max, step }) =>
-          <RangeControl key={field} id={`style-${field}`} label={label} min={min} max={max} step={step} value={scene.doc.style[field]} session={session} valueFor={(fry) => ({ kind: 'fry', fry })} />)}
-      </Node>}
-      {portrait && <Node name="Layers" expanded={expanded.Layers} onExpand={() => expand('Layers')}>
-        <Layers scene={scene} session={session} />
-      </Node>}
-      {portrait && <Node name="Color" expanded={expanded.Color} onExpand={() => expand('Color')}>
-        <div data-testid="panel-color">{color(expanded.Color)}</div>
-      </Node>}
-      {portrait && <Node name="Actions" expanded={expanded.Actions} onExpand={() => expand('Actions')}><CompareControls session={session} />{share}</Node>}
       <section class="scene-nodes" aria-label="Scene effects">
-      {portrait && <h3 class="scope-heading">Scene effects</h3>}
       <Node name="Motion" expanded={expanded.Motion} onExpand={() => expand('Motion')}
         toggle={<EnableSwitch name="Motion" portrait={portrait} checked={scene.doc.motion.enabled} onChange={(enabled) => session.setMotion({ enabled })} />}>
         <MotionControls motion={scene.doc.motion} session={session} />
@@ -350,10 +337,6 @@ function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, d
           <RangeControl key={field} id={`style-${field}`} label={label} min={min} max={max} step={step} value={scene.doc.style[field]} session={session} valueFor={(value) => ({ kind: 'style', patch: { [field]: value } })} />)}
       </Node>)}
       </section>
-      {portrait && selected !== undefined && <section class="object-scope" aria-label="Selected object">
-        <h3 class="scope-heading">Selected object</h3>
-        <ObjectInspector key={selected.id} object={selected} session={session} onColorApplied={onColorApplied} />
-      </section>}
     </div>}
   </aside>;
 }
@@ -464,16 +447,32 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   if (phone) return <main class={`editor phone-editor${scene === null ? '' : ' has-photo'}`} aria-label="Photo editor"
     onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer !== null) event.dataTransfer.dropEffect = 'copy'; }}
     onDrop={(event) => { event.preventDefault(); open(event.dataTransfer?.files[0]); }}>
-    <PhoneFrame state={state} session={session} status={status} preparing={preparing} busy={busy} touch={touch} modelsReady={analysis.modelsReady}
+    <PhoneFrame state={{ ...state, scene }} session={session} status={status} preparing={preparing} busy={busy} touch={touch} modelsReady={analysis.modelsReady}
       projectsOpen={projectsOpen} onProjects={() => setPanel((current) => current === 'projects' ? null : 'projects')}
       projects={(onImport) => <Projects session={session} onOpened={() => setPanel(null)} onImport={onImport} onSample={sample}
         importLabel={touch ? 'Take a photo' : 'Open'} status={status} />}
-      inspector={<Inspector scene={scene} session={session} portrait share={<Share session={session} onNotice={setShareNotice} onStatus={setShareStatus} />} parallaxEnabled={state.parallaxEnabled} modelsReady={analysis.modelsReady}
+      color={colorPanel} colorDot={(() => {
+        const selected = scene?.doc.objects.find((object) => object.id === scene.selected);
+        return <span class="color-dot" aria-label={selected?.recolor.kind === 'none' ? 'Original color' : undefined}
+          style={selected?.recolor.kind === 'none' ? undefined : { background: displayColor(selected === undefined ? palette.last : selected.recolor.color).hex }}>
+          {selected?.recolor.kind === 'none' && <Icon name="original" />}
+        </span>;
+      })()} onColorApplied={onColorApplied}
+      share={<Share session={session} onNotice={setShareNotice} onStatus={setShareStatus} />}
+      facts={<><h3 class="panel-heading">Scene</h3><dl class="scene-facts">
+        <div><dt>Analysis</dt><dd data-testid="analysis-backend">{scene === null ? 'No photo' : analysis.backend.kind === 'gpu' ? `GPU · ${analysis.backend.name}` : 'on device'}</dd></div>
+        <div><dt>Master</dt><dd>{scene === null ? 'No photo' : `${scene.master.width} × ${scene.master.height}`}</dd></div>
+        <div><dt>Depth</dt><dd>{scene?.depth != null ? 'Ready' : 'Pending'} {elapsed('depth')}</dd></div>
+        <div><dt>Encoder</dt><dd>{analysis.decoderReady ? 'Ready' : 'Pending'} {elapsed('encode')}</dd></div>
+        <div><dt>Plate</dt><dd>{scene?.plate != null ? 'Ready' : 'Not prepared'} {elapsed('inpaint')}</dd></div>
+      </dl><span class="local-models">{session.analysis.modelCount()} models local</span>
+      <h3 class="panel-heading">Build</h3><div class="build-meta"><small data-testid="isolation">isolated: {isolated ? 'yes' : 'no'}</small><small data-testid="build-id">build {buildId}</small></div></>}
+      inspector={<Inspector scene={scene} session={session} portrait parallaxEnabled={state.parallaxEnabled} modelsReady={analysis.modelsReady}
         onParallax={toggleParallax} debug={debug} onDebug={toggleDebug} color={colorPanel} onColorApplied={onColorApplied} />}
       onOpen={open} onSample={sample} onDownload={() => { void download(); }}
       onMotion={toggleMotion} onSymbols={toggleSymbols} onParallax={toggleParallax}>
-      <Stage scene={scene} session={session} onFit={setFit} refinementSize={state.refinementSize} contained visible={!projectsOpen} activeTool={activeTool} onColorSample={onColorSample} />
-      {debug && scene !== null && !projectsOpen && <ParallaxDebug session={session} />}
+      {(onTap) => <><Stage scene={scene} session={session} onFit={setFit} refinementSize={state.refinementSize} contained visible={!projectsOpen} activeTool={activeTool} onColorSample={onColorSample} onTap={onTap} />
+      {debug && scene !== null && !projectsOpen && <ParallaxDebug session={session} />}</>}
     </PhoneFrame>
   </main>;
   const selected = scene?.doc.objects.find((object) => object.id === scene.selected);

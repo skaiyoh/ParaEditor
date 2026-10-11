@@ -1,6 +1,6 @@
 ---
 name: noisy
-description: A working photo editor at the Photoshop and Resolve craft bar; mid-dark grays, hairlines, one hot-pink accent, nothing that asks for attention.
+description: A touch-first photo editor in a neutral-gray room; the photo carries all the color, and one crunched near-white key carries the identity.
 colors:
   ground: "#1A1A1A"
   panel: "#262626"
@@ -8,371 +8,312 @@ colors:
   hairline: "#3A3A3A"
   text: "#E6E6E6"
   secondary: "#A3A3A3"
-  accent: "#FF3D7F"
-  success: "#3FB950"
-  warning: "#D29922"
+  key: "#F2F2F2"
   error: "#F85149"
 typography:
-  title:
-    fontFamily: "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+  type-ui:
+    fontFamily: "system-ui, -apple-system, \"Helvetica Neue\", Arial, sans-serif"
+    fontSize: "13px"
+    fontWeight: 400
+    lineHeight: "16px"
+    fontFeature: "\"tnum\""
+  heading:
+    fontFamily: "system-ui, -apple-system, \"Helvetica Neue\", Arial, sans-serif"
     fontSize: "13px"
     fontWeight: 600
     lineHeight: "16px"
-  body:
-    fontFamily: "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
-    fontSize: "13px"
-    fontWeight: 400
-    lineHeight: "16px"
-  label:
-    fontFamily: "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+  type-label:
+    fontFamily: "system-ui, -apple-system, \"Helvetica Neue\", Arial, sans-serif"
     fontSize: "12px"
     fontWeight: 400
-    lineHeight: 1.25
-  meta:
-    fontFamily: "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+    lineHeight: 1.5
+  type-meta:
+    fontFamily: "system-ui, -apple-system, \"Helvetica Neue\", Arial, sans-serif"
     fontSize: "11px"
     fontWeight: 400
-    lineHeight: 1.5
-  panel-heading:
-    fontFamily: "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+    lineHeight: "16px"
+  section-label:
+    fontFamily: "system-ui, -apple-system, \"Helvetica Neue\", Arial, sans-serif"
     fontSize: "11px"
     fontWeight: 600
     lineHeight: "12px"
     letterSpacing: "0.08em"
 rounded:
-  control: "4px"
-  track: "3px"
-  switch: "10px"
-  round: "50%"
+  radius: "8px"
+  r-float: "12px"
+  sheet: "16px"
+  pill: "999px"
+  circle: "50%"
 spacing:
-  xs: "4px"
-  sm: "8px"
-  md: "12px"
-  lg: "16px"
-  bar: "44px"
-  thumb: "48px"
-  row: "64px"
+  "4": "4px"
+  "8": "8px"
+  "12": "12px"
+  "16": "16px"
+  "24": "24px"
+  target: "44px"
+  bar: "52px"
 components:
-  button:
-    backgroundColor: "transparent"
-    textColor: "{colors.text}"
-    typography: "{typography.body}"
-    rounded: "{rounded.control}"
-    padding: "0 16px"
-    height: "44px"
-  button-hover:
-    backgroundColor: "{colors.raised}"
-  button-active:
-    backgroundColor: "{colors.hairline}"
-  button-disabled:
-    backgroundColor: "transparent"
-    textColor: "{colors.secondary}"
-  button-primary:
-    backgroundColor: "{colors.accent}"
+  button-key:
+    backgroundColor: "{colors.key}"
     textColor: "{colors.ground}"
-    typography: "{typography.title}"
-    rounded: "{rounded.control}"
+    typography: "{typography.heading}"
+    rounded: "{rounded.radius}"
     padding: "0 16px"
-    height: "44px"
-  button-primary-disabled:
+    height: "{spacing.target}"
+  button-key-disabled:
     backgroundColor: "{colors.raised}"
     textColor: "{colors.secondary}"
-  button-empty:
-    backgroundColor: "{colors.raised}"
+  button-quiet:
+    backgroundColor: "transparent"
     textColor: "{colors.text}"
-    rounded: "{rounded.control}"
+    typography: "{typography.type-ui}"
+    rounded: "{rounded.radius}"
     padding: "0 16px"
-    height: "44px"
-  button-empty-hover:
+    height: "{spacing.target}"
+  button-quiet-hover:
+    backgroundColor: "{colors.raised}"
+  button-quiet-active:
     backgroundColor: "{colors.hairline}"
-  toggle-pressed:
+  button-raised:
     backgroundColor: "{colors.raised}"
     textColor: "{colors.text}"
-  layer-row:
+    rounded: "{rounded.radius}"
+    padding: "0 12px"
+    height: "{spacing.target}"
+  button-raised-hover:
+    backgroundColor: "{colors.hairline}"
+  icon-button:
     backgroundColor: "transparent"
     textColor: "{colors.text}"
-    rounded: "0"
-    padding: "8px 16px"
-    height: "64px"
-  layer-row-selected:
-    backgroundColor: "{colors.raised}"
-  layer-thumbnail:
-    backgroundColor: "{colors.ground}"
-    rounded: "{rounded.control}"
-    size: "48px"
-  panel:
+    rounded: "{rounded.radius}"
+    size: "{spacing.target}"
+  top-bar:
     backgroundColor: "{colors.panel}"
     textColor: "{colors.text}"
-  panel-heading:
+    typography: "{typography.type-label}"
+    height: "{spacing.bar}"
+  floating-panel:
     backgroundColor: "{colors.panel}"
-    textColor: "{colors.secondary}"
-    typography: "{typography.panel-heading}"
-    padding: "16px"
-    height: "44px"
-  scope-heading:
     textColor: "{colors.text}"
-    typography: "{typography.title}"
-    padding: "14px 16px"
-    height: "44px"
-  node-disclosure:
-    backgroundColor: "transparent"
-    textColor: "{colors.text}"
-    typography: "{typography.title}"
-    rounded: "0"
-    height: "44px"
-  range-row:
-    typography: "{typography.label}"
-    padding: "0 16px"
-    height: "44px"
-  range-row-fry:
-    typography: "{typography.body}"
-    padding: "0 16px"
-    height: "48px"
-  range-value:
-    textColor: "{colors.secondary}"
-    width: "48px"
-  range-thumb:
-    backgroundColor: "{colors.accent}"
-    rounded: "{rounded.round}"
-    size: "16px"
-  range-thumb-fry:
-    backgroundColor: "{colors.accent}"
-    rounded: "{rounded.round}"
-    size: "20px"
-  enable-switch:
+    rounded: "{rounded.r-float}"
+    width: "336px"
+  context-bar:
+    backgroundColor: "{colors.panel}"
+    rounded: "{rounded.r-float}"
+    padding: "6px"
+  mode-pill:
+    backgroundColor: "{colors.panel}"
+    rounded: "{rounded.pill}"
+    padding: "4px"
+  fry-rail:
+    backgroundColor: "{colors.panel}"
+    rounded: "{rounded.r-float}"
+    width: "56px"
+  phone-sheet:
+    backgroundColor: "{colors.panel}"
+    rounded: "{rounded.sheet}"
+  text-input:
     backgroundColor: "{colors.ground}"
-    rounded: "{rounded.switch}"
-    width: "36px"
-    height: "20px"
-  enable-switch-on:
-    backgroundColor: "{colors.accent}"
+    textColor: "{colors.text}"
+    rounded: "{rounded.radius}"
+    padding: "0 8px"
+    height: "{spacing.target}"
   swatch:
-    rounded: "{rounded.control}"
-    padding: "0"
-    height: "40px"
-  status-line:
-    textColor: "{colors.text}"
-    typography: "{typography.body}"
-    padding: "0 0 0 16px"
-  build-meta:
-    textColor: "{colors.secondary}"
-    typography: "{typography.meta}"
-    padding: "0 16px 0 0"
+    rounded: "{rounded.circle}"
+    size: "36px"
 ---
 
 # Design System: noisy
 
-> Owns: the pre-RS1 implemented visual system recorded below.
-> Does not own: current feature requirements ([PRODUCT.md](PRODUCT.md) and the [UI handoff](plan/handoffs/ui-redesign.md)), demo priorities ([revision.md](plan/revision.md)), or redesign decisions still being settled in [RS1](plan/evidence/RS1-decisions.md).
-
-## Current redesign status: 2026-10-10
-
-The pink-accent desktop system below is the earlier implementation record, not the direction for the coming redesign.
-Nathan's settled RS1 direction is neutral gray, near-white interaction emphasis, touch-scale rounded controls, vertical edge Fry, and floating tool panels/icon toolbar.
-The [RS1 record](plan/evidence/RS1-decisions.md) names remaining composition/key-treatment choices; its sketch has not been approved wholesale.
-The [UI handoff](plan/handoffs/ui-redesign.md) adds the current inventory and creative-tool requirements.
-Per Nathan's RS1 decision, the design session rewrites this document from the built redesign once it lands.
-This review preserves old tokens/layout rather than pretending a new visual system has shipped.
+> **Owns:** the shipped visual system of the editor (full and compact tiers) and the public gallery, derived from `src/assets/app.css` and `src/ui/` as built.
+> **Does not own:** requirements and the feature inventory ([plan/handoffs/ui-redesign.md](plan/handoffs/ui-redesign.md)), design decisions ([plan/evidence/RS1-decisions.md](plan/evidence/RS1-decisions.md)), the gallery's product decisions ([plan/evidence/GAL1-design.md](plan/evidence/GAL1-design.md)), or product context ([PRODUCT.md](PRODUCT.md)).
+> The sidecar [.impeccable/design.json](.impeccable/design.json) carries motion, breakpoints, ramps and component snippets.
 
 ## Overview
 
-**Creative North Star: "The Working Editor"**
+**Creative North Star: "The Neutral Room"**
 
-noisy's shell is the category standard executed straight: layers on the left, the picture in the center, the node stack on the right, the modes along the bottom.
-It sits beside Photoshop and DaVinci Resolve and borrows their discipline, not their chrome: three mid-dark grays, one-pixel hairlines, the system font at 13 px, and one hot-pink accent that marks exactly the things a hand is about to touch.
-The early-2000s point-and-shoot identity lives in the rendered picture and the status voice; the shell never performs it.
+noisy's shell is a colorist's neutral-gray suite.
+The chrome holds no color, so the photo's colors read true, and the only fried thing outside the picture is the key that exports it.
+The mood is exact, quiet and dense: panels pack their controls tightly, while the canvas runs full-bleed under everything.
 
-Density is editing-suite density.
-Every bar is 44 px, every control row is 44 px, every button is a 44 px target, and the stage is the largest thing on the page, sitting on the ground with 16 px margins.
-Nothing on the shell asks for attention, so the fried photograph does.
+The tool grammar is Procreate's own toolbar map at touch scale, with rounder controls: tools in the top corners, Fry as a vertical rail on the left edge, floating panels that open one at a time under their icons, a context bar for the tapped object or the active tool, and a mode pill at the bottom.
+Procreate joins Photoshop and Resolve as the reference for the touch tool grammar.
+The early-2000s identity lives in the type, the crunched key and the status voice, never in the chrome's color.
+
+The same mounted editor serves two tiers.
+The full tier (width at least 744 px and height above 500 px: iPad landscape and portrait, desktop) floats its panels over the picture.
+The compact tier (phones) hosts the same panels in one tabbed bottom sheet.
+The public gallery lives in the same room: a strip, a masonry grid of posters, then the piece full-bleed.
+Further tools join the map as their stages land.
 
 **Key Characteristics:**
-- Four grays stepped 8 units apart (ground, panel, raised, hairline); never pure black.
-- One accent for the primary action, focus, selection, slider thumbs, switches on, and text selection; nowhere else.
-- System font stack, three sizes (13, 12, 11), tabular numerals on every value.
-- Flat: no shadows, no glass, no decorative gradients, 4 px radius on controls, 0 on rows.
-- One motion duration, 140 ms ease-out, on switches and disclosure chevrons only.
+- Mid-dark neutral grays with no accent; near-white marks focus, selection, thumbs and switches.
+- One crunched near-white key per view.
+- Flat: floating surfaces get the panel fill and a 1px hairline, never a shadow.
+- 8px controls, 12px floating surfaces, pills, round swatches.
+- System type at three sizes (13, 12, 11), tabular numerals throughout.
+- 44px touch targets everywhere, including the phone.
 
 ## Colors
 
-A four-step gray ramp carries all structure; one accent and three state colors carry all meaning.
+Achromatic grays stepped a few points of lightness apart, one near-white key, and color only where the user put it.
 
 ### Primary
-- **Hot Pink** (`accent`): the Download button, every focus ring, the selected layer row's outline, range thumbs, switches when on, and text selection.
-  It is the only saturated color in the shell.
+- **Key White** (key): the crunched key's base under its texture, and nothing else.
+  It is the one bright fill in any view.
 
 ### Neutral
-- **Ground** (`ground`): the page, the stage area behind the photo, the layer thumbnail well, and the switch track when off.
-- **Panel** (`panel`): the top bar, the bottom bar, the left sidebar, and the inspector.
-- **Raised** (`raised`): a hovered button, a pressed toggle, the selected layer row, the disabled primary action, and the empty-state buttons at rest.
-- **Hairline** (`hairline`): every 1 px divider, the unfilled part of a range track, a button's active press, and the scrollbar thumb.
-- **Text** (`text`): primary text, the pressed-swatch border, and the hover ring on a range thumb.
-- **Secondary** (`secondary`): panel headings, scene-fact terms, range values, timings, the build line, the disclosure chevron, the switch when off, the filled part of a range track, and disabled button text.
+- **Room Ground** (ground): the page and the stage behind the photo, the inside of text inputs and segmented trays, and the key's label color.
+- **Panel Gray** (panel): every surface that holds controls: the top bar, floating panels, the Fry rail, the context bar, the mode pill, the phone sheet, the gallery strip and dialogs.
+- **Raised Gray** (raised): the hover fill on quiet buttons, the fill of pressed and selected items, and the disabled key.
+- **Hairline Gray** (hairline): every 1px divider and floating-surface border, the press fill, the unfilled slider track, and text selection.
+- **Near-White Text** (text): body text and every state mark: focus outlines, selection outlines, slider thumbs, the on switch, the pressed swatch ring.
+- **Secondary Gray** (secondary): metadata, values, help text, section labels, disabled labels, the filled part of slider tracks, and the off switch.
 
 ### State
-- **Success Green** (`success`): the 6 px dot before a scene fact that reads Ready.
-- **Warning Amber** (`warning`) and **Error Red** (`error`): defined on `:root`; no shell element uses them yet.
-  They are reserved for the status line and scene facts, not for decoration.
+- **Error Red** (error): the border of an invalid field (a layer name or a hex value).
+  State color exists to mean something and never decorates.
 
 ### Named Rules
-**The One Accent Rule.** The accent marks what a hand is about to touch or has just chosen: the primary action, focus, selection, a thumb, a switch that is on.
-It never fills a panel, a heading, a divider, or a label.
+**The Neutral Room Rule.** The chrome has no accent: focus, selection, slider thumbs and switches are near-white, and a selected item is raised with a 1px near-white outline.
 
-**The No-Black Rule.** The darkest surface is `ground`.
-Pure black appears nowhere in the shell; the icon's near-black is an open product question, not a shell token.
-
-**The Gray Fill Rule.** A range track fills with `secondary`, not the accent; the accent is the thumb alone.
+**The User's Color Rule.** The only chromatic pixels in the chrome are the user's own color: the Color dot, the picker's square and hue strip, and the swatches.
 
 ## Typography
 
-**Display Font:** none.
-**Body Font:** system-ui (with -apple-system, Helvetica Neue, Arial, sans-serif).
-**Label/Mono Font:** none; numerals are tabular on every element via `font-variant-numeric` on `:root`.
+**UI Font:** system-ui (with -apple-system, "Helvetica Neue", Arial, sans-serif)
 
-**Character:** the platform's own face at tool sizes, set so a photographer reads the shell the way they read their camera's menu: plainly, without noticing it.
+**Character:** One system face at three sizes, set dense and numeric, like a tool panel rather than a page.
+Tabular numerals are on at the root, so values never jitter as sliders move.
 
 ### Hierarchy
-- **Title** (600, 13 px, 16 px line): the inspector scope heading "Scene", the Object node's name, each node's disclosure label, and the primary action.
-- **Body** (400, 13 px, 16 px line): the photo name, button labels, the status line, the Fry value, and the empty-state prompt.
-- **Label** (400, 12 px): range row labels and values, scene facts, the viewer toolbar, mode-rail buttons, and the layer hint at 1.5 line height.
-- **Meta** (400, 11 px): timings beside scene facts, the observed analysis backend/local-model count, and the build line.
-  11 px is the floor; nothing is set smaller.
-- **Panel heading** (600, 11 px, 0.08 em tracking, uppercase, `secondary`): LAYERS and SCENE in the left column only.
-  The inspector's headings are title case, not caps.
+- **Heading** (600, 13px, 16px): panel titles, the scope heading, object names, the gallery's title, and the key's label.
+- **UI** (400, 13px, 16px): the base size for controls, notices and the status line.
+- **Label** (400, 12px, 1.5 for prose): slider labels, secondary buttons, help text, scene facts, the photo name in the top bar.
+- **Meta** (400, 11px): timings, published times, build details, the piece count.
+- **Section label** (600, 11px, 0.08em, uppercase, secondary): the heading of a section inside a panel (Photo, Scene, Build, Share, Compare); it is the section's only heading, never a kicker above another one.
 
 ### Named Rules
-**The Three Sizes Rule.** 13, 12, 11.
-A new element takes one of these; it does not introduce a fourth.
-
-**The Tabular Rule.** Every number on the page sits in tabular figures so values do not jitter while a slider moves.
+**The Three Sizes Rule.** Type is 13, 12 or 11 px; hierarchy comes from weight 600 and the secondary gray, never from a bigger size.
 
 ## Layout
 
-The page is a 100dvh grid with a 600 px minimum height: a 44 px top bar, the workspace, a 44 px bottom bar.
-The workspace is three columns: a 272 px sidebar, the stage at `minmax(0, 1fr)`, a 360 px inspector.
-At or under 1350 px wide the columns are 232 and 336 px; at or under 1100 px they are 180 and 312 px, range rows tighten to an 88 px label column with 12 px side padding, and the isolation note leaves the build line.
-The stage shrinks; nothing else moves.
+**Full tier.**
+A 52 px top bar (panel fill, hairline below, safe-area aware) holds the left tool cluster (Projects, Actions, Adjustments), the centered photo name with its fit readout, and the right cluster (Layers, the Color dot, the key), with 1 by 24 px hairline separators between groups.
+The stage fills everything below it; the photo is padded 24 px, with the left side clearing the Fry rail and the bottom clearing the pill.
+The Fry rail floats 16 px from the left edge, vertically centered in the stage.
+Floating panels open 8 px under the bar: left-cluster panels at 88 px from the left so the rail stays usable, right-cluster panels 16 px from the right; 336 px wide (Projects 360 px).
+A panel's bottom stays clear of the bottom band, which belongs to the status (bottom left), the mode pill (bottom center, 16 px up) and the context bar (just above the pill).
+Notices sit in one centered slot at the top of the stage and recenter in the space an open panel leaves; panels never move for a notice.
 
-Vertical rhythm inside the columns: 44 px for every bar, heading, node header, range row, and switch cell; 64 px for a layer row (48 px thumbnail plus 8 px padding above and below); 48 px for the Fry dial row; 40 px for the Object heading and each swatch; 32 px for the viewer toolbar; 28 px for a scene-fact row.
-The sidebar is a flex column: the layer list scrolls, the scene facts pin to the bottom.
-The inspector is a flex column: the scope heading is fixed, the node stack scrolls.
+**Compact tier** (width under 744 px, or height 500 px and under).
+A 52 px top strip with icon-only tools and the key, the photo below it, the Fry rail at the left edge, and in portrait the mode pill and a two-row context bar spanning the width above one bottom sheet.
+On phones Undo and Redo sit in the sheet header beside the grab handle and status.
+The sheet collapses to its 44 px heading and expands to about 46% of the height with four tabs: Adjust, Layers, Color, Actions.
+On landscape phones the expanded sheet shares its heading line with the tabs so 44 px controls still fit.
+On landscape phones the context bar is one row of name, swatches, actions and close, and the mode pill sits in the top strip between Color and Download.
+At landscape widths of 700 px and under, the pill stays above the sheet when no object is selected and hides during selection; Motion, Symbols and Parallax remain available in Adjust.
+The Fry rail has half opacity when its input is disabled.
 
-Horizontal rhythm: 16 px side padding everywhere, 12 px between a thumbnail and its name, 8 px inside a range row and between empty-state buttons, 4 px between buttons in the action rail, mode rail, and swatch grid.
-The action rail ends 8 px from the right edge so the primary action's edge does not touch the viewport.
+**Gallery.**
+A 52 px strip, then a masonry grid with 12 px gutters: two columns, four from 1180 px, five from 1440 px.
+The piece page has a quiet top line and controls centered at the bottom; on phone portrait it letterboxes so the whole picture shows.
+The timestamp aligns with the adjacent 44 px controls, and quiet piece controls carry the floating surface hairline.
+A centered 11 px secondary hint follows a nonempty grid.
+On touch devices its two sentences are "Tap a piece to step into it." and "Tilt your phone to look around."
+On pointer devices it reads "Click a piece to step into it."
+Pressed grid images dim to 90% brightness.
+Preparation and piece status notices use the 12 px floating radius, matching the notice slot.
 
-Spacing steps as used: 4, 8, 12, 16; then the component sizes 44, 48, 64.
+**Rhythm.**
+Spacing steps are 4, 8, 12, 16 and 24 px; panel content is inset 16 px, and rows sit on 44 px minimums.
 
 ## Elevation & Depth
 
-Flat.
-No `box-shadow`, no blur, no glass.
-Depth is tonal: ground under panel under raised, with 1 px hairlines where two panels meet (a right border on the sidebar, a left border on the inspector, a pseudo-element line under the top bar and over the bottom bar, a bottom border on every node).
-Hover lifts a control one tonal step (transparent to raised); press lifts it two (to hairline).
-The one gradient in the stylesheet is the range track's two-stop hard fill from `secondary` to `hairline` at the thumb; it is a fill mechanism with no visible ramp, not decoration.
+The system is flat.
+Depth comes from the panel fill against the ground and a 1px hairline border, never from a shadow or blur.
+Stacking order alone separates the picture, the floating tools, the open panel and the notice slot.
 
 ### Named Rules
-**The Tonal Step Rule.** A state change moves a surface exactly one step up the gray ramp.
-Nothing floats.
+**The Flat Float Rule.** Anything floating over the picture gets the panel fill and a 1px hairline, with no shadow.
 
 ## Shapes
 
-Rectangles with 4 px corners on controls (buttons, range inputs, layer thumbnails, swatches) and square corners on rows that span their column (layer rows, node disclosures).
-Round shapes are reserved for the mechanical: range thumbs (16 px, 20 px on Fry), the switch knob (14 px), the Ready dot (6 px).
-The enable switch is a 36 x 20 px pill with a 10 px radius.
-Outlines, not borders, mark selection and focus, and they are inset (`outline-offset` -1 px for selection, -2 px for focus) so a highlighted element never grows.
-The only inline icon is a 16 px chevron drawn as a 1.5-stroke SVG path; there is no icon font and no glyph set.
+Rounded and touch-scale.
+Controls round at 8px (radius); floating surfaces (panels, the rail, the context bar, notices, dialogs) at 12px (r-float); the phone sheet's top corners at 16px (sheet).
+The mode pill, its buttons, slider tracks and the hue strip are pills; swatches, slider thumbs, the Color dot and the switch knob are circles.
+Rows inside a list are square-cornered so they tile, except Layers rows in the full tier, which take the control radius.
+Icons are one family: 20px, 1.5px stroke, round caps and joins, drawn in the current text color.
 
 ## Components
 
 ### Buttons
-- **Shape:** 4 px radius, 44 px minimum height, 16 px side padding, no border, text at 13 px.
-- **Default (top-bar actions, Deselect, Original, mode rail):** transparent on the panel; hover `raised`, active `hairline`, disabled text in `secondary` with no hover.
-- **Primary (Download):** `accent` fill, `ground` text at weight 600; hover brightens 10%, active darkens 10%; disabled falls to `raised` fill with `secondary` text.
-  Its focus ring is `text`, inset 4 px, because an accent ring on an accent fill would vanish.
-- **Empty-state (Open, Try a sample on the stage):** `raised` at rest, `hairline` on hover, so they read as buttons on the ground where the panel hover step is invisible.
-- **Toggle (mode rail, Original):** carries `aria-pressed`; pressed is `raised` with `text`, and the mode rail adds a 1 px inset `accent` outline.
-  Mode-rail labels are 12 px.
+Quiet until touched, with a single bright exception.
+- **Shape:** 8px corners, 44px minimum height, 16px side padding (12px in tool clusters).
+- **The crunched key:** Key White carrying noisy's crunch texture, a 64px tile of 8px blocks at full strength (Fry 1.00), upscaled pixel-sharp to the device ratio and independent of the scene's Fry; a Room Ground label at 600 beside its icon.
+  Hover brightens it 5%, press darkens it to 90%, focus draws a ground-colored ring inset 4px, and disabled drops to Raised Gray with a secondary label and no texture.
+- **One key per view:** Download in the editor; Take a photo or Open on the empty stage; Make one in the gallery; Publish or Unpublish inside the share confirmation; Tilt to look on a touch piece page.
+  When a tool needs confirming, its Done becomes the view's key.
+- **Quiet:** transparent with text color; Raised Gray on hover, Hairline Gray on press, a secondary label when disabled.
+- **Raised:** a Raised Gray fill for secondary choices beside the key (the empty-stage actions, loop export, Apply), Hairline Gray on hover.
+- **Icon button:** a 44px square with the 20px icon centered.
+- **Pressed or open:** Raised Gray with a 1px near-white outline inset 1px; focus thickens the outline to 2px.
 
-### Layer rows
-- A full-width button, 64 px tall, square-cornered, 8 px vertical and 16 px side padding, 12 px gap.
-- A 48 px square thumbnail (2D canvas, 4 px radius, `ground` well) and a single-line name that ellipsizes.
-- Selected: `raised` fill, a 1 px inset `accent` outline on the row and on the thumbnail.
-  The Plate row is selected when nothing else is.
-- Empty: the hint "Tap the picture to add a layer" at 12 px `secondary`, 12 px above and 20 px below, shown only while the plate is the only layer.
+### Floating panels
+- **Corner Style:** 12px.
+- **Background:** Panel Gray with a 1px hairline and no shadow.
+- **Behavior:** one open at a time, toggled by its opener, never closed by a canvas tap; fades in over 140ms and scrolls inside.
+- **Inside:** a 44px title row (heading left, secondary scope right) over a hairline, then sections led by a section label, inset 16px.
 
-### Panel headings and scene facts
-- **Panel heading:** 44 px, 11 px caps tracked 0.08 em in `secondary`, 16 px padding; used for LAYERS and SCENE.
-- **Scene facts:** a definition list at 12 px, each row 28 px, term in `secondary` left, value right-aligned.
-  A ready value carries a 6 px `success` dot; its timing follows at 11 px `secondary` with 8 px before it.
-- **Local models:** one 11 px `secondary` line, 16 px above, no divider.
+### Context bar
+The tapped object or the active tool: a 32px thumbnail, the name (tap to rename), round 36px swatches, object actions and a close button, in a 12px floating bar with 6px padding.
+On phones it becomes two rows: name, actions and close over a scrolling swatch row.
 
-### Viewer toolbar and stage
-- **Toolbar:** 32 px, 12 px `secondary` text, a hairline below; today it holds the fit percentage.
-- **Stage area:** 16 px padding on `ground`, the canvas centered and contained, crosshair cursor over the picture.
-- **Empty stage:** "Drop a photo" at 13 px `secondary`, then the two empty-state buttons 8 px apart, stacked with 16 px gap; the whole area is the drop target.
-- **Busy:** the stage area carries `aria-busy` while importing; Reset and Download disable; nothing else changes.
+### Mode pill
+A pill of Motion, Symbols and Parallax (plus Recenter while Parallax is on), each a pill button with icon and label; on is Raised Gray with a 1px near-white outline.
 
-### Inspector nodes
-- **Scope heading:** 44 px, 13 px at 600, 14 px vertical padding, hairline below, ellipsizes.
-- **Node:** a section with a hairline below; its header is a 44 px row holding a disclosure button and an optional enable switch.
-- **Disclosure:** full-width, square-cornered, 13 px at 600, 8 px gap to a 16 px chevron in `secondary`; the chevron rotates 90 degrees when expanded over 140 ms ease-out.
-  Expanded state is `aria-expanded`; collapsed controls are `hidden`.
-- **Object node:** appears above Fry only with a selection; its heading is the object's name at 40 px, 13 px at 600, with the swatches beneath.
-- **Default expansion:** Fry, Palette, and Camera open; Motion and Symbols closed.
+### Fry rail
+A 56px floating column: the 11px secondary "Fry" label, a vertical native range with a 6px track and a 28px near-white thumb, the value in text color, a 32px hairline rule, then Undo and Redo.
+The track fills from the bottom in secondary over hairline.
 
-### Range rows
-- A label element laid out as a 44 px grid: 96 px label, the input, a 48 px right-aligned value; 8 px gap, 16 px side padding, 12 px type.
-- The input is a native range restyled: a 6 px track with 3 px radius, filled `secondary` to the left of the thumb and `hairline` to the right, driven by a `--fill` percentage the component writes; a 16 px round `accent` thumb.
-  Hover rings the thumb in `text`, 2 px, offset 2 px.
-- The value is an `output` in `secondary`, tabular, 48 px wide.
-- **Fry dial:** the row grows to 48 px, the label is visually hidden, the input spans the label and input columns, the track is 8 px and the thumb 20 px, and the value is 13 px in `text`.
+### Inputs / Fields
+- **Sliders:** native ranges with a 44px hit area, a 6px pill track (secondary fill over hairline) and a near-white circular thumb (16px; 20px in the full tier); hover rings the thumb 2px in near-white.
+  A slider row is a 96px label, the slider, and a 44px right-aligned secondary value.
+- **Switches:** a 36 by 20 pill; off is a ground fill with a secondary border and knob, on is a near-white fill with a ground knob; 140ms.
+- **Text fields:** Room Ground fill, 1px border, 8px corners, 44px tall; layer rename uses a secondary border and turns Error Red when invalid.
+- **Segmented controls:** a ground-filled 8px tray with 4px padding; the chosen segment is raised with a 1px near-white outline.
 
-### Enable switches
-- A 52 x 44 px label cell holding a 36 x 20 px pill: 1 px `secondary` border on `ground`, a 14 px `secondary` knob with 2 px margin.
-- On: `accent` fill and border, the knob turns `ground` and slides 16 px.
-- Hover: border turns `text`.
-  Focus: a 2 px `accent` outline on the cell, inset 2 px.
-- Background, border, and knob position transition over 140 ms ease-out; reduced motion sets the duration to 0.
-- The switch and its mode-rail button share one state; flipping either moves both.
+### Color
+- **Color dot:** a 26px circle filled with the selected object's color, a 2px panel-colored ring and a 1px near-white outline.
+- **Picker:** a 168px saturation-value square and a pill hue strip with near-white cursors, a split chip of current and previous color, a hex field, and two groups of 36px circular swatches.
+- **Swatch states:** a pressed swatch takes a 2px near-white border; hover brightens it 10%.
+- **Swatch size:** swatches are 36px circles with 4px gaps in both tiers, so eight fit one row with Original.
+  This is the one deliberate exception to the 44px target; it still clears the 24px minimum of WCAG 2.5.8.
 
-### Swatches
-- A fieldset with 16 px side padding and 4 px below; a 44 px action row (Original as a toggle, Deselect) with 8 px button padding; then a four-column grid of 40 px swatches with 4 px gaps.
-- Each swatch is its OKLCH color as background, 4 px radius, a 2 px transparent border, an `aria-label` and a hidden name.
-  Hover brightens 10%; pressed turns the border `text`; focus turns the border `accent` and adds a 2 px `ground` outline inset 5 px so the ring reads on every hue.
-- The eight swatch colors (Coral, Orange, Gold, Green, Turquoise, Blue, Violet, Pink) live in `swatches.tsx` as OKLCH and are content, not shell tokens.
-
-### Mode rail
-- Centered in the bottom bar, 4 px gaps, 16 px side padding, 12 px labels.
-- Each mode is a toggle button with `aria-pressed`; pressed is `raised` with `text` and a 1 px inset `accent` outline.
-  The rail is empty until a photo is open.
+### Navigation
+- **Top bar and strip:** Panel Gray, 52px plus the safe-area inset, hairline below.
+- **Phone tabs:** equal-width tabs over a hairline; the selected tab is raised with a 2px near-white underline.
 
 ### Status line
-- The left cell of the bottom bar, 16 px from the edge, 13 px `text` at a 16 px line, `role="status"`, wrapping anywhere.
-- It speaks in the product's voice: short declarative sentences, the product in the third person, no exclamation marks.
-- The right cell is the build line: 11 px `secondary`, 12 px gaps (8 px under 1350 px), never wrapping.
-
-### Focus
-- Global: a 2 px `accent` outline inset 2 px on any `:focus-visible`.
-- Exceptions, each because the accent would vanish: the primary action (`text` ring, inset 4 px) and swatches (`ground` ring inset 5 px plus an `accent` border).
+The status voice: one plain sentence in UI type, bottom left in the full tier and in the sheet heading on phones, announced as a live status.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** make every new bar, heading, node header, range row, and button 44 px; a layer row is 64 px and the Fry dial row is 48 px.
-- **Do** add a node as a `Node` with a title-case name, a hairline below, the chevron disclosure, and range rows at 12 px with a 48 px value field; put an enable switch in the header only if the node can be turned off.
-- **Do** add a mode as a toggle button in the mode rail with `aria-pressed`, 12 px label, sharing state with the node's enable switch so both flip together.
-- **Do** take colors from the ten `:root` tokens and sizes from 13, 12, 11; take spacing from 4, 8, 12, 16.
-- **Do** mark hover with one tonal step up and press with two; mark selection with a 1 px inset `accent` outline on a `raised` fill.
-- **Do** keep the accent on the Download button, focus, selection, thumbs, and switches that are on, and nowhere else.
-- **Do** keep the status line as the page's only voice, at 13 px in `text`, readable over the fried image.
-- **Do** honor `prefers-reduced-motion` by zeroing the 140 ms transition, as the switches and chevrons already do.
+- **Do** keep every chrome mark achromatic: state is Raised Gray plus a 1px near-white outline, and focus is a 2px near-white outline.
+- **Do** give each view exactly one crunched key, with its texture at the fixed full-strength tile whatever the scene's Fry.
+- **Do** float tools over the full-bleed picture with the panel fill, a 1px hairline and a 12px corner.
+- **Do** keep one panel open at a time, opened under its own icon, and put object options in the context bar.
+- **Do** hold every touch target at 44px, on the phone too.
+- **Do** draw every icon from the 20px, 1.5-stroke family.
+- **Do** keep motion to a 140ms ease-out fade or turn, and drop it under reduced motion.
+- **Do** host the full tier's panels in the compact tier's sheet rather than inventing a second layout.
 
 ### Don't:
-- **Don't** use pure black, a shadow, a blur, glass, or a decorative gradient; the range track's hard two-stop fill is the only gradient allowed.
-- **Don't** introduce an icon font, a glyph set, or a second inline icon style; the 16 px 1.5-stroke chevron is the only icon.
-- **Don't** add a display face, a wordmark, a kicker, an eyebrow, or an uppercase heading outside the two sidebar panel headings.
-- **Don't** set text below 11 px or add a fourth type size.
-- **Don't** render an accent-colored focus ring on an accent-colored surface; use the `text` or `ground` ring the primary action and swatches use.
-- **Don't** animate anything but switch fill, switch knob, and disclosure chevron, and never at a duration other than 140 ms ease-out.
-- **Don't** give a row a radius; 4 px belongs to controls, 0 to rows that span their column.
-- **Don't** fill a range track with the accent; the fill is `secondary`, the thumb is the accent.
+- **Don't** add an accent color to the chrome; the only chromatic pixels are the user's color and Error Red on an invalid field.
+- **Don't** put a shadow, glow or blur under anything; depth is fill and hairline.
+- **Don't** apply the crunch texture to anything but the key, or put two keys in one view.
+- **Don't** set type above 13px or add a display face; hierarchy is weight and gray.
+- **Don't** show a tool whose stage has not landed, disabled or otherwise.
+- **Don't** let a notice push a panel; the notice recenters in the space the panel leaves.

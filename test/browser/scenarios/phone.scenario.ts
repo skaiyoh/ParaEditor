@@ -51,13 +51,13 @@ function phoneLayout(): unknown {
     viewport: { width: innerWidth, height: innerHeight },
     scrollWidth: document.documentElement.scrollWidth, scrollHeight: document.documentElement.scrollHeight, scrollX, scrollY,
     stage: box(stage), status: box(status), toolbar: box(toolbar),
-    buttons: Array.from(toolbar.querySelectorAll('button'), (button) => ({
+    buttons: [...toolbar.querySelectorAll('button[aria-pressed]'), ...document.querySelectorAll('.phone-strip .primary-action')].map((button) => ({
       label: button.textContent?.trim() ?? '', box: box(button), background: getComputedStyle(button).backgroundColor, texture: getComputedStyle(button).backgroundImage,
       pressed: button.getAttribute('aria-pressed'),
     })),
     key: getComputedStyle(document.documentElement).getPropertyValue('--key').trim(),
     legacyMarkUnset: getComputedStyle(document.documentElement).getPropertyValue(['--', 'accent'].join('')).trim() === '',
-    desktopAbsent: document.querySelector('[data-testid=panel-actions], [data-testid=panel-adjust], [data-testid=panel-layers]') === null,
+    desktopAbsent: document.querySelector('.floating-panel') === null,
     touchAction: getComputedStyle(stage).touchAction,
   };
 }
@@ -369,8 +369,8 @@ export const scenarios: readonly Scenario[] = [{
           box.left >= 0 && box.top >= 0 && box.right <= viewport.width && box.bottom <= viewport.height;
         t.ok(`${label}: no horizontal overflow or page scroll`, result.scrollWidth === viewport.width && result.scrollHeight === viewport.height && result.scrollX === 0 && result.scrollY === 0, result);
         t.ok(`${label}: stage spans the viewport width with room for the picture above the inspector`, stage.left === 0 && stage.width === viewport.width && stage.height >= viewport.height / 4, stage);
-        t.ok(`${label}: four toolbar buttons stay inside the viewport and are at least 44 px tall`, inside(toolbar) && buttons.length === 4 && buttons.every((button) => inside(button.box) && button.box.height >= 44), result);
-        t.equal(`${label}: modes precede Download`, buttons.map((button) => button.label), ['Motion', 'Symbols', 'Parallax', 'Download']);
+        t.ok(`${label}: three pill modes and the strip Download key stay inside the viewport and are at least 44 px tall`, inside(toolbar) && buttons.length === 4 && buttons.every((button) => inside(button.box) && button.box.height >= 44), result);
+        t.equal(`${label}: the pill holds three modes and the strip holds Download`, buttons.map((button) => button.label), ['Motion', 'Symbols', 'Parallax', 'Download']);
         t.ok(`${label}: modes are toggles and Download uses the textured key`, buttons.slice(0, 3).every((button) => button.pressed === 'true' || button.pressed === 'false') &&
           buttons[3]?.background === 'rgb(242, 242, 242)' && buttons[3]?.texture.startsWith('url(') === true && result.key.toUpperCase() === '#F2F2F2' && result.legacyMarkUnset, buttons);
         t.ok(`${label}: the status sentence is visible`, inside(status), status);
@@ -398,7 +398,7 @@ export const scenarios: readonly Scenario[] = [{
             resetAbsent: !Array.from(document.querySelectorAll('.phone-strip button')).some((button) => button.textContent === 'Reset'),
             returnVisible: button !== undefined && button.height >= 44 && button.top >= 44 && button.right <= innerWidth,
             statusVisible: status !== undefined && status.height >= 44 && status.bottom <= innerHeight,
-            stageFills: stage?.top === 44 && stage.bottom === innerHeight,
+            stageFills: stage?.top === 52 && stage.bottom === innerHeight,
           };
         });
         t.ok(`${label}: Projects presents return and status in place of hidden-photo controls`, Object.values(projects).every(Boolean), projects);
@@ -408,8 +408,8 @@ export const scenarios: readonly Scenario[] = [{
         await checkLayout(`${label} after returning`);
       };
       await page.waitFor('the sheet opens on import', z.literal(true), () => document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'true' ? true : null);
-      t.ok('Fry is visible inside the open sheet with manipulation touch handling', await page.evaluate(z.boolean(), () => {
-        const range = document.querySelector('.phone-sheet [data-testid="style-fry"]');
+      t.ok('Fry is visible on the rail with manipulation touch handling', await page.evaluate(z.boolean(), () => {
+        const range = document.querySelector('.fry-rail [data-testid="style-fry"]');
         return range !== null && range.getBoundingClientRect().height >= 44 && getComputedStyle(range).touchAction === 'manipulation';
       }));
       await checkLayout('402 ready');
@@ -426,18 +426,17 @@ export const scenarios: readonly Scenario[] = [{
         await demo.tap(.38, .585);
         return true;
       });
-      await page.waitFor('selected object swatches in the sheet', z.literal(true), () => document.querySelector('.phone-sheet [data-testid="swatches"]') === null ? null : true, { timeoutMs: 30_000 });
-      await page.evaluate(z.literal(true), revealInspectorControl, '.phone-sheet .object-node');
+      await page.waitFor('selected object swatches in the context bar', z.literal(true), () => document.querySelector('.context-bar [data-testid="swatches"]') === null ? null : true, { timeoutMs: 30_000 });
       const swatches = await page.evaluate(z.object({ count: z.number(), oneRow: z.boolean(), contained: z.boolean(), sizes: z.array(z.object({ width: z.number(), height: z.number() })) }), () => {
-        const sheet = document.querySelector('.phone-sheet');
-        if (sheet === null) throw new Error('No phone sheet.');
+        const sheet = document.querySelector('.context-bar');
+        if (sheet === null) throw new Error('No context bar.');
         const bounds = sheet.getBoundingClientRect();
         const boxes = Array.from(sheet.querySelectorAll('[data-testid="swatches"] .swatch'), (button) => button.getBoundingClientRect());
         return { count: boxes.length, oneRow: boxes.every((box) => box.top === boxes[0]?.top),
           contained: boxes.every((box) => box.left >= bounds.left && box.right <= bounds.right && box.top >= bounds.top && box.bottom <= bounds.bottom),
           sizes: boxes.map((box) => ({ width: box.width, height: box.height })) };
       });
-      t.ok('selection puts eight 40 px swatches in one row inside the sheet', swatches.count === 8 && swatches.oneRow && swatches.contained && swatches.sizes.every((size) => size.width === 40 && size.height === 40), swatches);
+      t.ok('selection puts eight 36 px swatches in the context bar second row', swatches.count === 8 && swatches.oneRow && swatches.contained && swatches.sizes.every((size) => size.width === 36 && size.height === 36), swatches);
       await checkLayout('402 selected');
       await page.screenshot('phone-402-selected');
 
@@ -464,6 +463,7 @@ export const scenarios: readonly Scenario[] = [{
         return true;
       });
       await page.click('.sheet-handle');
+      await page.click('#phone-tab-adjust');
       await page.evaluate(z.literal(true), revealInspectorControl, '.phone-sheet [aria-controls="node-parallax"]');
       await page.click('.phone-sheet [aria-controls="node-parallax"]');
       await page.click('[data-testid="parallax-debug-toggle"]');
@@ -472,7 +472,7 @@ export const scenarios: readonly Scenario[] = [{
         const panel = document.querySelector('[data-testid="parallax-debug"]');
         const frame = document.querySelector('[data-testid="parallax-debug-frame"]');
         if (!(panel instanceof HTMLElement) || !(frame instanceof HTMLCanvasElement)) return null;
-        const box = panel.getBoundingClientRect(), status = document.querySelector('.sheet-handle')?.getBoundingClientRect();
+        const box = panel.getBoundingClientRect(), status = document.querySelector('.phone-sheet')?.getBoundingClientRect();
         const pixel = frame.getContext('2d')?.getImageData(0, 0, 1, 1).data;
         return box.width >= 148 && box.width <= Math.min(300, innerWidth - 24) && box.left >= 12 && Math.abs(box.right - (innerWidth - 12)) < 1 && status !== undefined &&
           Math.abs(status.top - box.bottom - 12) < 1 && document.querySelector('[data-testid="parallax-beta"]')?.textContent === '35.00' &&
@@ -588,19 +588,18 @@ export const scenarios: readonly Scenario[] = [{
         first: document.querySelector('.sheet-inspector .node')?.getAttribute('aria-label') ?? '',
         closed: Array.from(document.querySelectorAll('.sheet-inspector .node:not([aria-label="Fry"]) .node-disclosure')).every((button) => button.getAttribute('aria-expanded') === 'false'),
       }));
-      t.equal(`${size.width}: Fry is visibly named first`, initial.first, 'Fry');
-      t.equal(`${size.width}: all nodes and Layers are present`, initial.names, ['Fry', 'Layers', 'Color', 'Actions', 'Motion', 'Parallax', 'Symbols', 'Surface', 'Palette', 'Camera']);
+      t.equal(`${size.width}: Adjust starts with Motion; Fry has its own rail`, initial.first, 'Motion');
+      t.equal(`${size.width}: all scene nodes are present in Adjust`, initial.names, ['Motion', 'Parallax', 'Symbols', 'Surface', 'Palette', 'Camera']);
       t.ok(`${size.width}: secondary groups start collapsed`, initial.closed, initial);
-      await click('[aria-controls="node-layers"]');
+      await click('[data-testid="tool-layers"]');
       await click('.phone-tools .layer-row:first-child');
       t.ok(`${size.width}: Plate deselects the object`, await page.evaluate(z.boolean(), () => !window.__noisyTest?.demo.objects().some((object) => object.selected)));
       await click('.phone-tools .layer-row:last-child .layer-select');
-      const color = await page.evaluate(z.string(), () => document.querySelector('.phone-tools .object-scope .swatch[aria-label="Green"]')?.getAttribute('aria-pressed') === 'true' ? 'Coral' : 'Green');
-      await click(`.phone-tools .object-scope .swatch[aria-label="${color}"]`);
-      t.ok(`${size.width}: the selected layer's color changes`, await page.evaluate(z.boolean(), (color) => document.querySelector(`.phone-tools .object-scope .swatch[aria-label="${color}"]`)?.getAttribute('aria-pressed') === 'true', color));
-      await click('[aria-controls="node-layers"]');
+      const color = await page.evaluate(z.string(), () => document.querySelector('.context-bar .swatch[aria-label="Green"]')?.getAttribute('aria-pressed') === 'true' ? 'Coral' : 'Green');
+      await click(`.context-bar .swatch[aria-label="${color}"]`);
+      t.ok(`${size.width}: the selected layer's color changes`, await page.evaluate(z.boolean(), (color) => document.querySelector(`.context-bar .swatch[aria-label="${color}"]`)?.getAttribute('aria-pressed') === 'true', color));
+      // Selecting the layer collapsed the sheet; Fry and swatches stay outside it.
       await changeRange('style-fry');
-      await page.click('.sheet-handle');
       await page.click('.phone-toolbar [data-testid="motion-enabled"]');
       await page.waitFor(`${size.width}: enabling Motion reopens the sheet and its export node`, z.literal(true), () =>
         document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'true' &&
@@ -650,7 +649,7 @@ export const scenarios: readonly Scenario[] = [{
             Array.from(body.querySelectorAll('*')).every((node) => getComputedStyle(node).overflowY !== 'auto'),
           noOverflow: scrollX === 0 && scrollY === 0 && document.documentElement.scrollWidth === innerWidth && document.documentElement.scrollHeight === innerHeight,
           ancestorsStill,
-          anchored: header?.top === 0 && header.bottom === 44 && toolbar !== undefined && Math.abs(toolbar.bottom - (innerHeight - 12)) < 1,
+          anchored: header?.top === 0 && header.bottom === 52 && toolbar !== undefined && sheet !== null && Math.abs(toolbar.bottom - (sheet.getBoundingClientRect().top - 4)) < 1,
           imageAbove: stage !== undefined && sheet !== null && stage.bottom <= sheet.getBoundingClientRect().top + 1 && stage.height > 200,
         };
       });
