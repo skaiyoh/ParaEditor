@@ -133,6 +133,7 @@ class Server(ThreadingHTTPServer):
 
     def process_request(self, request, address):
         request.settimeout(35)
+        request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         if not self.requests.acquire(blocking=False):
             body = b'{"error":"Analysis is busy; please try again."}'
             try:
@@ -168,13 +169,19 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(code, {"error": "The HTTP request is malformed or unsupported."})
 
     def reply(self, status, body, content_type="application/json", headers=None):
+        packing = time.perf_counter()
         if isinstance(body, dict):
             body = json.dumps(body, allow_nan=False, separators=(",", ":")).encode()
         headers = dict(headers or {})
         request_headers = getattr(self, "headers", {})
         if len(body) > 1024 and "gzip" in request_headers.get("Accept-Encoding", "") and content_type != "image/png":
-            body = gzip.compress(body, compresslevel=1, mtime=0)
+            body = gzip.compress(body, compresslevel=6, mtime=0)
             headers["Content-Encoding"] = "gzip"
+        if hasattr(self, "metrics"):
+            self.metrics.update(pack_ms=(time.perf_counter() - packing) * 1000,
+                                response_bytes=len(body), encoding=headers.get("Content-Encoding", "identity"))
+            headers["X-Request-Id"] = self.request_id
+            headers["Server-Timing"] = ", ".join(f"{k[:-3]};dur={v:.3f}" for k, v in self.metrics.items() if k.endswith("_ms"))
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -189,11 +196,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Expose-Headers", "X-Width, X-Height, X-Guide-Width, X-Guide-Height, X-Scores")
         for name, value in headers.items():
             self.send_header(name, str(value))
-        # No request bodies are retained by persistent origin connections.
-        self.send_header("Connection", "close")
-        self.close_connection = True
+        # Unread declared bytes cannot safely become the next HTTP request.
+        # Complete requests can reuse the origin connection through the proxy.
+        if not getattr(self, "body_consumed", False):
+            self.close_connection = True
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
+        sending = time.perf_counter()
         self.wfile.write(body)
+        if hasattr(self, "metrics"):
+            self.metrics.update(send_ms=(time.perf_counter() - sending) * 1000,
+                                server_ms=(time.perf_counter() - self.started) * 1000)
+            print(json.dumps({"event": "request", "id": self.request_id, "operation": self.operation,
+                              "status": status, **{k: round(v, 3) if isinstance(v, float) else v for k, v in self.metrics.items()}}), flush=True)
 
     def dimensions(self):
         try:
@@ -216,9 +232,12 @@ class Handler(BaseHTTPRequestHandler):
             raise Problem(413, "The request body is too large.")
         if self.headers.get("Content-Encoding", "identity") != "identity":
             raise Problem(400, "Compressed request bodies are not supported.")
+        started = time.perf_counter()
         result = self.rfile.read(n)
+        self.metrics.update(upload_read_ms=(time.perf_counter() - started) * 1000, upload_bytes=len(result))
         if len(result) != n:
             raise Problem(400, "The request body is incomplete.")
+        self.body_consumed = True
         return result
 
     def media(self, allowed):
@@ -226,8 +245,8 @@ class Handler(BaseHTTPRequestHandler):
             raise Problem(400, "The request Content-Type is not supported.")
 
     def client(self):
-        # The listener is loopback-only; the sole public ingress is cloudflared.
-        value = self.headers.get("CF-Connecting-IP", self.client_address[0])
+        # The loopback-only native ingress appends the connecting client to XFF.
+        value = self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[-1].strip()
         try:
             return str(ipaddress.ip_address(value))
         except ValueError:
@@ -245,10 +264,14 @@ class Handler(BaseHTTPRequestHandler):
             w, h = self.dimensions()
             with state.reserve(self.client()):
                 data = self.body()
+                decoded = time.perf_counter()
                 rgb = state.engine.decode(data, w, h)
+                self.metrics["decode_ms"] = (time.perf_counter() - decoded) * 1000
                 del data
+                queued = time.perf_counter()
                 with state.inference():
-                    depth, predictor = state.engine.create(rgb)
+                    self.metrics["queue_ms"] = (time.perf_counter() - queued) * 1000
+                    depth, predictor = state.engine.create(rgb, self.metrics)
                 session = Session(rgb, depth, predictor, w, h)
                 sid = secrets.token_urlsafe(24)
                 with state.lock:
@@ -281,9 +304,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise Problem(400, "Each tap must have an include or exclude label.")
                 if any(type(p.get(k)) not in {int, float} or not 0 <= p[k] <= 1 or not math.isfinite(p[k]) for k in ("x", "y")):
                     raise Problem(400, "Tap coordinates must be finite frame fractions from zero to one.")
+            queued = time.perf_counter()
             with state.inference(session):
+                self.metrics["queue_ms"] = (time.perf_counter() - queued) * 1000
                 state.get(sid, touch=True)
+                infer = time.perf_counter()
                 masks, scores, w, h = state.engine.taps(session.predictor, points, session.width, session.height)
+                self.metrics["infer_ms"] = (time.perf_counter() - infer) * 1000
+                self.metrics["raw_bytes"] = len(masks)
             return self.reply(200, masks, "application/octet-stream", {
                 "X-Width": w, "X-Height": h, "X-Guide-Width": w, "X-Guide-Height": h,
                 "X-Scores": ",".join(str(float(s)) for s in scores)})
@@ -298,13 +326,26 @@ class Handler(BaseHTTPRequestHandler):
             body = self.body()
             if len(body) != session.width * session.height:
                 raise Problem(400, "The mask must contain one byte per master pixel.")
+            queued = time.perf_counter()
             with state.inference(session):
+                self.metrics["queue_ms"] = (time.perf_counter() - queued) * 1000
                 state.get(sid, touch=True)
+                infer = time.perf_counter()
                 plate = state.engine.inpaint(session.rgb, body, fill[0])
+                self.metrics["infer_ms"] = (time.perf_counter() - infer) * 1000
             return self.reply(200, plate, "image/png", dims)
         raise Problem(400, "This method is not supported for the endpoint.")
 
     def handle_request(self):
+        self.started = time.perf_counter()
+        self.metrics = {}
+        self.request_id = secrets.token_hex(6)
+        # Label requests without parsing untrusted URL syntax outside the error boundary.
+        path = self.path.partition("?")[0]
+        self.operation = ("health" if path == "/v1/health" else "create" if path == "/v1/sessions"
+                          else "delete" if self.command == "DELETE" else
+                          next((op for op in ("depth", "taps", "inpaint") if path.endswith("/" + op)), "other"))
+        self.body_consumed = self.headers.get("Content-Length", "0") == "0" and not self.headers.get("Transfer-Encoding")
         try:
             self.dispatch()
         except Problem as error:

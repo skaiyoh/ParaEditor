@@ -808,30 +808,32 @@ The dev service, decoder, and memory harness pages continue to construct the loc
 
 ### Remote analysis and automatic fallback
 
-`src/analysis/remote.ts` implements the same interface over [the GPU contract](../plan/gpu-contract.md).
-Depth, the segmenter encoder and taps, and inpaint run remotely; the face model and tracker remain local.
+`src/analysis/remote.ts` adapts session/depth/plate requests from [the GPU contract](../plan/gpu-contract.md).
+The hybrid composition uses GPU depth and background plates when healthy; MI-GAN is the default remote inpaint model, with LaMa behind the server flag.
+The SAM Tiny encoder, all taps and refinement, and the face tracker run on the device.
+The app does not call the remote tap endpoint, including during warmup.
 The master is uploaded as JPEG at quality 92.
-The adapter validates response dimensions, lengths, finite normalized depth, and scores before handing products to the session.
-The embeddings callback carries a small opaque token, retained only in a WeakMap owned by the adapter; it is never sent to a local decoder or persisted.
+The adapter validates dimensions, plane lengths and finite normalized depth, and decodes the RGB plate before publishing it.
 Depth statistics use the same nearest-rank implementation as the local service.
-The depth and mask planes, decoded RGB plate, callbacks, and rehearsal status sentences remain the driver's existing interface.
-The Scene facts show `GPU · <health name>` or `on device` in an Analysis row.
+The local encoder produces real embeddings for the resident decoder; no remote embedding token is used.
+The callback interface and rehearsal status sentences remain the driver's existing interface.
+The Scene Analysis fact shows `GPU · <health name>` when GPU depth succeeded, or `on device` otherwise.
+`analysisDiagnostics()` records depth/plate routing, the device encoder/tap routing, and full HTTP session/depth/inpaint timings separately.
 
-`src/analysis/composed.ts` probes health once at boot, then again on an import after a failed probe or a failed remote operation.
-Selection belongs to one import, including its decoder and subsequent plate requests.
-An unsuccessful initial remote sequence before any product is delivered falls back to local model fetching and the local sequence.
-The composition displays `Analyzing: depth` while initial GPU requests run and buffers their phase callbacks until the first product.
-Failed initial requests therefore fetch cold device models before the local worker's session callback arms the existing depth watchdog.
-Session creation is bounded at 20 seconds, depth at 10 seconds, taps at 5 seconds, and inpaint at 30 seconds; the health probe is bounded at 5 seconds.
-The deadlines include response bodies and PNG decoding, so headers alone cannot keep a stalled request alive.
-An established session retries a failed tap or inpaint once, then returns the existing analysis error shape to the status path.
-A failed attempt invalidates cached health immediately, so the next import re-probes even if the retry succeeds or the driver's 60-second inpaint watchdog cancels the second attempt.
-Heavy cancellation aborts sequence requests without retry and settles the sequence once.
-A resident decoder keeps its import controller and session through plate failure or timeout; full cleanup deletes the session when that decoder is released, or when a new import replaces it.
-A decoder release without preceding heavy cleanup cancels only that decoder, leaving the session available for a plate.
-The driver retries failed boot model preparation on a new import; the composition re-probes health first, so a recovered GPU can bypass the failed local analysis download while still fetching the local face model.
-Remote sequences report no local heavy termination, so they add no local worker cooldown.
+`src/analysis/composed.ts` probes health at boot and again per import after a failed probe or remote operation.
+A healthy boot fetches the local encode/decode/face models; depth/inpaint models are fetched if fallback needs them.
+GPU depth runs first, followed by the local encoder on the same master and the driver's unchanged resident decoder warming.
+An initial remote failure before depth is published falls back to device depth/plate and leaves the decoder path local.
+The composition displays `Analyzing: depth` while remote requests run, buffering phase callbacks until depth succeeds so remote time and cold fallback downloads never consume the device worker watchdog.
+HTTP deadlines are 20 seconds for session creation, 10 for depth, 30 for inpaint and 5 for health; they include body reading and PNG decoding.
+Inpaint retries once and invalidates cached health on failure, so the next import re-probes even if the retry succeeds or the driver's watchdog cancels it.
+Heavy cancellation preserves an established photo's session through plate failure, timeout, queued warming and decoder retry.
+The composition's `releaseImport()` ends that lease on photo replacement; `beginImport()` calls it after the existing policy changes generation, so cancellation callbacks cannot publish stale products.
+The session stays available after a successful plate because another subject or refinement can need another plate; same-photo Reset also retains it.
+The composition reports local heavy-worker termination to MEM1 so encoder cooldown and queued-background ordering remain unchanged.
+Failed boot model preparation is retried on the next import, re-probing health before choosing the required downloads.
 With `gpu` empty, no remote request occurs and all model operations use the local service.
+
 
 ### Its dependencies
 
@@ -1389,7 +1391,7 @@ The import checker recognizes projects as a leaf.
 
 One GET /api/projects probe runs when the page's project session is created.
 All writes, loads, deletes and list refreshes wait for that probe.
-A 204 or 404 permanently disables the store for that page load, cancels pending saves and leaves an empty Projects panel whose only sentence is No project store on this server.
+A 204 or 404 permanently disables the store for that page load, cancels pending saves and leaves an empty Projects panel reporting No project store on this server.
 The local production server returns a bodyless 204 for this GET only; 404 remains supported for a hosted server whose store is not deployed yet.
 Photo imports and editing keep working without project requests after that initial probe.
 Other failures retain Not saved and permit later save/refresh attempts.
@@ -1406,7 +1408,16 @@ The store atomically rejects a scene revision that is not strictly greater than 
 HTTP 409 and 410 are terminal for that snapshot; the client preserves any newer pending snapshot and does not retry the refused one.
 A new import flushes the previous pending snapshot before replacing its renderer, and those writes finish under the previous id.
 Reset saves the reset document under the same id.
-Deletion stops autosave for that id, waits for queued writes, deletes its resources and drops its job, File and retained masks.
+Projects deletion immediately hides the named row and offers Undo for eight seconds.
+The project session owns each pending deletion and its timer, independently of panel mounting and document history.
+Refresh cannot reinsert a pending row, and closing or reopening Projects preserves its Undo opportunity.
+Undo cancels the pending deletion while retaining the existing saved assets and normal autosave ownership.
+The irreversible store DELETE runs only after the Undo window closes, freezes new writes for that id and waits for queued writes before deleting its resources and dropping its job, File and retained masks.
+Observations during a committing delete retain the newest document and masks so an HTTP refusal can restore a recoverable row without losing edits.
+Deletion failures have named feedback independent of save and list feedback.
+A missing or malformed DELETE acknowledgement is unconfirmed: the session retains local data, freezes writes and opening, and offers an idempotent deletion retry.
+Pagehide cancels pending deletion that has not dispatched DELETE and leaves a BFCache-restored session usable.
+The immediate low-level remove operation remains available for fixture cleanup; UI uses the deferred requestRemove and undoRemove operations.
 DELETE 404 is success, including a first import whose photo upload failed before creating server resources.
 The fixture keeps an in-memory tombstone for every deleted id, including an unknown id, until the server restarts; all subsequent PUTs under it return HTTP 410 without writing.
 Continued edits of the deleted scene do not recreate it.
@@ -1415,11 +1426,17 @@ There is no cross-device merging; a device starts from the loaded revision and o
 
 Thumbnails come from the renderer's frame-zero still export without selection, downsampled with a 2D canvas to a 256 px long edge.
 They are JPEGs smaller than 60,000 bytes; the session tries decreasing JPEG qualities to enforce the bound.
-Projects reuse the 64 px layer row, a 48 px thumbnail, a name, an 11 px secondary saved time and a two-click Delete confirmation lasting three seconds.
-Desktop Projects replaces the left sidebar; phone Projects fills the stage above the toolbar while hiding the entire editing sheet, including its handle.
+Projects reuse the 64 px layer row, a 48 px thumbnail, a name, an 11 px secondary saved time and a stable single-press Delete target.
+The title and local Return to editor action remain fixed across empty, preparing, saving, saved, failed and deleted states.
+Save feedback describes only the current project's checkpoint; browsing existing rows does not claim a recent save.
+Opening a project and observing unsaved edits retain its last known save timestamp; only a successful scene checkpoint advances that time.
+An empty available store offers the existing photo import and sample actions.
+Desktop Projects replaces the left sidebar; portrait Projects fills the stage, hides the editing sheet, Reset and viewer rail, and retains a visible editor status sentence.
 With a store available, the panel refreshes on opening and every 15 seconds while visible.
 
-Project opening has a guarded preparation branch using importSource's current AbortController identity and generation.
+Project opening flushes a retained pending debounce before loading, including Undo immediately followed by Open, and rechecks the latest revision after awaited work.
+Queued snapshots retain their captured preview so retrying an old project's save never exports another project's renderer.
+Project opening then has a guarded preparation branch using importSource's current AbortController identity and generation.
 It loads scene, original photo and masks, decodes a File with the original filename and checks the candidate render while preserving the current document, selection, products, analysis readiness and autosave ownership.
 A preparation failure reports its error on the existing scene without cancelling that analysis or suspending its saves.
 Only a prepared project commits a new import generation: it flushes the previous project's thumbnail with its original renderer, publishes the first look using the saved id, then installs every mask by asset id and sets the whole saved document before sceneReady can start depth analysis.

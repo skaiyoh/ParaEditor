@@ -97,11 +97,16 @@ class Engine:
             raise self.problem(400, "The photo cannot be decoded as a JPEG or PNG.")
 
     @torch.inference_mode()
-    def create(self, rgb):
+    def create(self, rgb, metrics=None):
+        metrics = metrics if metrics is not None else {}
+        started = time.perf_counter()
         h, w = rgb.shape[:2]
         resized = cv2.resize(rgb, depth_size(w, h), interpolation=cv2.INTER_CUBIC).astype(np.float32) / 255
         resized = (resized - np.array([.485, .456, .406], np.float32)) / np.array([.229, .224, .225], np.float32)
         tensor = torch.from_numpy(np.ascontiguousarray(resized.transpose(2, 0, 1)))[None].to("cuda:0")
+        torch.cuda.synchronize()
+        metrics["depth_prepare_ms"] = (time.perf_counter() - started) * 1000
+        started = time.perf_counter()
         depth = self.depth(tensor)
         depth = F.interpolate(depth[:, None], size=(h, w), mode="bilinear", align_corners=False)[0, 0]
         low, high = depth.min(), depth.max()
@@ -109,10 +114,13 @@ class Engine:
         plane = depth.cpu().numpy().astype("<f4")
         if not np.isfinite(plane).all():
             raise RuntimeError("Depth is not finite.")
+        metrics["depth_ms"] = (time.perf_counter() - started) * 1000
         # Predictor state/embeddings are session-owned; only model weights are shared.
         predictor = self.predictor_class(self.sam, max_hole_area=0, max_sprinkle_area=0)
+        started = time.perf_counter()
         predictor.set_image(rgb)
         torch.cuda.synchronize()
+        metrics["sam_encode_ms"] = (time.perf_counter() - started) * 1000
         return plane.tobytes(), predictor
 
     @torch.inference_mode()

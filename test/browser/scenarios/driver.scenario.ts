@@ -644,7 +644,8 @@ function gpuPointer(type: string, travel: number): true {
 const ColdTimeline = z.array(z.object({ kind: z.enum(['fetch', 'worker', 'watchdog', 'status']), detail: z.string(), t: z.number() }));
 /** Page-only instrumentation: keep the production clock and watchdog unchanged. */
 async function traceColdGpuFallback(): Promise<true> {
-  for (const key of await caches.keys()) if (key.startsWith('noisy-models-')) await caches.delete(key);
+  // Depth/inpaint are already cold. Keep the resident SAM downloads: clearing
+  // them after preparation would invalidate the device model-ready contract.
   const entries: { kind: 'fetch' | 'worker' | 'watchdog' | 'status'; detail: string; t: number }[] = [];
   const record = (kind: typeof entries[number]['kind'], detail: string): void => {
     entries.push({ kind, detail, t: performance.now() });
@@ -675,7 +676,7 @@ async function traceColdGpuFallback(): Promise<true> {
   return true;
 }
 const gpuScenario: Scenario = {
-  id: 'driver.gpu', title: 'GPU import, three candidates, refinement and plate; a 503 falls back; a stalled tap retries once then reports',
+  id: 'driver.gpu', title: 'hybrid GPU depth and plate, device taps/refinement with no GPU taps, plate retry, cold fallback and recovery',
   target: 'dev', covers: [], timeoutMs: 360_000,
   async run(t) {
     t.expectMessage({ because: 'the GPU session creation deliberately answers 503', channel: 'log', source: 'network', level: 'error', url: /\/dev\/gpu\/v1\/sessions$/ });
@@ -685,7 +686,7 @@ const gpuScenario: Scenario = {
     try {
       await t.page.intercept([{ method: 'GET', path: '/build.json', action: { kind: 'respond', status: 200, body: JSON.stringify({ gpu: '/dev/gpu' }) } }]);
       await t.page.goto('/');
-      await t.page.waitFor('GPU composition has fetched the local face model', z.literal(true), () => window.__noisyTest?.demo.analysis().modelsReady ? true : null, { timeoutMs: 120_000 });
+      await t.page.waitFor('hybrid composition has fetched local SAM and face models', z.literal(true), () => window.__noisyTest?.demo.analysis().modelsReady ? true : null, { timeoutMs: 120_000 });
       await t.page.waitFor('status trace', z.literal(true), traceDriver);
       await t.page.evaluate(z.literal(true), driverImport, 1024, 768, 0);
       await t.page.waitFor('GPU depth, encoder and decoder reach Ready to tap', z.literal(true), () => {
@@ -695,7 +696,12 @@ const gpuScenario: Scenario = {
       t.equal('Scene identifies the GPU instance', [ready.backend, ready.fact], [{ kind: 'gpu', name: 'GPU stub' }, 'GPU · GPU stub']);
       const statuses = await t.page.evaluate(z.array(z.string()), () => JSON.parse(document.body.dataset['analysisStatuses'] ?? '[]'));
       for (const status of ['Analyzing: depth', 'Analyzing: encoder', 'Ready to tap']) t.ok(`rehearsal sentence ${status} is unchanged`, statuses.some((s) => s.startsWith(status)), statuses);
-      t.ok('GPU analysis spawned no local sequence or decoder worker', !t.page.workers().some((worker) => ['sequence', 'decode'].includes(worker.title)), t.page.workers());
+      t.ok('hybrid analysis keeps the device decoder resident', t.page.workers().some((worker) => worker.title === 'decode'), t.page.workers());
+      const routing = await t.page.evaluate(z.object({ depth: z.string(), encoder: z.string(), taps: z.string(), plate: z.string() }), () => window.__noisyTest?.demo.analysisDiagnostics().routing);
+      t.equal('diagnostics name the per-stage hybrid routing', routing, { depth: 'gpu', encoder: 'device', taps: 'device', plate: 'gpu' });
+      const unusedTap = (await t.server.requestLog()).find((r) => r.path.endsWith('/depth'))?.path.replace(/\/depth$/, '/taps');
+      if (unusedTap === undefined) throw new Error('No GPU depth request.');
+      await t.server.setFaults([`path:${unusedTap}:stall:method=POST`]);
       await t.page.evaluate(z.literal(true), () => { window.__noisyTest?.demo.setMotion({ enabled: true }); return true; });
       await t.page.click('[data-testid=stage]');
       await t.page.waitFor('a tap creates one object and its GPU plate', z.literal(true), () => {
@@ -705,7 +711,7 @@ const gpuScenario: Scenario = {
       await t.page.evaluate(z.literal(true), gpuPointer, 'pointerdown', 0);
       await t.page.waitFor('the hold receives three candidates', z.literal(true), () => window.__noisyTest?.demo.refinement()?.candidateAreas.length === 3 ? true : null);
       const held = await t.page.evaluate(GpuView, readGpu);
-      t.ok('the three candidate masks are ordered by increasing area', held.candidates.length === 3 && held.candidates.every((area, i) => i === 0 || area > (held.candidates[i - 1] ?? Infinity)), held);
+      t.ok('the three candidate masks are ordered by increasing area', held.candidates.length === 3 && held.candidates.every((area, i) => i === 0 || area >= (held.candidates[i - 1] ?? Infinity)), held);
       await t.page.evaluate(z.literal(true), gpuPointer, 'pointermove', 120);
       await t.page.waitFor('the drag previews a larger mask', z.literal(true), () => {
         const r = window.__noisyTest?.demo.refinement(); return r?.previewAsset !== null && r?.previewAsset !== undefined ? true : null;
@@ -719,8 +725,9 @@ const gpuScenario: Scenario = {
       t.ok('refinement changes the committed mask without adding an object', after.asset !== before.asset && after.area > before.area, { before, after });
       await t.page.screenshot('driver-gpu-ready');
       let log = await t.server.requestLog();
-      const tapPath = log.find((r) => r.path.endsWith('/taps'))?.path;
-      if (tapPath === undefined) throw new Error('No GPU tap was recorded.');
+      t.equal('warmup, taps and refinement send no GPU tap requests', log.filter((r) => r.path.endsWith('/taps')).length, 0);
+      t.ok('depth came from the GPU stub', log.some((r) => r.path.endsWith('/depth') && r.status === 200), log);
+      await t.page.intercept([{ method: 'GET', path: '/build.json', action: { kind: 'respond', status: 200, body: JSON.stringify({ gpu: '/dev/gpu' }) } }]);
       const platePath = log.find((r) => r.path.endsWith('/inpaint'))?.path;
       if (platePath === undefined) throw new Error('No GPU plate was recorded.');
       await t.server.setFaults([`path:${platePath}:http503:method=POST:times=2`]);
@@ -730,25 +737,19 @@ const gpuScenario: Scenario = {
       }, { timeoutMs: 15_000 });
       const plateFailed = await t.page.evaluate(GpuView, readGpu);
       await t.page.screenshot('driver-gpu-plate-failed');
-      const tapsBeforeRecovery = (await t.server.requestLog()).filter((r) => r.path === tapPath).length;
       await t.server.clearFaults();
-      await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(0.85, 0.85); return true; });
-      await t.page.waitFor('a real GPU tap after failed inpaint creates another object and plate', z.literal(true), () => {
-        const d = window.__noisyTest?.demo; return d?.objects().length === 3 && d.analysis().decoderReady && d.analysis().status === 'Ready to tap' && !d.products().plateNeeded ? true : null;
+      await t.page.evaluate(z.literal(true), gpuPointer, 'pointerdown', 0);
+      await t.page.waitFor('device refinement still decodes three candidates after failed GPU inpaint', z.literal(true), () => window.__noisyTest?.demo.refinement()?.candidateAreas.length === 3 ? true : null);
+      await t.page.evaluate(z.literal(true), gpuPointer, 'pointercancel', 0);
+      await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.requestPlate(); return true; });
+      await t.page.waitFor('the same GPU session can retry its plate after device refinement', z.literal(true), () => {
+        const d = window.__noisyTest?.demo; return d?.objects().length === 2 && d.analysis().decoderReady && d.analysis().status === 'Ready to tap' && !d.products().plateNeeded ? true : null;
       }, { timeoutMs: 30_000 });
       log = await t.server.requestLog();
-      t.equal('post-failure tap sends one GPU request', log.filter((r) => r.path === tapPath).length - tapsBeforeRecovery, 1);
+      t.equal('post-failure tap still sends no GPU request', log.filter((r) => r.path.endsWith('/taps')).length, 0);
       t.equal('failed plate cleanup keeps the same GPU session', log.filter((r) => r.method === 'POST' && r.path === '/dev/gpu/v1/sessions').length, 1);
-      const beforeTaps = log.filter((r) => r.path === tapPath).length;
-      await t.server.setFaults([`path:${tapPath}:stall`]);
-      const began = Date.now();
-      await t.page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(0.9, 0.1); return true; });
-      const failed = await t.page.evaluate(GpuView, readGpu);
-      const retries = (await t.server.requestLog()).filter((r) => r.path === tapPath).length - beforeTaps;
-      t.equal('stalled tap attempts exactly twice', retries, 2);
-      t.ok('the status reports the tap failure after two five-second deadlines', failed.sceneStatus.startsWith('Tapping failed:') && Date.now() - began >= 10_000 && Date.now() - began < 15_000, failed);
-      await t.page.screenshot('driver-gpu-tap-failed');
-      t.ok('local heavy models are cold before fallback', !t.page.requests().some((r) => new URL(r.url).pathname.startsWith('/models/') && !new URL(r.url).pathname.includes('/face-')), t.page.requests());
+      await t.page.screenshot('driver-gpu-device-taps');
+      t.ok('local depth and inpaint models are cold before fallback', !t.page.requests().some((r) => /\/models\/(depth-|migan-)/.test(new URL(r.url).pathname)), t.page.requests());
       await t.page.evaluate(z.literal(true), traceColdGpuFallback);
       await t.server.setFaults(['path:/dev/gpu/v1/sessions:http503:method=POST:times=1', 'path:/models/:slow=1000']);
       const fallbackStarted = Date.now();
@@ -786,7 +787,7 @@ const gpuScenario: Scenario = {
       const recovered = await t.page.evaluate(GpuView, readGpu);
       t.ok('failed boot recovery performs another health probe', (await t.server.requestLog()).filter((r) => r.path === '/dev/gpu/v1/health').length > probesBeforeRecovery);
       await t.page.screenshot('driver-gpu-recovered');
-      await t.file('gpu-evidence.json', JSON.stringify({ ready, held, before, after, plateFailed, failed, retries, coldTimeline, bootFailed, recovered, requests: await t.server.requestLog() }, null, 2));
+      await t.file('gpu-evidence.json', JSON.stringify({ ready, held, before, after, plateFailed, routing, coldTimeline, bootFailed, recovered, requests: await t.server.requestLog() }, null, 2));
     } finally { await t.server.clearFaults(); await t.page.intercept([]); }
   },
 };

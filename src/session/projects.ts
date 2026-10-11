@@ -5,14 +5,31 @@ import * as store from '../projects/store.ts';
 import type { Project } from '../projects/store.ts';
 
 export type SaveState = 'saving' | 'saved' | 'failed';
+export const PROJECT_UNDO_MS = 8000;
+export type ProjectDeletion = {
+  readonly id: SceneId;
+  readonly name: string;
+  readonly phase: 'undoable' | 'deleting' | 'deleted' | 'restored' | 'failed' | 'unconfirmed';
+};
 export type ProjectsState = {
   readonly projects: readonly Project[];
   readonly current: SceneId | null;
   readonly state: SaveState | 'absent';
   readonly states: ReadonlyMap<SceneId, SaveState>;
   readonly thumbnails: ReadonlySet<SceneId>;
+  readonly deletions: readonly ProjectDeletion[];
+  readonly error: 'list' | 'open' | null;
 };
-type Snapshot = { readonly document: SceneDocument; readonly masks: ReadonlyMap<AssetId, Plane<'u8'>>; readonly revision: number };
+type Snapshot = {
+  readonly document: SceneDocument; readonly masks: ReadonlyMap<AssetId, Plane<'u8'>>; readonly revision: number;
+  readonly preview: Promise<Blob> | null;
+};
+type PendingDeletion = {
+  readonly id: SceneId; readonly name: string;
+  phase: ProjectDeletion['phase'];
+  timer: ReturnType<typeof setTimeout> | null;
+  dispatched: boolean;
+};
 type SavingProject = {
   readonly photo: File;
   readonly uploaded: Set<AssetId>;
@@ -52,24 +69,30 @@ export function createProjectSession(exportStill: () => Promise<Blob>) {
   const states = new Map<SceneId, SaveState>();
   const thumbnails = new Set<SceneId>();
   const listeners = new Set<(state: ProjectsState) => void>();
+  const deletions = new Map<SceneId, PendingDeletion>();
+  const removing = new Map<SceneId, Promise<boolean>>();
   let listed: readonly Project[] = [];
   let current: SceneId | null = null;
   let importing = false;
-  let panelFailed = false;
+  let panelError: ProjectsState['error'] = null;
   let refreshEpoch = 0;
   let absent = false;
   let probing = true;
   const snapshot = (): ProjectsState => {
-    if (absent) return { projects: [], current: null, state: 'absent', states: new Map(), thumbnails: new Set() };
+    if (absent) return { projects: [], current: null, state: 'absent', states: new Map(), thumbnails: new Set(), deletions: [], error: null };
     const merged = new Map(listed.map((project) => [project.id, project]));
     for (const [id, project] of locals) merged.set(id, project);
+    for (const [id, deletion] of deletions) if (deletion.phase === 'undoable' || deletion.phase === 'deleting') merged.delete(id);
     return { projects: [...merged.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id)),
-      current, state: panelFailed ? 'failed' : importing ? 'saving' : current === null ? 'saved' : states.get(current) ?? 'saved', states: new Map(states),
-      thumbnails: new Set([...listed.map((project) => project.id), ...thumbnails]) };
+      current, state: panelError !== null ? 'failed' : importing ? 'saving' : current === null ? 'saved' : states.get(current) ?? 'saved', states: new Map(states),
+      thumbnails: new Set([...listed.map((project) => project.id), ...thumbnails]),
+      deletions: [...deletions.values()].map(({ id, name, phase }) => ({ id, name, phase })), error: panelError };
   };
   const publish = (): void => { for (const listener of listeners) listener(snapshot()); };
-  const record = (doc: SceneDocument): void => {
-    locals.set(doc.id, { id: doc.id, name: doc.title, updatedAt: new Date().toISOString(), thumbnail: `/api/projects/${doc.id}/thumbnail` });
+  const record = (doc: SceneDocument, saved = false): void => {
+    const updatedAt = saved ? new Date().toISOString()
+      : locals.get(doc.id)?.updatedAt ?? listed.find((project) => project.id === doc.id)?.updatedAt ?? doc.updatedAt;
+    locals.set(doc.id, { id: doc.id, name: doc.title, updatedAt, thumbnail: `/api/projects/${doc.id}/thumbnail` });
   };
   async function refresh(): Promise<void> {
     const initial = probing;
@@ -80,24 +103,39 @@ export function createProjectSession(exportStill: () => Promise<Blob>) {
       if (epoch !== refreshEpoch) return;
       listed = projects;
       for (const project of projects) if (states.get(project.id) === 'saved') locals.delete(project.id);
-      panelFailed = false;
-    } catch { if (epoch === refreshEpoch) panelFailed = true; }
+      panelError = null;
+    } catch { if (epoch === refreshEpoch) panelError = 'list'; }
     if (epoch === refreshEpoch) publish();
   }
   const fail = (id: SceneId): void => { states.set(id, 'failed'); publish(); };
 
-  function enqueue(id: SceneId, job: SavingProject): void {
-    if (job.timer !== null) clearTimeout(job.timer);
-    job.timer = null;
-    const saved = job.pending;
-    if (saved === null || job.deleted || absent) return;
-    job.pending = null;
-    // Invoke the exporter before importSource can replace the renderer's scene.
-    // Encoding can finish later: the PNG pixels already belong to this snapshot.
+  function capture(saved: Snapshot): Snapshot {
+    if (saved.preview !== null) return saved;
     let preview: Promise<Blob>;
     try { preview = thumbnail(exportStill()); }
     catch (error) { preview = Promise.reject(error); }
     void preview.catch(() => undefined);
+    return { ...saved, preview };
+  }
+
+  function enqueue(id: SceneId, job: SavingProject): void {
+    if (job.timer !== null) clearTimeout(job.timer);
+    job.timer = null;
+    const pending = job.pending;
+    if (pending === null || job.deleted || absent) return;
+    // A failed old job must never export the next project's renderer.
+    if (pending.preview === null && current !== id) { fail(id); return; }
+    const saved = capture(pending);
+    if (job.latest === pending) job.latest = saved;
+    job.pending = null;
+    void saved.preview?.catch(() => {
+      // A current project can recapture a transiently failed thumbnail on
+      // retry. A non-current project still cannot use another renderer.
+      if (job.latest.preview === saved.preview) job.latest = { ...job.latest, preview: null };
+      if (job.pending?.preview === saved.preview) job.pending = { ...job.pending, preview: null };
+    });
+    // Invoke the exporter before importSource can replace the renderer's scene.
+    // Encoding can finish later: the PNG pixels already belong to this snapshot.
     job.chain = job.chain.then(async () => {
       if (!await probe) return;
       try {
@@ -106,12 +144,14 @@ export function createProjectSession(exportStill: () => Promise<Blob>) {
           if (job.uploaded.has(asset)) continue;
           await store.saveMask(id, asset, mask); job.uploaded.add(asset);
         }
-        await store.saveThumbnail(id, await preview);
+        if (saved.preview === null) throw new Error('The project preview was not captured.');
+        await store.saveThumbnail(id, await saved.preview);
         thumbnails.add(id);
         await store.saveScene(saved.document, saved.masks, saved.revision);
-        record(saved.document);
+        record(saved.document, true);
         if (job.latest.revision === saved.revision) states.set(id, 'saved');
-        panelFailed = false;
+        if (job.pending !== null && job.pending.revision <= saved.revision) job.pending = null;
+        panelError = null;
         publish();
       } catch (error) {
         // Retain the latest snapshot for the next edit, flush or retry.
@@ -126,13 +166,13 @@ export function createProjectSession(exportStill: () => Promise<Blob>) {
     if (absent) return;
     const restored = restoredRevision !== null;
     current = document.id;
-    const latest = { document, masks: referenced(document, masks), revision: restoredRevision ?? 0 };
+    const latest: Snapshot = { document, masks: referenced(document, masks), revision: restoredRevision ?? 0, preview: null };
     const job: SavingProject = { photo, photoSaved: restored, uploaded: new Set(restored ? latest.masks.keys() : []), latest,
       pending: restored ? null : latest, timer: null, chain: Promise.resolve(), deleted: false };
     jobs.set(document.id, job);
     states.set(document.id, restored ? 'saved' : 'saving');
     if (restored) thumbnails.add(document.id);
-    record(document); panelFailed = false;
+    record(document); panelError = null;
     if (!restored) {
       job.chain = (async () => {
         if (!await probe) return;
@@ -148,23 +188,29 @@ export function createProjectSession(exportStill: () => Promise<Blob>) {
   function observe(document: SceneDocument, masks: ReadonlyMap<AssetId, Plane<'u8'>>): void {
     if (absent) return;
     const job = jobs.get(document.id);
-    if (current !== document.id || job === undefined || job.deleted) return;
+    if (current !== document.id || job === undefined) return;
     const planes = referenced(document, masks);
     const changed = job.latest.document !== document || planes.size !== job.latest.masks.size || [...planes].some(([asset, mask]) => job.latest.masks.get(asset) !== mask);
     if (!changed) return;
-    job.latest = { document, masks: planes, revision: job.latest.revision + 1 };
+    job.latest = { document, masks: planes, revision: job.latest.revision + 1, preview: null };
     job.pending = job.latest;
     record(document);
     // A failed project stays Not saved until a whole save succeeds.
     if (states.get(document.id) !== 'failed') states.set(document.id, 'saving');
     if (job.timer !== null) clearTimeout(job.timer);
-    job.timer = setTimeout(() => enqueue(document.id, job), 1500);
+    // Deletion freezes writes, while retaining edits for a failed DELETE.
+    job.timer = job.deleted ? null : setTimeout(() => enqueue(document.id, job), 1500);
     publish();
   }
   function suspend(): void {
     if (current !== null) {
       const id = current, job = jobs.get(id);
       if (job !== undefined) {
+        if (job.deleted && job.pending !== null) {
+          const saved = capture(job.pending);
+          if (job.latest === job.pending) job.latest = saved;
+          job.pending = saved;
+        }
         enqueue(id, job);
         void job.chain.then(() => {
           if (current !== id && job.pending === null && jobs.get(id) === job) jobs.delete(id);
@@ -174,28 +220,92 @@ export function createProjectSession(exportStill: () => Promise<Blob>) {
     current = null; importing = true;
     publish();
   }
-  async function remove(id: SceneId): Promise<boolean> {
-    if (!await probe) return false;
+  function clearDeletionTimer(deletion: PendingDeletion): void {
+    if (deletion.timer !== null) clearTimeout(deletion.timer);
+    deletion.timer = null;
+  }
+  function release(id: SceneId): void {
+    ++refreshEpoch;
+    listed = listed.filter((project) => project.id !== id);
+    locals.delete(id); states.delete(id); thumbnails.delete(id); jobs.delete(id);
+    if (current === id) current = null;
+  }
+  async function commitRemoval(id: SceneId, deletion: PendingDeletion | undefined): Promise<boolean> {
+    const active = (): boolean => deletion === undefined || (deletions.get(id) === deletion && deletion.phase === 'deleting');
+    if (!await probe || !active()) return false;
     const job = jobs.get(id);
     if (job !== undefined) {
-      job.deleted = true; job.pending = null;
+      job.deleted = true;
       if (job.timer !== null) clearTimeout(job.timer);
       job.timer = null;
       await job.chain;
     }
-    try {
-      await store.deleteProject(id);
-      ++refreshEpoch;
-      listed = listed.filter((project) => project.id !== id);
-      locals.delete(id); states.delete(id); thumbnails.delete(id);
-      jobs.delete(id);
-      if (current === id) current = null;
-      panelFailed = false; publish(); return true;
-    } catch {
+    if (!active()) {
       if (job !== undefined) job.deleted = false;
-      panelFailed = true; fail(id); return false;
+      return false;
+    }
+    try {
+      if (deletion !== undefined) deletion.dispatched = true;
+      await store.deleteProject(id);
+      release(id);
+      if (deletion !== undefined) deletion.phase = 'deleted';
+      publish(); return true;
+    } catch (error) {
+      // An HTTP refusal is recoverable. A missing/corrupt acknowledgement may
+      // already have tombstoned the id: retain data without resuming writes.
+      const recoverable = error instanceof store.ProjectRequestError;
+      if (job !== undefined) job.deleted = !recoverable;
+      if (deletion !== undefined) deletion.phase = recoverable ? 'failed' : 'unconfirmed';
+      else {
+        const project = locals.get(id) ?? listed.find((project) => project.id === id);
+        if (project !== undefined) deletions.set(id, { id, name: project.name, phase: recoverable ? 'failed' : 'unconfirmed', timer: null, dispatched: true });
+      }
+      publish(); return false;
     }
   }
+  function remove(id: SceneId): Promise<boolean> {
+    const running = removing.get(id);
+    if (running !== undefined) return running;
+    const deletion = deletions.get(id);
+    if (deletion !== undefined) { clearDeletionTimer(deletion); deletion.phase = 'deleting'; }
+    const operation = commitRemoval(id, deletion).finally(() => removing.delete(id));
+    removing.set(id, operation);
+    return operation;
+  }
+  function requestRemove(id: SceneId): boolean {
+    if (absent || removing.has(id)) return false;
+    const previous = deletions.get(id);
+    if (previous?.phase === 'undoable') return false;
+    if (previous?.phase === 'unconfirmed') { void remove(id); publish(); return true; }
+    const project = locals.get(id) ?? listed.find((project) => project.id === id);
+    if (project === undefined) return false;
+    const deletion: PendingDeletion = { id, name: project.name, phase: 'undoable', timer: null, dispatched: false };
+    deletion.timer = setTimeout(() => {
+      if (deletions.get(id) !== deletion || deletion.phase !== 'undoable') return;
+      void remove(id); publish();
+    }, PROJECT_UNDO_MS);
+    deletions.set(id, deletion); publish(); return true;
+  }
+  function undoRemove(id: SceneId): boolean {
+    const deletion = deletions.get(id);
+    if (deletion?.phase !== 'undoable') return false;
+    clearDeletionTimer(deletion); deletion.phase = 'restored'; publish(); return true;
+  }
+  function cancelPendingRemovals(): void {
+    for (const deletion of deletions.values()) {
+      if (deletion.dispatched || (deletion.phase !== 'undoable' && deletion.phase !== 'deleting')) continue;
+      clearDeletionTimer(deletion); deletion.phase = 'restored';
+      const job = jobs.get(deletion.id);
+      if (job !== undefined) {
+        job.deleted = false;
+        if (job.pending !== null && job.timer === null) job.timer = setTimeout(() => enqueue(deletion.id, job), 1500);
+      }
+    }
+    publish();
+  }
+  // Panel unmounts do not own these timers. Navigation cancels undispatched
+  // deletion, and a BFCache return can continue using this same session.
+  if (typeof window !== 'undefined') window.addEventListener('pagehide', cancelPendingRemovals);
   // Boot and every operation share this one probe. A 204 or 404 disables the store.
   const probe = store.probeProjects().then((result) => {
     probing = false;
@@ -206,25 +316,52 @@ export function createProjectSession(exportStill: () => Promise<Blob>) {
         job.pending = null; job.deleted = true;
       }
       jobs.clear(); locals.clear(); states.clear(); thumbnails.clear(); listed = [];
+      for (const deletion of deletions.values()) clearDeletionTimer(deletion);
+      deletions.clear();
     } else listed = result.projects;
     publish();
     return result.kind !== 'absent';
   }, () => {
-    probing = false; panelFailed = true; publish();
+    probing = false; panelError = 'list'; publish();
     return true;
   });
   return {
-    snapshot, refresh, begin, observe, suspend, remove,
+    snapshot, refresh, begin, observe, suspend, remove, requestRemove, undoRemove, cancelPendingRemovals,
+    dismissDeletion(id: SceneId): void {
+      const deletion = deletions.get(id);
+      if (deletion?.phase === 'deleted' || deletion?.phase === 'restored') { deletions.delete(id); publish(); }
+    },
     diagnostics: () => ({ retainedJobs: jobs.size, pendingSaves: [...jobs.values()].filter((job) => job.pending !== null).length }),
     subscribe(listener: (state: ProjectsState) => void): () => void { listeners.add(listener); return () => listeners.delete(listener); },
     async load(id: SceneId, signal: AbortSignal) {
       if (!await probe) throw new Error('No project store on this server');
-      const job = jobs.get(id);
-      if (job !== undefined) await job.chain;
-      signal.throwIfAborted();
-      return store.loadProject(id, signal);
+      const assertOpen = (): void => {
+        const deletion = deletions.get(id);
+        if (deletion?.phase === 'undoable' || deletion?.phase === 'deleting' || deletion?.phase === 'unconfirmed' || jobs.get(id)?.deleted) throw new Error('This project is being deleted.');
+      };
+      for (;;) {
+        signal.throwIfAborted();
+        assertOpen();
+        const job = jobs.get(id);
+        if (job === undefined) {
+          const loaded = await store.loadProject(id, signal);
+          assertOpen();
+          return loaded;
+        }
+        // Undo followed immediately by Open must include the pending debounce.
+        enqueue(id, job);
+        await job.chain;
+        signal.throwIfAborted();
+        assertOpen();
+        if (states.get(id) === 'failed') throw new Error('The latest project changes could not be saved. Try again.');
+        if (job.pending !== null) continue;
+        const revision = job.latest.revision;
+        const loaded = await store.loadProject(id, signal);
+        assertOpen();
+        if (job.pending === null && job.latest.revision === revision) return loaded;
+      }
     },
-    openFailed(): void { importing = false; panelFailed = true; publish(); },
+    openFailed(): void { importing = false; panelError = 'open'; publish(); },
   };
 }
 

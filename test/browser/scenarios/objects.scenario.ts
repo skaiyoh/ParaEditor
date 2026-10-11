@@ -374,6 +374,19 @@ async function layerPixels(): Promise<unknown> {
 const LayerPixels = z.object({ screen: z.array(z.number()), undimmed: z.array(z.number()), exported: z.array(z.number()),
   exportMatches: z.boolean(), overlayRestored: z.boolean(), plateLabel: z.number().nullable(), plate: z.array(z.number()).nullable() });
 
+/** Reveal moved inspector controls without scrolling the editor's clipped ancestors. */
+function revealLayerControl(selector: string): true {
+  const control = document.querySelector(selector);
+  if (!(control instanceof HTMLElement)) throw new Error(`Missing layer control: ${selector}`);
+  const body = control.closest('.phone-tools, .inspector .node-stack, .scene-sidebar .layer-list');
+  if (body instanceof HTMLElement) {
+    const box = control.getBoundingClientRect(), bounds = body.getBoundingClientRect();
+    if (box.top < bounds.top + 8) body.scrollTop += box.top - bounds.top - 8;
+    else if (box.bottom > bounds.bottom - 8) body.scrollTop += box.bottom - bounds.bottom + 8;
+  }
+  return true;
+}
+
 export const scenarios: readonly Scenario[] = [
   {
     id: 'objects.layers', title: 'Layer names, visibility, deletion and history on desktop and phone', target: 'dev', covers: ['LAY1'], timeoutMs: 600_000,
@@ -394,11 +407,43 @@ export const scenarios: readonly Scenario[] = [
         const ids = await page.evaluate(z.array(z.string()).length(2), () => window.__noisyTest?.demo.objects().map((object) => object.id));
         const first = `[data-object-id="${ids[0]}"]`, second = `[data-object-id="${ids[1]}"]`;
         const button = (row: string, action: string): string => `${row} [data-testid="layer-${action}"]`;
-        await page.click(`${first} .layer-select`);
+        const ancestorScrolls: number[][] = [];
+        const clickControl = async (selector: string): Promise<void> => {
+          await page.evaluate(z.literal(true), revealLayerControl, selector);
+          await page.click(selector);
+          if (phone) ancestorScrolls.push(await page.evaluate(z.array(z.number()), () => {
+            const values = [scrollX, scrollY];
+            let ancestor = document.querySelector('.phone-tools')?.parentElement;
+            while (ancestor !== null && ancestor !== undefined) {
+              values.push(ancestor.scrollLeft, ancestor.scrollTop); ancestor = ancestor.parentElement;
+            }
+            return values;
+          }));
+        };
+        // Layers is a closed secondary node in the shared portrait inspector.
+        if (phone) await clickControl('[aria-controls="node-layers"]');
+        await clickControl(`${first} .layer-select`);
+        const targets = await page.evaluate(z.object({ selects: z.array(z.object({ width: z.number(), height: z.number() })),
+          icons: z.array(z.object({ width: z.number(), height: z.number() })), opacity: z.string(), hover: z.boolean() }), (selector) => {
+          const row = document.querySelector(selector);
+          const size = (element: Element) => {
+            const { width, height } = element.getBoundingClientRect(); return { width, height };
+          };
+          const actions = row?.querySelector('.layer-actions');
+          if (actions === undefined || actions === null) throw new Error('Missing row actions.');
+          if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+          return { selects: [...document.querySelectorAll('.layer-select')].map(size),
+            icons: [...actions.querySelectorAll('button')].map(size), opacity: getComputedStyle(actions).opacity,
+            hover: row?.matches(':hover') ?? false };
+        }, first);
+        t.ok(`${frame}: every layer select target has usable size`, targets.selects.length === 2 &&
+          targets.selects.every(({ width, height }) => width >= 44 && height >= 64), targets.selects);
+        t.ok(`${frame}: row icons have size and appear on pointer hover`, targets.icons.length === 2 &&
+          targets.icons.every(({ width, height }) => width >= 24 && height >= 24) && targets.opacity === '1' && targets.hover, targets);
         t.equal(`${frame}: action ids distinguish row and inspector placements`, await page.evaluate(z.array(z.number()), () =>
           ['layer-hide', 'layer-delete', 'object-hide', 'object-delete'].map((id) => document.querySelectorAll(`[data-testid="${id}"]`).length)), [2, 2, 1, 1]);
         const beginRename = async (): Promise<void> => {
-          if (phone) await page.click('[data-testid="layer-rename"]');
+          if (phone) await clickControl('[data-testid="layer-rename"]');
           else await page.evaluate(z.literal(true), (selector) => {
             document.querySelector(selector)?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); return true;
           }, `${first} .layer-select`);
@@ -422,7 +467,7 @@ export const scenarios: readonly Scenario[] = [
           document.querySelector('[data-testid="layer-name-input"]')?.getAttribute('aria-invalid') === 'true' && window.__noisyTest?.demo.objects()[0]?.name === 'First disc'), true);
         await page.press('Escape');
         await beginRename(); await page.press('Backspace'); await page.type('[data-testid="layer-name-input"]', 'Red disc');
-        await page.click(`${second} .layer-select`);
+        await clickControl(`${second} .layer-select`);
         t.equal(`${frame}: blur commits the name`, await page.evaluate(z.string(), () => window.__noisyTest?.demo.objects()[0]?.name), 'Red disc');
         const before = await page.evaluate(LayerPixels, layerPixels);
         // Observe the real Preparing sentence even when inpaint completes between driver polls.
@@ -433,7 +478,7 @@ export const scenarios: readonly Scenario[] = [
           });
           observer.observe(document.body, { childList: true, subtree: true, characterData: true }); return true;
         });
-        await page.click(button(second, 'hide'));
+        await clickControl(button(second, 'hide'));
         await page.waitFor('hidden layer plate prepared', z.literal(true), () => {
           const demo = window.__noisyTest?.demo;
           return demo?.objects()[1]?.hidden && demo.products().plateSize !== null && !demo.products().plateNeeded &&
@@ -444,31 +489,41 @@ export const scenarios: readonly Scenario[] = [
           hidden.undimmed.some((value, i) => value !== before.undimmed[i]), hidden);
         t.equal(`${frame}: Preparing appeared then cleared`, await page.evaluate(z.boolean(), () => document.body.dataset['layersPreparing'] === 'yes'), true);
         t.ok(`${frame}: hidden PNG matches undimmed screen and restores selection overlay`, hidden.exportMatches && hidden.overlayRestored, hidden);
-        await page.click('[data-testid="object-hide"]');
+        await clickControl('[data-testid="object-hide"]');
         const shown = await page.evaluate(LayerPixels, layerPixels);
         t.equal(`${frame}: Show restores the center pixel`, shown.undimmed, before.undimmed);
-        await page.click(button(second, 'hide'));
-        await page.click(`${first} .layer-select`);
-        if (phone) await page.evaluate(z.literal(true), () => { document.querySelector('.layer-list')?.scrollIntoView({ block: 'nearest' }); return true; });
+        await clickControl(button(second, 'hide'));
+        await clickControl(`${first} .layer-select`);
         // Focus exposes the same icons as hover, also keeping keyboard actions discoverable.
+        await page.evaluate(z.literal(true), revealLayerControl, button(first, 'hide'));
         await page.evaluate(z.literal(true), (selector) => {
-          const node = document.querySelector(selector); if (node instanceof HTMLButtonElement) node.focus(); return true;
+          const node = document.querySelector(selector); if (node instanceof HTMLButtonElement) node.focus({ preventScroll: true }); return true;
         }, button(first, 'hide'));
         await page.screenshot(phone ? 'layers-phone-402' : 'layers-1440');
         const maskBefore = await page.evaluate(z.string(), () => JSON.stringify([...(window.__noisyTest?.demo.projectMasks() ?? [])].sort((a, b) => a.asset.localeCompare(b.asset))));
-        await page.click(phone ? '[data-testid="object-delete"]' : button(first, 'delete'));
+        await clickControl(phone ? '[data-testid="object-delete"]' : button(first, 'delete'));
         const deleted = await page.evaluate(z.object({ rows: z.number(), selected: z.boolean(), swatches: z.boolean(), masks: z.number() }), () => ({
           rows: document.querySelectorAll('.layer-row[data-object-id]').length,
           selected: window.__noisyTest?.demo.objects().some((object) => object.selected) ?? true,
           swatches: document.querySelector('[data-testid="swatches"]') !== null, masks: window.__noisyTest?.demo.products().masks,
         }));
         t.equal(`${frame}: delete removes row, selects scene and retains history masks`, deleted, { rows: 1, selected: false, swatches: false, masks: 2 });
-        await page.click('[data-testid="history-undo"]'); await page.click('[data-testid="history-undo"]');
+        await clickControl('[data-testid="history-undo"]'); await clickControl('[data-testid="history-undo"]');
         t.equal(`${frame}: undo twice restores first and shows second`, await page.evaluate(z.array(z.object({ name: z.string(), hidden: z.boolean() })), () =>
           window.__noisyTest?.demo.objects().map(({ name, hidden }) => ({ name, hidden }))), [{ name: 'Red disc', hidden: false }, { name: 'Object 2', hidden: false }]);
         t.equal(`${frame}: undo restores exact mask bytes`, await page.evaluate(z.string(), () => JSON.stringify([...(window.__noisyTest?.demo.projectMasks() ?? [])].sort((a, b) => a.asset.localeCompare(b.asset)))), maskBefore);
-        await page.click('[data-testid="history-redo"]');
+        await clickControl('[data-testid="history-redo"]');
         t.equal(`${frame}: redo hides second`, await page.evaluate(z.boolean(), () => window.__noisyTest?.demo.objects()[1]?.hidden), true);
+        if (phone) {
+          await clickControl(button(first, 'delete'));
+          t.equal('phone: the layer row delete removes the first object', await page.evaluate(z.array(z.string()), () =>
+            window.__noisyTest?.demo.objects().map(({ id }) => id)), [ids[1]]);
+          await clickControl('[data-testid="history-undo"]');
+          t.equal('phone: Undo restores the layer row deletion', await page.evaluate(z.array(z.string()), () =>
+            window.__noisyTest?.demo.objects().map(({ id }) => id)), ids);
+          t.ok('phone: ancestors stay at zero after every layer and object action', ancestorScrolls.length > 0 &&
+            ancestorScrolls.every((values) => values.every((value) => value === 0)), ancestorScrolls);
+        }
         if (!phone) {
           await page.evaluate(z.literal(true), () => {
             const range = document.querySelector('[data-testid="style-fry"]');

@@ -1,6 +1,7 @@
 """Focused lifecycle, resource-bound and malformed-input regression checks."""
 from contextlib import closing
 import http.client
+import gzip
 import json
 import threading
 import time
@@ -227,7 +228,35 @@ class HTTPTests(unittest.TestCase):
                 self.assertEqual(self.request("/v1/sessions/sample/taps", json.dumps({"points": [point]}), {"Content-Type": "application/json"}), 400)
 
     def test_photo_size_rejected_without_waiting_for_body(self):
-        self.assertEqual(self.request("/v1/sessions", b"", {"Content-Type": "image/png", "X-Width": "2", "X-Height": "2", "Content-Length": str(server.MAX_BODY + 1)}), 413)
+        with closing(http.client.HTTPConnection(*self.http.server_address, timeout=2)) as client:
+            started = time.monotonic()
+            client.request("POST", "/v1/sessions", b"", {"Content-Type": "image/png", "X-Width": "2", "X-Height": "2", "Content-Length": str(server.MAX_BODY + 1)})
+            response = client.getresponse()
+            self.assertEqual(response.status, 413)
+            self.assertIn("error", json.loads(response.read()))
+            self.assertLess(time.monotonic() - started, 1)
+            client.request("DELETE", "/v1/sessions/sample")
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read()), {"ok": True})
+
+    def test_complete_requests_reuse_socket_and_gzip_preserves_planes(self):
+        plane = bytes(range(256)) * 100
+        self.state.sessions["sample"].depth = plane
+        with closing(http.client.HTTPConnection(*self.http.server_address, timeout=2)) as client:
+            client.request("GET", "/v1/sessions/sample/depth", headers={"Accept-Encoding": "gzip"})
+            sock = client.sock
+            response = client.getresponse()
+            self.assertEqual(response.getheader("Content-Encoding"), "gzip")
+            wire = response.read()
+            self.assertEqual(gzip.decompress(wire), plane)
+            self.assertLess(len(wire), len(plane))
+            self.assertIn("pack;dur=", response.getheader("Server-Timing"))
+            client.request("DELETE", "/v1/sessions/sample")
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            self.assertIs(client.sock, sock)
 
     def test_content_length_requires_ascii_digits(self):
         self.assertEqual(self.request("/v1/sessions", b"", {"Content-Type": "image/png", "X-Width": "2", "X-Height": "2", "Content-Length": "\u00b2"}), 400)

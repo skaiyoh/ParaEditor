@@ -24,6 +24,6 @@ export function composeAnalysis(win: Window): void {
       spawnFaceTracker: () => new Worker(NOISY_WORKER_URLS.face, { type: 'module', name: 'face' }),
       loader: openModelLoader({ lock, origin: win.location.origin, caches, fetch: (url, init) => win.fetch(url, init), subtle: crypto.subtle, locks: webLocks(navigator.locks), clock }),
     });
-    return createComposedAnalysisService({ local, gpu, encoderModel: lock.ops.encode.model, fetch: win.fetch.bind(win), encode: encodeMaster, decode: decodePlate, changed, waiting });
+    return createComposedAnalysisService({ local, gpu, now: () => clock.now(), fetch: win.fetch.bind(win), encode: encodeMaster, decode: decodePlate, changed, waiting });
   });
 }

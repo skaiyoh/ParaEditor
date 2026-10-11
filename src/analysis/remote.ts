@@ -1,28 +1,31 @@
 // HTTP adapter for plan/gpu-contract.md. Browser media operations are injected
 // so the transport, cancellation and deadlines run against real HTTP in node.
 import { z } from '../core/zod.ts';
-import type { ModelId, SceneId } from '../core/ids.ts';
+import type { SceneId } from '../core/ids.ts';
 import type { Rgb8, Size } from '../core/raster.ts';
-import { err, ok } from '../core/result.ts';
 import { rank, nearestRank } from '../core/percentile.ts';
-import type { AnalysisError, DecodeResult, HeavyStage, SamEmbeddings } from './protocol.ts';
-import type { AnalysisService, Decoder, SequenceListener } from './service.ts';
+import type { AnalysisError, HeavyStage } from './protocol.ts';
+import type { AnalysisService, SequenceListener } from './service.ts';
 
 const SizeSchema = z.object({ width: z.int().min(1).max(2048), height: z.int().min(1).max(2048) });
-const ScoreSchema = z.string().trim().regex(/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/).pipe(z.coerce.number<string>().finite());
 const SessionSchema = z.object({ id: z.string().min(1).max(256), master: SizeSchema, expiresAt: z.union([z.string().datetime({ offset: true }), z.number().finite()]) });
 export const HealthSchema = z.object({ ok: z.literal(true), gpu: z.string().min(1).max(256), models: z.object({ depth: z.string().min(1), segment: z.string().min(1), inpaint: z.string().min(1) }) });
 export const REMOTE_TIMEOUTS = { health: 5_000, sessions: 20_000, depth: 10_000, taps: 5_000, inpaint: 30_000 };
 export type RemoteTimeouts = typeof REMOTE_TIMEOUTS;
 export type RemoteDeps = {
   readonly base: string;
-  readonly local: AnalysisService;
-  readonly encoderModel: ModelId;
   readonly fetch: typeof fetch;
   readonly encode: (bitmap: ImageBitmap) => Promise<Blob>;
   readonly decode: (png: Blob) => Promise<Rgb8>;
   readonly timeouts?: RemoteTimeouts;
+  readonly now?: () => number;
   readonly failed: () => void;
+};
+export type RemoteAnalysisService = Pick<AnalysisService, 'runSequence' | 'cancelHeavy'> & {
+  /** End the photo's plate lease, aborting requests and deleting its session. */
+  readonly releaseSession: () => void;
+  readonly alive: { readonly heavy: boolean };
+  readonly timings: Readonly<Partial<Record<'session' | 'depth' | 'inpaint', number>>>;
 };
 
 export async function encodeMaster(bitmap: ImageBitmap): Promise<Blob> {
@@ -48,8 +51,8 @@ export async function decodePlate(png: Blob): Promise<Rgb8> {
 }
 
 function sameSize(a: Size, b: Size): boolean { return a.width === b.width && a.height === b.height; }
-function dimensions(response: Response, guide = false): Size {
-  return SizeSchema.parse({ width: Number(response.headers.get(guide ? 'X-Guide-Width' : 'X-Width')), height: Number(response.headers.get(guide ? 'X-Guide-Height' : 'X-Height')) });
+function dimensions(response: Response): Size {
+  return SizeSchema.parse({ width: Number(response.headers.get('X-Width')), height: Number(response.headers.get('X-Height')) });
 }
 function media(response: Response, expected: string): void {
   if (response.headers.get('Content-Type')?.split(';')[0]?.trim() !== expected) throw new Error(`The GPU returned an invalid ${expected} response.`);
@@ -85,19 +88,25 @@ export async function remoteRequest<T>(fetcher: typeof fetch, url: string, init:
 type Import = { readonly scene: SceneId; readonly controller: AbortController; readonly id: string; readonly size: Size };
 type Sequence = { readonly on: SequenceListener; readonly signal: AbortSignal; readonly controller: AbortController; readonly abort: () => void; stage: HeavyStage['kind'] };
 
-export function createRemoteAnalysisService(deps: RemoteDeps): AnalysisService {
+export function createRemoteAnalysisService(deps: RemoteDeps): RemoteAnalysisService {
   const base = deps.base.replace(/\/$/, '');
   const timeouts = deps.timeouts ?? REMOTE_TIMEOUTS;
   let current: Import | null = null;
   let importController: AbortController | null = null;
   let sequence: Sequence | null = null;
-  let decoder: Decoder | null = null;
-  let retireOnRelease = false;
-  let embeddingsPublished = false;
-  const tokens = new WeakMap<SamEmbeddings, Import>();
-  const request = <T>(path: string, init: RequestInit, signal: AbortSignal, timeout: number, read: (r: Response) => Promise<T>) => remoteRequest(deps.fetch, `${base}/v1${path}`, init, signal, timeout, read);
+  let timings: Partial<Record<'session' | 'depth' | 'inpaint', number>> = {};
+  const now = deps.now ?? (() => performance.now());
+  const request = async <T>(path: string, init: RequestInit, signal: AbortSignal, timeout: number, read: (r: Response) => Promise<T>): Promise<T> => {
+    const started = now();
+    const value = await remoteRequest(deps.fetch, `${base}/v1${path}`, init, signal, timeout, read);
+    if (!signal.aborted) {
+      if (path === '/sessions') timings.session = now() - started;
+      else if (path.endsWith('/depth')) timings.depth = now() - started;
+      else if (path.endsWith('/inpaint')) timings.inpaint = now() - started;
+    }
+    return value;
+  };
   const discard = (): void => {
-    retireOnRelease = false; embeddingsPublished = false; decoder?.release();
     importController?.abort(); importController = null;
     const old = current; current = null;
     if (old !== null) void request(`/sessions/${encodeURIComponent(old.id)}`, { method: 'DELETE' }, new AbortController().signal, timeouts.health, async () => undefined).catch(() => undefined);
@@ -116,7 +125,7 @@ export function createRemoteAnalysisService(deps: RemoteDeps): AnalysisService {
       deps.failed(); return run();
     }
   };
-  const service: AnalysisService = {
+  const service: RemoteAnalysisService = {
     runSequence(scene, stages, input, on, signal) {
       if (sequence !== null) service.cancelHeavy();
       // A terminal callback is allowed to start its own sequence.
@@ -124,9 +133,7 @@ export function createRemoteAnalysisService(deps: RemoteDeps): AnalysisService {
       if (current !== null && (current.scene !== scene || stages[0].kind === 'depth')) discard();
       importController ??= new AbortController();
       const controller = importController;
-      // A restored scene may queue its plate before MEM1 opens the decoder.
-      // Its published embeddings already own this session through that wait.
-      retireOnRelease = stages[0].kind === 'inpaint' && embeddingsPublished;
+      if (stages[0].kind === 'depth') timings = {};
       const slot: Sequence = { on, signal, controller: new AbortController(), stage: stages[0].kind, abort: () => service.cancelHeavy() };
       const combined = AbortSignal.any([signal, controller.signal, slot.controller.signal]);
       sequence = slot; signal.addEventListener('abort', slot.abort, { once: true });
@@ -181,14 +188,7 @@ export function createRemoteAnalysisService(deps: RemoteDeps): AnalysisService {
               on.onDepth({ format: 'f32', size: imported.size, data }, { p10: p10.value, median: median.value, p90: p90.value });
               break;
             }
-            case 'encode': {
-              const token: SamEmbeddings = { model: deps.encoderModel, tensors: [
-                { name: 'remote-session', dims: [1], data: new Float32Array(1) },
-                { name: 'remote-guide', dims: [1], data: new Float32Array(1) },
-                { name: 'remote-master', dims: [1], data: new Float32Array(1) },
-              ] };
-              tokens.set(token, imported); embeddingsPublished = true; on.onEmbeddings(token); break;
-            }
+            case 'encode': throw new Error('The hybrid encoder runs on device.');
             case 'inpaint': {
               if (!sameSize(stage.hole.size, imported.size) || stage.hole.data.length !== imported.size.width * imported.size.height) throw new Error('The inpaint hole does not match the master.');
               const image = await retry(combined, () => request(`${path}/inpaint`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Width': String(imported.size.width), 'X-Height': String(imported.size.height) }, body: new Uint8Array(stage.hole.data) }, combined, timeouts.inpaint, async (r) => {
@@ -212,51 +212,15 @@ export function createRemoteAnalysisService(deps: RemoteDeps): AnalysisService {
     cancelHeavy() {
       const slot = sequence;
       slot?.controller.abort();
-      // Plate cleanup also preserves the session while its decoder is queued.
-      // A new import replaces it; an adopted decoder retires it on release.
-      if (decoder === null && !retireOnRelease) discard(); else retireOnRelease = true;
       if (slot !== null) finish(slot, { kind: 'cancelled' });
     },
-    openDecoder(input) {
-      retireOnRelease = false;
-      decoder?.release();
-      const imported = tokens.get(input.embeddings);
-      if (imported === undefined || imported !== current || imported.scene !== input.scene) throw new Error('The GPU session is unavailable.');
-      const controller = new AbortController();
-      const handle: Decoder = {
-        scene: input.scene,
-        async decode(points, signal) {
-          const combined = AbortSignal.any([signal, controller.signal, imported.controller.signal]);
-          if (combined.aborted) return err({ kind: 'cancelled' });
-          try {
-            if (points.length > 8) throw new Error('The GPU accepts at most eight tap points.');
-            const result = await retry(combined, () => request(`/sessions/${encodeURIComponent(imported.id)}/taps`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points: points.map(({ at, label }) => ({ ...at, label })) }) }, combined, timeouts.taps, async (r): Promise<DecodeResult> => {
-              media(r, 'application/octet-stream');
-              const size = dimensions(r, true);
-              if (!sameSize(size, input.guide.size)) throw new Error('The GPU mask dimensions do not match the guide.');
-              const scores = z.tuple([ScoreSchema, ScoreSchema, ScoreSchema]).parse(r.headers.get('X-Scores')?.split(','));
-              const bytes = new Uint8Array(await r.arrayBuffer()), count = size.width * size.height;
-              if (bytes.length !== count * 3) throw new Error('The GPU masks have the wrong length.');
-              const candidate = (i: number, score: number) => ({ mask: { format: 'u8', size, data: bytes.slice(i * count, (i + 1) * count) }, score } satisfies DecodeResult['candidates'][number]);
-              return { candidates: [candidate(0, scores[0]), candidate(1, scores[1]), candidate(2, scores[2])] };
-            }));
-            return combined.aborted ? err({ kind: 'cancelled' }) : ok(result);
-          } catch (error) {
-            if (!combined.aborted) deps.failed();
-            return err(describe(error, 'decode', combined));
-          }
-        },
-        release() {
-          controller.abort();
-          if (decoder === handle) { decoder = null; if (retireOnRelease) discard(); }
-        },
-      };
-      decoder = handle; return handle;
+    releaseSession() {
+      // Delete before delivering cancellation: its callback may start a new photo.
+      discard();
+      service.cancelHeavy();
     },
-    fetchModels: (ops, signal, progress) => ops.includes('face') ? deps.local.fetchModels(['face'], signal, progress) : Promise.resolve(signal.aborted ? err({ kind: 'cancelled' }) : ok(undefined)),
-    openFaceTracker: () => deps.local.openFaceTracker(),
-    get alive() { return { heavy: sequence !== null, decoder: decoder !== null }; },
-    get lastHeavyTermination() { return null; },
+    get alive() { return { heavy: sequence !== null }; },
+    get timings() { return { ...timings }; },
   };
   return service;
 }

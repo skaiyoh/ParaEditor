@@ -221,7 +221,7 @@ const controls = [
   { field: 'clipping', label: 'Clipping', max: 1, min: 0, step: 0.01, group: 'Camera' },
 ] satisfies readonly { field: keyof Style; label: string; max: number; min: number; step: number; group: string }[];
 
-type NodeName = 'Fry' | 'Motion' | 'Symbols' | 'Surface' | 'Palette' | 'Camera';
+type NodeName = 'Fry' | 'Layers' | 'Motion' | 'Symbols' | 'Surface' | 'Palette' | 'Camera';
 
 const surfaceControls = [
   { field: 'relief', label: 'Relief' },
@@ -237,32 +237,41 @@ function editSymbols(session: DemoSession, patch: Partial<SceneDocument['symbols
   if (result.kind === 'applied') session.setDocument(result.doc);
 }
 
-function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, debug, onDebug }: {
+function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, debug, onDebug, portrait = false }: {
   readonly scene: DemoScene | null; readonly session: DemoSession;
   readonly parallaxEnabled: boolean; readonly modelsReady: boolean; readonly onParallax: () => void;
   readonly debug: boolean; readonly onDebug: () => void;
+  readonly portrait?: boolean;
 }) {
   const [expanded, setExpanded] = useState<Readonly<Record<NodeName, boolean>>>({
-    Fry: true, Motion: false, Symbols: false, Surface: false, Palette: true, Camera: true,
+    Fry: true, Layers: false, Motion: false, Symbols: false, Surface: false, Palette: false, Camera: false,
   });
+  const motionEnabled = scene?.doc.motion.enabled ?? false;
+  useLayoutEffect(() => {
+    if (portrait && motionEnabled) setExpanded((current) => current.Motion ? current : { ...current, Motion: true });
+  }, [portrait, motionEnabled, scene?.doc.id]);
   const selected = scene?.doc.objects.find((object) => object.id === scene.selected);
   const expand = (name: NodeName): void => setExpanded((current) => ({ ...current, [name]: !current[name] }));
-  return <aside class="inspector" aria-label="Inspector">
-    <h2 class="scope-heading">Scene</h2>
+  return <aside class={portrait ? 'sheet-inspector' : 'inspector'} aria-label="Inspector">
+    {!portrait && <h2 class="scope-heading">Inspector</h2>}
     {scene !== null && <div class="node-stack">
-      {selected !== undefined && <ObjectInspector key={selected.id} object={selected} session={session} />}
-      <Node name="Fry" expanded={expanded.Fry} onExpand={() => expand('Fry')}>
+      <Node name="Fry" expanded={expanded.Fry} onExpand={() => expand('Fry')} toggle={<span class="node-scope">Scene</span>}>
         {controls.filter((control) => control.group === 'Fry').map(({ field, label, min, max, step }) =>
           <RangeControl key={field} id={`style-${field}`} label={label} min={min} max={max} step={step} value={scene.doc.style[field]} onInput={(value) => session.setFry(value)} />)}
       </Node>
+      {portrait && <Node name="Layers" expanded={expanded.Layers} onExpand={() => expand('Layers')}>
+        <Layers scene={scene} session={session} />
+      </Node>}
+      <section class="scene-nodes" aria-label="Scene effects">
+      <h3 class="scope-heading">Scene effects</h3>
       <Node name="Motion" expanded={expanded.Motion} onExpand={() => expand('Motion')}
-        toggle={<EnableSwitch name="Motion" checked={scene.doc.motion.enabled} onChange={(enabled) => session.setMotion({ enabled })} />}>
+        toggle={<EnableSwitch name="Motion" portrait={portrait} checked={scene.doc.motion.enabled} onChange={(enabled) => session.setMotion({ enabled })} />}>
         <MotionControls motion={scene.doc.motion} session={session} />
         {scene.doc.motion.enabled && <MotionExport session={session} />}
       </Node>
       <ParallaxNode enabled={parallaxEnabled} available={modelsReady} onParallax={onParallax} debug={debug} onDebug={onDebug} />
       <Node name="Symbols" expanded={expanded.Symbols} onExpand={() => expand('Symbols')}
-        toggle={<EnableSwitch name="Symbols" checked={scene.doc.symbols.enabled} onChange={(enabled) => editSymbols(session, { enabled })} />}>
+        toggle={<EnableSwitch name="Symbols" portrait={portrait} checked={scene.doc.symbols.enabled} onChange={(enabled) => editSymbols(session, { enabled })} />}>
         <RangeControl id="symbols-cellSize" label="Cell size" min={6} max={48} step={2} value={scene.doc.symbols.cellSize} onInput={(cellSize) => editSymbols(session, { cellSize })} />
         <RangeControl id="symbols-amount" label="Amount" min={0} max={1} step={0.01} value={scene.doc.symbols.amount} onInput={(amount) => editSymbols(session, { amount })} />
       </Node>
@@ -286,6 +295,11 @@ function Inspector({ scene, session, parallaxEnabled, modelsReady, onParallax, d
         {controls.filter((control) => control.group === name).map(({ field, label, min, max, step }) =>
           <RangeControl key={field} id={`style-${field}`} label={label} min={min} max={max} step={step} value={scene.doc.style[field]} onInput={(value) => session.setStyle({ [field]: value })} />)}
       </Node>)}
+      </section>
+      {selected !== undefined && <section class="object-scope" aria-label="Selected object">
+        <h3 class="scope-heading">Selected object</h3>
+        <ObjectInspector key={selected.id} object={selected} session={session} />
+      </section>}
     </div>}
   </aside>;
 }
@@ -340,14 +354,16 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
   };
   const busy = state.status === 'Importing…';
   const tapUnavailable = state.analysisStatus.startsWith('Tapping ');
-  const status = bootError ?? (state.parallaxEnabled && state.analysisStatus === 'preparing' ? `${state.status} - preparing` :
+  const touch = navigator.maxTouchPoints > 0;
+  const status = bootError ?? (phone && scene === null && state.status === 'Drop a photo' && !state.analysisStatus.startsWith('Models unavailable:') ?
+    touch ? 'Take a photo or try a sample' : 'Open a photo or try a sample'
+    : state.parallaxEnabled && state.analysisStatus === 'preparing' ? `${state.status} - preparing` :
     tapUnavailable || state.status === 'Ready' || state.status === 'Drop a photo' ? state.analysisStatus : state.status);
   const preparing = state.exportProgress ?? (scene === null ? null : tapUnavailable ? state.analysisStatus
     : state.analysisStatus.startsWith('Analyzing: ') ? state.analysisStatus.replace('Analyzing: ', 'Preparing: ')
     : state.analysisStatus === 'preparing' ? 'Preparing: background'
     : state.analysisStatus === 'Warming decoder' ? state.analysisStatus
     : !analysis.decoderReady ? state.analysisStatus : null);
-  const touch = navigator.maxTouchPoints > 0;
   const toggleMotion = (): void => { if (scene !== null) session.setMotion({ enabled: !scene.doc.motion.enabled }); };
   const toggleSymbols = (): void => { if (scene !== null) editSymbols(session, { enabled: !scene.doc.symbols.enabled }); };
   const toggleParallax = (): void => { void session.setParallax(!state.parallaxEnabled); };
@@ -357,9 +373,12 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
     onDrop={(event) => { event.preventDefault(); open(event.dataTransfer?.files[0]); }}>
     <PhoneFrame state={state} session={session} status={status} preparing={preparing} busy={busy} touch={touch} modelsReady={analysis.modelsReady}
       projectsOpen={projectsOpen} onProjects={() => setProjectsOpen((open) => !open)}
-      projects={<Projects session={session} onOpened={() => setProjectsOpen(false)} />}
+      projects={(onImport) => <Projects session={session} onOpened={() => setProjectsOpen(false)} onImport={onImport} onSample={sample}
+        importLabel={touch ? 'Take a photo' : 'Open'} status={status} />}
+      inspector={<Inspector scene={scene} session={session} portrait parallaxEnabled={state.parallaxEnabled} modelsReady={analysis.modelsReady}
+        onParallax={toggleParallax} debug={debug} onDebug={toggleDebug} />}
       onOpen={open} onSample={sample} onDownload={() => { void download(); }}
-      onMotion={toggleMotion} onSymbols={toggleSymbols} onParallax={toggleParallax} debug={debug} onDebug={toggleDebug}>
+      onMotion={toggleMotion} onSymbols={toggleSymbols} onParallax={toggleParallax}>
       <Stage scene={scene} session={session} onFit={setFit} refinementSize={state.refinementSize} contained visible={!projectsOpen} />
       {debug && scene !== null && !projectsOpen && <ParallaxDebug session={session} />}
     </PhoneFrame>
@@ -386,16 +405,16 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
       </header>
       <div class="workspace">
         <aside class="scene-sidebar" aria-label="Layers and scene">
-          {projectsOpen ? <Projects session={session} onOpened={() => setProjectsOpen(false)} /> : <>
+          {projectsOpen ? <Projects session={session} onOpened={() => setProjectsOpen(false)} onImport={() => input.current?.click()} onSample={sample} /> : <>
           <Layers scene={scene} session={session} />
           <section class="scene-info" aria-labelledby="scene-heading">
             <h2 id="scene-heading" class="panel-heading">Scene</h2>
             <dl class="scene-facts">
-              <div><dt>Analysis</dt><dd data-testid="analysis-backend">{analysis.backend.kind === 'gpu' ? `GPU · ${analysis.backend.name}` : 'on device'}</dd></div>
+              <div><dt>Analysis</dt><dd data-testid="analysis-backend">{scene === null ? 'No photo' : analysis.backend.kind === 'gpu' ? `GPU · ${analysis.backend.name}` : 'on device'}</dd></div>
               <div><dt>Master</dt><dd>{scene === null ? 'No photo' : `${scene.master.width} × ${scene.master.height}`}</dd></div>
-              <div><dt>Depth</dt><dd class={scene?.depth != null ? 'fact-ready' : ''}>{scene?.depth != null ? 'Ready' : 'Pending'}<span class="fact-time">{elapsed('depth')}</span></dd></div>
-              <div><dt>Encoder</dt><dd class={analysis.decoderReady ? 'fact-ready' : ''}>{analysis.decoderReady ? 'Ready' : 'Pending'}<span class="fact-time">{elapsed('encode')}</span></dd></div>
-              <div><dt>Plate</dt><dd class={scene?.plate != null ? 'fact-ready' : ''}>{scene?.plate != null ? 'Ready' : 'Not prepared'}<span class="fact-time">{elapsed('inpaint')}</span></dd></div>
+              <div><dt>Depth</dt><dd class={scene?.depth != null ? 'fact-ready' : ''}>{scene === null ? 'No photo' : scene.depth != null ? 'Ready' : 'Pending'}<span class="fact-time">{elapsed('depth')}</span></dd></div>
+              <div><dt>Encoder</dt><dd class={analysis.decoderReady ? 'fact-ready' : ''}>{scene === null ? 'No photo' : analysis.decoderReady ? 'Ready' : 'Pending'}<span class="fact-time">{elapsed('encode')}</span></dd></div>
+              <div><dt>Plate</dt><dd class={scene?.plate != null ? 'fact-ready' : ''}>{scene === null ? 'No photo' : scene.plate != null ? 'Ready' : 'Not prepared'}<span class="fact-time">{elapsed('inpaint')}</span></dd></div>
             </dl>
             <span class="local-models">{session.analysis.modelCount()} models local</span>
           </section>

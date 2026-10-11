@@ -129,7 +129,7 @@ export function createAnalysisDriver(host: Host) {
 export function createDriver(host: Host, { clock, diag, service, threads, prepareGuide, models }: {
   readonly clock: Pick<ReturnType<typeof createBrowserClock>, 'now'>;
   readonly diag: Pick<ReturnType<typeof createDiagnostics<AnalysisEvent>>, 'log' | 'events'>;
-  readonly service: (AnalysisService & { readonly backend?: AnalysisBackend }) | null;
+  readonly service: (AnalysisService & { readonly backend?: AnalysisBackend; readonly routing?: ComposedAnalysisService['routing']; readonly remoteTimings?: ComposedAnalysisService['remoteTimings']; readonly releaseImport?: () => void }) | null;
   readonly threads: number;
   readonly prepareGuide: typeof makeGuide;
   readonly models: { readonly kind: 'ready'; readonly ids: readonly ModelId[]; readonly depth: ModelId; readonly inpaint: ModelId; readonly count: number }
@@ -351,8 +351,8 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
       return service.openFaceTracker();
     },
     lastTiming: (): { stage: string; ms: number } | null => lastTiming,
-    diagnostics: () => ({ threads, generation: policy.generation, timings: { ...timings }, events: [...diag.events] }),
-    beginImport(): number { dispatch({ kind: 'import' }); if (!policy.modelsReady) loadModels(); return policy.generation; },
+    diagnostics: () => ({ threads, generation: policy.generation, routing: service?.routing ?? { depth: 'device', encoder: 'device', taps: 'device', plate: 'device' }, remoteTimings: service?.remoteTimings ?? {}, timings: { ...timings }, events: [...diag.events] }),
+    beginImport(): number { dispatch({ kind: 'import' }); service?.releaseImport?.(); if (!policy.modelsReady) loadModels(); return policy.generation; },
     importFailed(generation: number): void {
       if (!valid(generation)) return;
       dispatch({ kind: 'import-failed', generation }); settle('The photo could not be imported.');

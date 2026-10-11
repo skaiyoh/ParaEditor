@@ -569,8 +569,20 @@ const exportScenario: Scenario = {
       for (const [name, passed] of Object.entries(lifecycle)) t.ok(`export lifecycle: ${name}`, passed);
       await page.emulate({ width: 402, height: 874, mobile: true, deviceScaleFactor: 1, colorScheme: 'dark' });
       await page.evaluate(z.null(), () => { window.__noisyTest?.demo.setMotion({ enabled: true }); return null; });
+      await page.waitFor('enabling Motion opens the phone sheet and Motion node', z.literal(true), () => {
+        const disclosure = document.querySelector('.phone-sheet [aria-controls="node-motion"]');
+        return document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'true' &&
+          disclosure?.getAttribute('aria-expanded') === 'true' && disclosure.getBoundingClientRect().height > 0 ? true : null;
+      });
       await page.waitFor('phone Motion export row', z.literal(true), () => {
         const row = document.querySelector('.phone-sheet .motion-export'); return row !== null && row.getBoundingClientRect().height > 0 ? true : null;
+      });
+      await page.evaluate(z.null(), () => {
+        const row = document.querySelector('.phone-sheet .motion-export'), body = row?.closest('.phone-tools');
+        if (!(row instanceof HTMLElement) || !(body instanceof HTMLElement)) throw new Error('Missing phone Motion export controls.');
+        const box = row.getBoundingClientRect(), bounds = body.getBoundingClientRect();
+        if (box.bottom > bounds.bottom - 8) body.scrollTop += box.bottom - bounds.bottom + 8;
+        return null;
       });
       const phone = await page.evaluate(z.boolean(), () => {
         const buttons = [...document.querySelectorAll('.phone-sheet .motion-export button')];

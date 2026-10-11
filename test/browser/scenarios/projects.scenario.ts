@@ -36,7 +36,7 @@ async function savedChecks(): Promise<unknown> {
 
 export const scenarios: readonly Scenario[] = [{
   id: 'projects.autosave', title: 'Autosave, Projects on both frames, exact restore, edits, recoverable failure and deletion',
-  target: 'dev', covers: ['PS1a'], timeoutMs: 360_000,
+  target: 'dev', covers: ['PS1a', 'POL1b-4'], timeoutMs: 360_000,
   async run(t) {
     const { page } = t;
     const clickAction = async (label: string): Promise<void> => {
@@ -97,8 +97,32 @@ export const scenarios: readonly Scenario[] = [{
       await clearFixture();
       const initial = await page.evaluate(listing, async () => (await fetch('/api/projects')).json());
       t.equal('fixture cleared before autosave checks', initial.projects, []);
+      t.equal('no-photo analysis facts describe the empty editor', await page.evaluate(z.record(z.string(), z.string()), () =>
+        Object.fromEntries(Array.from(document.querySelectorAll('.scene-facts > div'), (row) =>
+          [row.querySelector('dt')?.textContent ?? '', row.querySelector('dd')?.textContent ?? '']))),
+      { Analysis: 'No photo', Master: 'No photo', Depth: 'No photo', Encoder: 'No photo', Plate: 'No photo' });
+      await page.screenshot('scene-empty-1440');
+      await page.click('[data-testid="projects-toggle"]');
+      await page.waitFor('empty Projects feedback', z.literal(true), () => document.querySelector('[data-testid="projects-state"]')?.textContent === 'No projects yet' ? true : null);
+      t.ok('Projects has a fixed title, local return and import/sample actions with no false saved claim', await page.evaluate(z.boolean(), () =>
+        document.querySelector('.projects-heading h2')?.textContent === 'Projects' && document.querySelector('[data-testid="projects-return"]')?.textContent === 'Return to editor' &&
+        document.querySelector('.projects-empty')?.textContent?.includes('Open a photo') === true && document.querySelector('[data-testid="projects-panel"]')?.textContent?.includes('Saved') === false));
+      await page.screenshot('projects-empty-1440');
+      await page.click('[data-testid="projects-return"]');
       await clickAction('Try a sample');
+      await page.click('[data-testid="projects-toggle"]');
+      await page.waitFor('current import is visibly Saving', z.literal(true), () => document.querySelector('[data-testid="projects-state"]')?.textContent === 'Saving current photo…' ? true : null);
+      await page.screenshot('projects-saving-1440');
+      await page.click('[data-testid="projects-return"]');
       await page.waitFor('Ready to tap', z.literal(true), () => window.__noisyTest?.demo.analysis().decoderReady ? true : null, { timeoutMs: 180_000 });
+      const backendFact = await page.evaluate(z.object({ fact: z.string(), expected: z.string() }), () => {
+        const backend = window.__noisyTest?.demo.analysis().backend;
+        if (backend === undefined) throw new Error('No analysis backend after import.');
+        return { fact: document.querySelector('[data-testid="analysis-backend"]')?.textContent ?? '',
+          expected: backend.kind === 'gpu' ? `GPU · ${backend.name}` : 'on device' };
+      });
+      t.equal('an imported photo identifies the actual analysis backend', backendFact.fact, backendFact.expected);
+      await page.screenshot('scene-analysis-1440');
       await page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(.38, .585); return true; });
       await page.waitFor('object swatches', z.literal(true), () => document.querySelector('[data-testid="swatches"]') === null ? null : true);
       await page.click('[data-testid="swatches"] button[aria-label="Green"]');
@@ -118,7 +142,7 @@ export const scenarios: readonly Scenario[] = [{
       });
       await page.click('[data-testid="projects-toggle"]');
       await page.waitFor('latest scene saved', z.literal(true), () => window.__noisyTest?.demo.projects().state === 'saved' &&
-        document.querySelector('[data-testid="projects-state"]')?.textContent === 'Saved just now' ? true : null, { timeoutMs: 30_000 });
+        document.querySelector('[data-testid="projects-state"]')?.textContent === 'Current photo saved.' ? true : null, { timeoutMs: 30_000 });
       const saved = await page.evaluate(savedSchema, savedChecks);
       const docJson = await page.evaluate(z.string(), () => JSON.stringify(window.__noisyTest?.demo.document()));
       t.equal('scene is the whole page document', saved.json, docJson);
@@ -139,6 +163,7 @@ export const scenarios: readonly Scenario[] = [{
         return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0 ? true : null;
       });
       await page.screenshot('projects-panel-1440');
+      t.equal('the title stays Projects after saving', await page.evaluate(z.string(), () => document.querySelector('.projects-heading h2')?.textContent ?? ''), 'Projects');
       const scrollRows = await addFixtureRows(12);
       await page.click('[data-testid="projects-toggle"]');
       await page.click('[data-testid="projects-toggle"]');
@@ -146,9 +171,9 @@ export const scenarios: readonly Scenario[] = [{
       await page.evaluate(z.literal(true), () => { Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 }); return true; });
       await page.emulate({ width: 402, height: 874, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await page.waitFor('phone Projects panel', z.literal(true), () => document.querySelector('.phone-stage [data-testid="projects-panel"]') === null ? null : true);
-      const phone = await page.evaluate(z.object({ fits: z.boolean(), stageFilled: z.boolean(), toggleBeforeCapture: z.boolean(), controlsHidden: z.boolean(), sheetHidden: z.boolean(), aboveToolbar: z.boolean(), lastTappable: z.boolean(), scrolled: z.boolean() }), () => {
+      const phone = await page.evaluate(z.object({ fits: z.boolean(), stageFilled: z.boolean(), toggleBeforeCapture: z.boolean(), controlsHidden: z.boolean(), sheetHidden: z.boolean(), railAbsent: z.boolean(), lastTappable: z.boolean(), scrolled: z.boolean() }), () => {
         const panel = document.querySelector('[data-testid="projects-panel"]')?.getBoundingClientRect(), stage = document.querySelector('.phone-stage')?.getBoundingClientRect();
-        const sheet = document.querySelector('.phone-sheet'), toolbar = document.querySelector('.phone-toolbar')?.getBoundingClientRect();
+        const sheet = document.querySelector('.phone-sheet');
         const list = document.querySelector('.projects-list');
         if (!(list instanceof HTMLElement)) throw new Error('No scrolling project list.');
         list.scrollTop = list.scrollHeight;
@@ -159,17 +184,21 @@ export const scenarios: readonly Scenario[] = [{
           stageFilled: panel !== undefined && stage !== undefined && panel.width === stage.width && panel.height === stage.height,
           toggleBeforeCapture: buttons[0] === 'Projects' && buttons[1] === 'Take a photo', controlsHidden: document.querySelector('.phone-tools')?.hasAttribute('hidden') ?? false,
           sheetHidden: sheet instanceof HTMLElement && sheet.hidden && getComputedStyle(sheet).display === 'none',
-          aboveToolbar: panel !== undefined && toolbar !== undefined && panel.bottom <= toolbar.top,
+          railAbsent: document.querySelector('.phone-toolbar') === null,
           scrolled: list.scrollHeight > list.clientHeight && list.scrollTop > 0 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1,
           lastTappable: last instanceof HTMLButtonElement && !last.disabled && hit !== null && last.contains(hit) };
       });
       t.ok('phone panel fills the stage, fits, and keeps Projects left of capture', phone.fits && phone.stageFilled && phone.toggleBeforeCapture && phone.controlsHidden, phone);
-      t.ok('the whole phone sheet is hidden and the last row centre is tappable at maximum scroll above the toolbar', phone.sheetHidden && phone.aboveToolbar && phone.scrolled && phone.lastTappable, phone);
+      t.ok('Projects hides the editing sheet and rail, and its last row remains tappable at maximum scroll', phone.sheetHidden && phone.railAbsent && phone.scrolled && phone.lastTappable, phone);
       await page.waitFor('phone thumbnail loaded', z.literal(true), () => {
         const image = document.querySelector('[data-testid="project-row"]:last-child img');
         return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0 ? true : null;
       });
       await page.screenshot('projects-panel-phone-402');
+      t.ok('portrait Projects retains a visible editor status sentence', await page.evaluate(z.boolean(), () => {
+        const status = document.querySelector('.projects-editor-status')?.getBoundingClientRect();
+        return status !== undefined && status.height >= 44 && status.top >= 44 && status.bottom <= innerHeight;
+      }));
 
       await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
       await removeFixtureRows(scrollRows);
@@ -177,8 +206,17 @@ export const scenarios: readonly Scenario[] = [{
       await page.waitFor('fresh session without a scene', z.literal(true), () => window.__noisyTest?.demo.document() === null ? true : null);
       await page.click('[data-testid="projects-toggle"]');
       await page.waitFor('saved project row after reload', z.literal(true), () => document.querySelector('[data-testid="project-row"]') === null ? null : true);
+      t.equal('browsing a saved row makes no claim that it was just saved', await page.evaluate(z.string(), () => document.querySelector('[data-testid="projects-state"]')?.textContent ?? ''), 'Choose a project to open.');
+      const beforeOpen = await page.evaluate(listing, async () => (await fetch('/api/projects')).json());
       await page.click('.project-open');
       await page.waitFor('restored scene and closed panel', z.literal(true), () => window.__noisyTest?.demo.document()?.objects.length && document.querySelector('[data-testid="projects-panel"]') === null ? true : null, { timeoutMs: 30_000 });
+      await page.click('[data-testid="projects-toggle"]');
+      const storedTime = beforeOpen.projects.find((project) => project.id === saved.id)?.updatedAt;
+      t.equal('opening an existing project preserves its stored timestamp before any new save', await page.evaluate(z.string().nullable(), () => {
+        const image = document.querySelector('[data-testid="project-row"] img');
+        return image instanceof HTMLImageElement ? new URL(image.src).searchParams.get('v') : null;
+      }), storedTime);
+      await page.click('[data-testid="projects-return"]');
       const restored = await page.evaluate(z.object({ equal: z.boolean(), selectionCleared: z.boolean(), layerPresent: z.boolean(), masksMatch: z.boolean() }), async (json) => {
         const demo = window.__noisyTest?.demo;
         if (demo === undefined) throw new Error('No restore hooks.');
@@ -237,7 +275,8 @@ export const scenarios: readonly Scenario[] = [{
       await t.server.setFaults([`path:/api/projects/${saved.id}/scene:http500:times=1`]);
       const beforeStatus = await page.evaluate(z.string(), () => document.querySelector('[data-testid="status"]')?.textContent ?? '');
       await page.evaluate(z.literal(true), () => { window.__noisyTest?.demo.setFry(.57); return true; });
-      await page.waitFor('failed save is contained in Projects', z.literal(true), () => document.querySelector('[data-testid="projects-state"]')?.textContent === 'Not saved' ? true : null, { timeoutMs: 30_000 });
+      await page.waitFor('failed save is contained in Projects', z.literal(true), () => document.querySelector('[data-testid="projects-state"]')?.textContent === 'Current photo not saved.' ? true : null, { timeoutMs: 30_000 });
+      await page.screenshot('projects-failed-1440');
       const failure = await page.evaluate(z.object({ editingWorks: z.boolean(), status: z.string(), rowFailure: z.boolean(), savedFry: z.number() }), async () => {
         const demo = window.__noisyTest?.demo;
         const stored: unknown = await (await fetch(`/api/projects/${demo?.document()?.id}/scene`)).json();
@@ -249,7 +288,7 @@ export const scenarios: readonly Scenario[] = [{
       t.ok('500 leaves editing and analysis status working, marks the row and preserves the previous scene', failure.editingWorks && failure.rowFailure && failure.savedFry === .42 && failure.status === beforeStatus, failure);
       await t.server.clearFaults();
       await page.evaluate(z.literal(true), () => { window.__noisyTest?.demo.setFry(.61); return true; });
-      await page.waitFor('next edit recovers saving', z.literal(true), () => document.querySelector('[data-testid="projects-state"]')?.textContent === 'Saved just now' ? true : null, { timeoutMs: 30_000 });
+      await page.waitFor('next edit recovers saving', z.literal(true), () => document.querySelector('[data-testid="projects-state"]')?.textContent === 'Current photo saved.' ? true : null, { timeoutMs: 30_000 });
       const recovered = await page.evaluate(savedSchema, savedChecks);
       t.equal('recovered scene equals current document', recovered.json, await page.evaluate(z.string(), () => JSON.stringify(window.__noisyTest?.demo.document())));
 
@@ -314,9 +353,13 @@ export const scenarios: readonly Scenario[] = [{
       t.equal('Reset scene equals the page document', reset.json, await page.evaluate(z.string(), () => JSON.stringify(window.__noisyTest?.demo.document())));
 
       await page.click('[data-testid="project-delete"]');
-      t.equal('first delete click asks for confirmation', await page.evaluate(z.string(), () => document.querySelector('[data-testid="project-delete"]')?.textContent ?? ''), 'Really delete');
-      await page.click('[data-testid="project-delete"]');
-      await page.waitFor('project removed from panel', z.literal(true), () => document.querySelector('[data-testid="project-row"]') === null && document.querySelector('[data-testid="projects-panel"]')?.textContent?.includes('No projects yet') ? true : null);
+      t.ok('one delete click removes the row and offers Undo', await page.evaluate(z.boolean(), () => document.querySelector('[data-testid="project-row"]') === null && document.querySelector('[data-testid="project-undo"]') !== null));
+      await page.waitFor('project removed from panel', z.literal(true), () => document.querySelector('[data-testid="project-row"]') === null && document.querySelector('.projects-empty') !== null ? true : null);
+      t.ok('deleted feedback names the project without claiming Saved', await page.evaluate(z.boolean(), () =>
+        document.querySelector('[data-testid="project-deletion"]')?.textContent?.startsWith('Deleted ') === true && document.querySelector('[data-testid="projects-state"]')?.textContent === 'Deletion pending.' &&
+        document.querySelector('.projects-heading h2')?.textContent === 'Projects'));
+      await page.screenshot('projects-deleted-1440');
+      await page.waitFor('undo deadline commits the store delete', z.literal(true), () => document.querySelector('[data-testid="project-deletion"]')?.getAttribute('data-phase') === 'deleted' ? true : null, { timeoutMs: 20_000 });
       t.equal('deletion empties the store', (await page.evaluate(listing, async () => (await fetch('/api/projects')).json())).projects, []);
       t.equal('successful deletion releases the retained photo and mask job', await page.evaluate(z.number(), () => window.__noisyTest?.demo.projects().retainedJobs ?? -1), 0);
       await page.evaluate(z.literal(true), () => { window.__noisyTest?.demo.setFry(.22); return true; });
@@ -343,10 +386,14 @@ export const scenarios: readonly Scenario[] = [{
         return id !== undefined && id !== document.documentElement.dataset['unsavedProjectId'] ? id : null;
       }, { timeoutMs: 30_000 });
       await page.evaluate(z.literal(true), (id) => { document.documentElement.dataset['expectedProjectId'] = id; return true; }, second);
-      await page.waitFor('second import autosaves its own id', z.literal(true), () => {
-        const projects = window.__noisyTest?.demo.projects(), id = document.documentElement.dataset['expectedProjectId'];
-        return id !== undefined && projects?.current === id && projects.states.get(id) === 'saved' ? true : null;
-      }, { timeoutMs: 30_000 });
+      // The terminal retry check must isolate the refused Fry snapshot from
+      // later depth/encode updates, which can legitimately queue newer work.
+      await page.waitFor('second import finishes analysis and autosaves its own id', z.literal(true), () => {
+        const demo = window.__noisyTest?.demo, projects = demo?.projects(), analysis = demo?.analysis();
+        const id = document.documentElement.dataset['expectedProjectId'];
+        return id !== undefined && projects?.current === id && projects.states.get(id) === 'saved' &&
+          analysis?.depth && analysis.decoderReady && !analysis.alive.heavy ? true : null;
+      }, { timeoutMs: 180_000 });
       t.ok('a second successful import creates a second id', second !== '' && second !== saved.id && second !== unsavedId, { first: saved.id, unsavedId, second });
       t.equal('second import is the only listed project', (await page.evaluate(listing, async () => (await fetch('/api/projects')).json())).projects.map((project) => project.id), [second]);
 
@@ -369,5 +416,165 @@ export const scenarios: readonly Scenario[] = [{
       await clearFixture();
     }
     t.equal('fixture empty after autosave checks', (await page.evaluate(listing, async () => (await fetch('/api/projects')).json())).projects, []);
+  },
+}, {
+  id: 'projects.delete-undo', title: 'Session-owned deletion and Undo retain saved content across panel changes and failures',
+  target: 'dev', covers: ['POL1b-3'], timeoutMs: 300_000,
+  async run(t) {
+    const { page } = t;
+    await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
+    await page.goto('/');
+    await page.click('[data-testid="try-sample"]');
+    await page.waitFor('sample ready and saved', z.literal(true), () => {
+      const demo = window.__noisyTest?.demo;
+      return demo?.analysis().decoderReady && demo.projects().state === 'saved' ? true : null;
+    }, { timeoutMs: 180_000 });
+    const current = await page.evaluate(z.string(), () => window.__noisyTest?.demo.document()?.id ?? '');
+    const currentName = await page.evaluate(z.string(), () => window.__noisyTest?.demo.document()?.title ?? '');
+    const copies = await page.evaluate(z.array(z.string()), async () => {
+      const demo = window.__noisyTest?.demo, doc = demo?.document();
+      if (demo === undefined || doc == null) throw new Error('No saved project to copy');
+      const wire: unknown = await (await fetch(`/api/projects/${doc.id}/scene`)).json();
+      if (wire === null || typeof wire !== 'object' || !('masks' in wire)) throw new Error('No saved masks');
+      const photo = await (await fetch(`/api/projects/${doc.id}/photo`)).blob();
+      const thumb = await (await fetch(`/api/projects/${doc.id}/thumbnail`)).blob();
+      const ids: string[] = [];
+      for (const [name, fry] of [['Saved alternate', .24], ['Saved third photo', .61]] satisfies readonly [string, number][]) {
+        const id = crypto.randomUUID();
+        const resources: [string, BodyInit, string][] = [['photo', photo, photo.type], ['thumbnail', thumb, 'image/jpeg']];
+        for (const mask of demo.projectMasks()) resources.push([`masks/${mask.asset}`, new Uint8Array(mask.bytes), 'application/octet-stream']);
+        resources.push(['scene', JSON.stringify({ document: { ...doc, id, title: name, style: { ...doc.style, fry } }, masks: wire.masks, revision: 0 }), 'application/json']);
+        for (const [resource, body, type] of resources) {
+          const response = await fetch(`/api/projects/${id}/${resource}`, { method: 'PUT', headers: { 'Content-Type': type }, body });
+          if (!response.ok) throw new Error(`Could not save ${name}`);
+          await response.json();
+        }
+        ids.push(id);
+      }
+      return ids;
+    });
+    const alternate = copies[0], third = copies[1];
+    if (alternate === undefined || third === undefined) throw new Error('No alternate fixtures');
+    const row = (id: string) => `[data-testid="project-row"][data-project-id="${id}"]`;
+    const notice = (id: string) => `[data-testid="project-deletion"][data-project-id="${id}"]`;
+    const phase = async (id: string, expected: string): Promise<void> => {
+      await page.evaluate(z.literal(true), ({ id, expected }) => {
+        document.documentElement.dataset['deletionId'] = id;
+        document.documentElement.dataset['deletionPhase'] = expected;
+        return true;
+      }, { id, expected });
+      await page.waitFor(`${id}: ${expected}`, z.literal(true), () =>
+        document.querySelector(`[data-testid="project-deletion"][data-project-id="${document.documentElement.dataset['deletionId']}"]`)?.getAttribute('data-phase') === document.documentElement.dataset['deletionPhase'] ? true : null,
+      { timeoutMs: 25_000 });
+    };
+    try {
+      await page.click('[data-testid="projects-toggle"]');
+      await page.waitFor('three named rows', z.literal(true), () => document.querySelectorAll('[data-testid="project-row"]').length === 3 ? true : null);
+      const width = await page.evaluate(z.number(), (id) => document.querySelector(`[data-project-id="${id}"] .project-delete`)?.getBoundingClientRect().width ?? 0, alternate);
+      await page.evaluate(z.literal(true), () => { window.__noisyTest?.demo.setFry(.77); return true; });
+      await page.click(`${row(current)} .project-delete`);
+      t.ok('current row disappears on one click, with a named Undo', await page.evaluate(z.boolean(), ({ id, name }) =>
+        document.querySelector(`[data-testid="project-row"][data-project-id="${id}"]`) === null &&
+        document.querySelector(`[data-testid="project-deletion"][data-project-id="${id}"]`)?.textContent?.includes(`Deleted ${name}.`) === true &&
+        document.querySelector('[data-testid="project-undo"]') !== null, { id: current, name: currentName }));
+      t.equal('deletion leaves other Delete targets unchanged', await page.evaluate(z.number(), (id) => document.querySelector(`[data-testid="project-row"][data-project-id="${id}"] .project-delete`)?.getBoundingClientRect().width ?? 0, alternate), width);
+      t.ok('the saved project still exists during Undo', await page.evaluate(z.boolean(), async (id) => (await fetch(`/api/projects/${id}/scene`)).ok, current));
+      await page.screenshot('projects-undo-1440');
+      await page.click('[data-testid="projects-toggle"]');
+      await page.click('[data-testid="projects-toggle"]');
+      t.ok('reopening and refreshing does not reinsert the deleted row', await page.evaluate(z.boolean(), (id) => document.querySelector(`[data-testid="project-row"][data-project-id="${id}"]`) === null && document.querySelector('[data-testid="project-undo"]') !== null, current));
+      await page.click(`${notice(current)} [data-testid="project-undo"]`);
+      await page.click(`${row(current)} .project-open`);
+      await page.waitFor('Undo/Open restores the pending edit', z.literal(true), () => {
+        const doc = window.__noisyTest?.demo.document();
+        return doc?.style.fry === .77 && document.querySelector('[data-testid="projects-panel"]') === null ? true : null;
+      }, { timeoutMs: 30_000 });
+      t.equal('Undo opens the current project id', await page.evaluate(z.string(), () => window.__noisyTest?.demo.document()?.id ?? ''), current);
+      t.equal('Undo/Open stored the actual current document', (await page.evaluate(savedSchema, savedChecks)).json, await page.evaluate(z.string(), () => JSON.stringify(window.__noisyTest?.demo.document())));
+      await page.click('[data-testid="projects-toggle"]');
+      await page.click(`${row(alternate)} .project-delete`);
+      await page.click('[data-testid="projects-toggle"]');
+      await page.click('[data-testid="projects-toggle"]');
+      await page.click(`${notice(alternate)} [data-testid="project-undo"]`);
+      await page.click(`${row(alternate)} .project-open`);
+      await page.waitFor('non-current Undo restores its own saved content', z.literal(true), () => {
+        const doc = window.__noisyTest?.demo.document();
+        return doc?.title === 'Saved alternate' && doc.style.fry === .24 && document.querySelector('[data-testid="projects-panel"]') === null ? true : null;
+      }, { timeoutMs: 30_000 });
+      t.equal('Undo opens the non-current project id', await page.evaluate(z.string(), () => window.__noisyTest?.demo.document()?.id ?? ''), alternate);
+      await page.click('[data-testid="projects-toggle"]');
+      await page.evaluate(z.literal(true), async () => { await new Promise((resolve) => setTimeout(resolve, 16_000)); return true; });
+      t.ok('both restored projects survive autosave and the fifteen-second refresh', await page.evaluate(z.boolean(), (ids) => ids.every((id) => document.querySelector(`[data-testid="project-row"][data-project-id="${id}"]`) !== null), [current, alternate]));
+      await t.server.setFaults([`path:/api/projects/${alternate}:http500:times=1`]);
+      t.expectMessage({ because: 'the scenario deliberately refuses the project DELETE', channel: 'log', source: 'network', level: 'error', url: new RegExp(`/api/projects/${alternate}$`) });
+      await page.click(`${row(alternate)} .project-delete`);
+      await phase(alternate, 'failed');
+      t.ok('failed DELETE restores the named recoverable row and leaves other actions available', await page.evaluate(z.boolean(), (id) => {
+        const row = document.querySelector(`[data-testid="project-row"][data-project-id="${id}"]`);
+        return row !== null && row.querySelector('.project-open')?.hasAttribute('disabled') === false &&
+          document.querySelector(`[data-testid="project-deletion"][data-project-id="${id}"]`)?.textContent?.includes('Could not delete Saved alternate. Project restored.') === true;
+      }, alternate));
+      await t.server.clearFaults();
+      await page.click('[data-testid="projects-toggle"]');
+      await page.click('[data-testid="projects-toggle"]');
+      t.ok('refresh cannot erase the failure notice', await page.evaluate(z.boolean(), (id) => document.querySelector(`[data-testid="project-deletion"][data-project-id="${id}"]`)?.getAttribute('data-phase') === 'failed', alternate));
+      await page.click(`${row(alternate)} .project-open`);
+      await page.waitFor('failed deletion still opens exact saved content', z.literal(true), () => window.__noisyTest?.demo.document()?.style.fry === .24 && document.querySelector('[data-testid="projects-panel"]') === null ? true : null);
+      await page.waitFor('reopened analysis and autosave settle before clicking a sorted row', z.literal(true), () => {
+        const demo = window.__noisyTest?.demo;
+        return demo?.analysis().decoderReady && demo.projects().state === 'saved' ? true : null;
+      }, { timeoutMs: 90_000 });
+      await page.click('[data-testid="projects-toggle"]');
+      // Server faults match path prefixes, which also include thumbnail GETs.
+      // Delay exactly one DELETE without changing the session's undo timer.
+      await page.evaluate(z.literal(true), (id) => {
+        const target = new URL(`/api/projects/${id}`, location.href).href;
+        const originalFetch = window.fetch;
+        const restore = (): void => { window.fetch = originalFetch; };
+        document.addEventListener('clear-project-delete-delay', restore, { once: true });
+        let remaining = true;
+        window.fetch = async (input, init) => {
+          const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+          const url = input instanceof Request ? input.url : new URL(input, location.href).href;
+          if (remaining && method.toUpperCase() === 'DELETE' && url === target) {
+            remaining = false;
+            const started = performance.now();
+            document.documentElement.dataset['delayedProjectDelete'] = id;
+            await new Promise<void>((resolve) => setTimeout(resolve, 1500));
+            document.documentElement.dataset['projectDeleteDelayMs'] = String(performance.now() - started);
+          }
+          return originalFetch.call(window, input, init);
+        };
+        return true;
+      }, third);
+      await page.evaluate(z.literal(true), async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); return true; });
+      await page.click(`${row(third)} .project-delete`);
+      t.ok('the identified third row is removed immediately', await page.evaluate(z.boolean(), (id) => document.querySelector(`[data-testid="project-row"][data-project-id="${id}"]`) === null, third));
+      await phase(third, 'deleting');
+      t.equal('the delay matches the identified DELETE rather than its thumbnail GET', await page.evaluate(z.string(), () => document.documentElement.dataset['delayedProjectDelete'] ?? ''), third);
+      t.ok('delayed store deletion does not disable unrelated rows', await page.evaluate(z.boolean(), () => Array.from(document.querySelectorAll('[data-testid="project-row"] button')).every((button) => !button.hasAttribute('disabled'))));
+      await phase(third, 'deleted');
+      t.ok('the identified DELETE was delayed at least 1500 ms', await page.evaluate(z.boolean(), () => Number(document.documentElement.dataset['projectDeleteDelayMs']) >= 1500));
+      t.ok('expired deletion removes the actual stored resources', await page.evaluate(z.boolean(), async (id) => {
+        const list: unknown = await (await fetch('/api/projects')).json();
+        return list !== null && typeof list === 'object' && 'projects' in list && Array.isArray(list.projects) && list.projects.every((project: unknown) => project !== null && typeof project === 'object' && 'id' in project && project.id !== id);
+      }, third));
+      t.equal('deletion of another project preserves the current photo', await page.evaluate(z.string(), () => window.__noisyTest?.demo.document()?.id ?? ''), alternate);
+    } finally {
+      await page.evaluate(z.literal(true), () => { document.dispatchEvent(new Event('clear-project-delete-delay')); return true; });
+      await t.server.clearFaults();
+      await page.evaluate(z.literal(true), async () => {
+        const demo = window.__noisyTest?.demo;
+        if (demo === undefined) throw new Error('No project cleanup hooks');
+        const response: unknown = await (await fetch('/api/projects')).json();
+        if (response !== null && typeof response === 'object' && 'projects' in response && Array.isArray(response.projects)) {
+          for (const value of response.projects) {
+            const project: unknown = value;
+            if (project !== null && typeof project === 'object' && 'id' in project && typeof project.id === 'string') await demo.deleteProject(project.id);
+          }
+        }
+        return true;
+      });
+    }
   },
 }];

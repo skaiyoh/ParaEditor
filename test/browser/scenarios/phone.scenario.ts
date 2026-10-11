@@ -24,6 +24,18 @@ const layoutSchema = z.object({
   accent: z.string(), desktopAbsent: z.boolean(), touchAction: z.string(),
 });
 
+/** Scroll only the inspector body; overflow-hidden ancestors must not move. */
+function revealInspectorControl(selector: string): true {
+  const control = document.querySelector(selector);
+  const body = control?.closest('.phone-tools, .inspector .node-stack');
+  if (control !== null && body instanceof HTMLElement) {
+    const box = control.getBoundingClientRect(), bounds = body.getBoundingClientRect();
+    if (box.top < bounds.top + 8) body.scrollTop += box.top - bounds.top - 8;
+    else if (box.bottom > bounds.bottom - 8) body.scrollTop += box.bottom - bounds.bottom + 8;
+  }
+  return true;
+}
+
 /** Sent to the page without closures; schema validation happens on return. */
 function phoneLayout(): unknown {
   const stage = document.querySelector('[data-testid="stage"]');
@@ -50,7 +62,7 @@ function phoneLayout(): unknown {
 }
 
 export const scenarios: readonly Scenario[] = [{
-  id: 'phone.tilt', title: 'Touch photo capture, Parallax orientation, fusion and source cancellation', target: 'dev', covers: ['PH1', 'PH3'], timeoutMs: 300_000,
+  id: 'phone.tilt', title: 'Touch photo capture, Parallax orientation, fusion and source cancellation', target: 'dev', covers: ['PH1', 'PH3', 'POL1b-5'], timeoutMs: 300_000,
   async run(t) {
     const { page } = t;
     await page.goto('/');
@@ -271,8 +283,8 @@ export const scenarios: readonly Scenario[] = [{
     }
   },
 }, {
-  id: 'phone.layout', title: 'Full-screen phone stage, essentials toolbar and two-position tool sheet at both iPhone sizes',
-  target: 'dev', covers: ['PH2'], timeoutMs: 300_000,
+  id: 'phone.layout', title: 'Full-screen portrait stage, complete inspector and a two-position tool sheet',
+  target: 'dev', covers: ['PH2', 'POL1b-4', 'POL1b-5'], timeoutMs: 300_000,
   async run(t) {
     const { page } = t;
     await page.emulate({ width: 402, height: 874, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
@@ -309,6 +321,7 @@ export const scenarios: readonly Scenario[] = [{
       });
       t.equal('empty strip names no photo', empty.name, 'No photo open');
       t.ok('empty stage offers capture and the sample, with visible status and no toolbar', empty.actions.join(',') === 'Take a photo,Try a sample' && empty.toolbarAbsent && empty.statusVisible, empty);
+      t.equal('the phone status describes capture and sample actions', await page.evaluate(z.string(), () => document.querySelector('[data-testid="status"]')?.textContent ?? ''), 'Take a photo or try a sample');
       await page.screenshot('phone-402-empty');
       await page.click('.empty-actions button:last-child');
       await page.waitFor('sample depth and decoder in phone frame', z.literal(true), () => {
@@ -322,7 +335,7 @@ export const scenarios: readonly Scenario[] = [{
         const inside = (box: z.infer<typeof phoneBoxSchema>): boolean => box.width > 0 && box.height > 0 &&
           box.left >= 0 && box.top >= 0 && box.right <= viewport.width && box.bottom <= viewport.height;
         t.ok(`${label}: no horizontal overflow or page scroll`, result.scrollWidth === viewport.width && result.scrollHeight === viewport.height && result.scrollX === 0 && result.scrollY === 0, result);
-        t.ok(`${label}: stage spans the viewport width and at least half its height`, stage.left === 0 && stage.width === viewport.width && stage.height >= viewport.height / 2, stage);
+        t.ok(`${label}: stage spans the viewport width with room for the picture above the inspector`, stage.left === 0 && stage.width === viewport.width && stage.height >= viewport.height / 4, stage);
         t.ok(`${label}: four toolbar buttons stay inside the viewport and are at least 44 px tall`, inside(toolbar) && buttons.length === 4 && buttons.every((button) => inside(button.box) && button.box.height >= 44), result);
         t.equal(`${label}: modes precede Download`, buttons.map((button) => button.label), ['Motion', 'Symbols', 'Parallax', 'Download']);
         t.ok(`${label}: modes are toggles and Download is accent-filled`, buttons.slice(0, 3).every((button) => button.pressed === 'true' || button.pressed === 'false') &&
@@ -331,6 +344,36 @@ export const scenarios: readonly Scenario[] = [{
         t.ok(`${label}: desktop panels are absent and the stage suppresses browser gestures`, result.desktopAbsent && result.touchAction === 'none', result);
       };
 
+      const checkProjects = async (label: string): Promise<void> => {
+        // Object selection can still be finishing its plate after the worker
+        // exits. Compare the return task after that product is committed.
+        await page.waitFor(`${label}: analysis settled before the Projects snapshot`, z.literal(true), () => {
+          const demo = window.__noisyTest?.demo;
+          if (demo === undefined) return null;
+          const analysis = demo.analysis();
+          return analysis.depth && analysis.decoderReady && !analysis.alive.heavy &&
+            (demo.products().masks === 0 || analysis.plate) ? true : null;
+        }, { timeoutMs: 180_000 });
+        const before = await page.evaluate(z.string(), () => JSON.stringify({ document: window.__noisyTest?.demo.document(), selected: window.__noisyTest?.demo.objects().filter((object) => object.selected) }));
+        await page.click('[data-testid="projects-toggle"]');
+        const projects = await page.evaluate(z.object({ railAbsent: z.boolean(), resetAbsent: z.boolean(), returnVisible: z.boolean(), statusVisible: z.boolean(), stageFills: z.boolean() }), () => {
+          const stage = document.querySelector('.phone-stage')?.getBoundingClientRect();
+          const button = document.querySelector('[data-testid="projects-return"]')?.getBoundingClientRect();
+          const status = document.querySelector('.projects-editor-status')?.getBoundingClientRect();
+          return {
+            railAbsent: document.querySelector('.phone-toolbar') === null,
+            resetAbsent: !Array.from(document.querySelectorAll('.phone-strip button')).some((button) => button.textContent === 'Reset'),
+            returnVisible: button !== undefined && button.height >= 44 && button.top >= 44 && button.right <= innerWidth,
+            statusVisible: status !== undefined && status.height >= 44 && status.bottom <= innerHeight,
+            stageFills: stage?.top === 44 && stage.bottom === innerHeight,
+          };
+        });
+        t.ok(`${label}: Projects presents return and status in place of hidden-photo controls`, Object.values(projects).every(Boolean), projects);
+        await page.screenshot(`projects-task-${label}`);
+        await page.click('[data-testid="projects-return"]');
+        t.equal(`${label}: returning keeps the scene, edits and selection`, await page.evaluate(z.string(), () => JSON.stringify({ document: window.__noisyTest?.demo.document(), selected: window.__noisyTest?.demo.objects().filter((object) => object.selected) })), before);
+        await checkLayout(`${label} after returning`);
+      };
       await page.waitFor('the sheet opens on import', z.literal(true), () => document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'true' ? true : null);
       t.ok('Fry is visible inside the open sheet with manipulation touch handling', await page.evaluate(z.boolean(), () => {
         const range = document.querySelector('.phone-sheet [data-testid="style-fry"]');
@@ -338,6 +381,7 @@ export const scenarios: readonly Scenario[] = [{
       }));
       await checkLayout('402 ready');
       await page.screenshot('phone-402-ready');
+      await checkProjects('402');
       await page.click('.sheet-handle');
       await page.waitFor('handle collapses the sheet', z.literal(true), () => document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'false' ? true : null);
       await checkLayout('402 handle collapsed');
@@ -350,6 +394,7 @@ export const scenarios: readonly Scenario[] = [{
         return true;
       });
       await page.waitFor('selected object swatches in the sheet', z.literal(true), () => document.querySelector('.phone-sheet [data-testid="swatches"]') === null ? null : true, { timeoutMs: 30_000 });
+      await page.evaluate(z.literal(true), revealInspectorControl, '.phone-sheet .object-node');
       const swatches = await page.evaluate(z.object({ count: z.number(), oneRow: z.boolean(), contained: z.boolean(), sizes: z.array(z.object({ width: z.number(), height: z.number() })) }), () => {
         const sheet = document.querySelector('.phone-sheet');
         if (sheet === null) throw new Error('No phone sheet.');
@@ -367,6 +412,10 @@ export const scenarios: readonly Scenario[] = [{
       await page.evaluate(z.literal(true), () => { window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', { beta: 35, gamma: 8 })); return true; });
       await page.waitFor('Tilt turns on and collapses the sheet', z.literal(true), () => document.querySelector('[data-testid="parallax-enabled"]')?.getAttribute('aria-pressed') === 'true' &&
         document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'false' ? true : null);
+      t.ok('portrait Parallax node and rail share the active state', await page.evaluate(z.boolean(), () => {
+        const node = document.querySelector('[data-testid="parallax-node-enabled"]');
+        return node instanceof HTMLInputElement && node.checked;
+      }));
       await checkLayout('402 Tilt collapsed');
       await page.screenshot('phone-402-collapsed');
       await page.waitFor('camera and tilt are running together on the phone', z.literal(true), () => {
@@ -382,6 +431,8 @@ export const scenarios: readonly Scenario[] = [{
         return true;
       });
       await page.click('.sheet-handle');
+      await page.evaluate(z.literal(true), revealInspectorControl, '.phone-sheet [aria-controls="node-parallax"]');
+      await page.click('.phone-sheet [aria-controls="node-parallax"]');
       await page.click('[data-testid="parallax-debug-toggle"]');
       await page.click('.sheet-handle');
       await page.waitFor('phone debug numbers and frame are visible', z.literal(true), () => {
@@ -403,6 +454,10 @@ export const scenarios: readonly Scenario[] = [{
       await page.click('[data-testid="parallax-enabled"]');
       await page.waitFor('Tilt turns off without reopening the sheet', z.literal(true), () => document.querySelector('[data-testid="parallax-enabled"]')?.getAttribute('aria-pressed') === 'false' &&
         document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'false' ? true : null);
+      t.ok('portrait Parallax node and rail share the off state', await page.evaluate(z.boolean(), () => {
+        const node = document.querySelector('[data-testid="parallax-node-enabled"]');
+        return node instanceof HTMLInputElement && !node.checked;
+      }));
       await page.click('.sheet-handle');
       await page.emulate({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await page.waitFor('390 viewport and open sheet', z.literal(true), () => innerWidth === 390 && innerHeight === 844 && document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'true' ? true : null);
@@ -413,8 +468,265 @@ export const scenarios: readonly Scenario[] = [{
       await page.waitFor('834 portrait viewport and open sheet', z.literal(true), () => innerWidth === 834 && innerHeight === 1194 && document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'true' ? true : null);
       await checkLayout('834 tablet portrait ready');
       await page.screenshot('tablet-834-ready');
+      await checkProjects('834');
+      for (const name of ['motion', 'symbols']) {
+        await page.click(`[data-testid="${name}-enabled"]`);
+        t.ok(`portrait ${name} rail updates its inspector toggle`, await page.evaluate(z.boolean(), (name) => {
+          const node = document.querySelector(`[data-testid="${name}-node-enabled"]`);
+          return node instanceof HTMLInputElement && String(node.checked) === document.querySelector(`[data-testid="${name}-enabled"]`)?.getAttribute('aria-pressed');
+        }, name));
+        await page.evaluate(z.literal(true), revealInspectorControl, `[data-testid="${name}-node-enabled"]`);
+        await page.click(`[data-testid="${name}-node-enabled"]`);
+        t.ok(`portrait ${name} inspector toggle updates its rail`, await page.evaluate(z.boolean(), (name) => {
+          const node = document.querySelector(`[data-testid="${name}-node-enabled"]`);
+          return node instanceof HTMLInputElement && String(node.checked) === document.querySelector(`[data-testid="${name}-enabled"]`)?.getAttribute('aria-pressed');
+        }, name));
+      }
+      await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
+      await page.waitFor('desktop frame after portrait mode changes', z.literal(true), () =>
+        document.querySelector('.inspector') !== null && document.querySelectorAll('.bottom-bar .mode-rail button').length === 3 ? true : null);
+      const desktopModes = await page.evaluate(z.object({ names: z.array(z.string()), matches: z.array(z.boolean()) }), () => {
+        const modes = Array.from(document.querySelectorAll('.bottom-bar .mode-rail button'));
+        return { names: modes.map((button) => button.textContent ?? ''), matches: ['motion-enabled', 'symbols-enabled', 'parallax-node-enabled'].map((id, index) => {
+          const input = document.querySelector(`[data-testid="${id}"]`);
+          return input instanceof HTMLInputElement && String(input.checked) === modes[index]?.getAttribute('aria-pressed');
+        }) };
+      });
+      t.ok('desktop exposes the same three mode concepts and matching inspector states', desktopModes.names.join(',') === 'Motion,Symbols,Parallax' && desktopModes.matches.every(Boolean), desktopModes);
     } finally {
       await page.evaluate(z.literal(true), () => { document.dispatchEvent(new Event('phone-layout-cleanup')); return true; });
     }
+  },
+}, {
+  id: 'phone.inspector', title: 'The complete portrait inspector retains edits, selection and keyboard reachability',
+  target: 'dev', covers: ['POL1b-1', 'POL1b-2', 'POL1b-6'], timeoutMs: 300_000,
+  async run(t) {
+    const { page } = t;
+    await page.emulate({ width: 402, height: 874, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+    await page.goto('/');
+    await page.click('.empty-actions button:last-child');
+    await page.waitFor('sample ready for inspector edits', z.literal(true), () => window.__noisyTest?.demo.analysis().decoderReady ? true : null, { timeoutMs: 180_000 });
+    await page.evaluate(z.literal(true), async () => { await window.__noisyTest?.demo.tap(.38, .585); return true; });
+    await page.waitFor('selected object', z.literal(true), () => window.__noisyTest?.demo.objects().some((object) => object.selected) ? true : null);
+    const click = async (selector: string): Promise<void> => {
+      await page.evaluate(z.literal(true), revealInspectorControl, selector);
+      await page.click(selector);
+      const moved = await page.evaluate(z.array(z.string()), (selector) => {
+        const moved: string[] = [];
+        for (let node = document.querySelector(selector)?.parentElement; node !== null && node !== undefined; node = node.parentElement) {
+          if (!node.matches('.phone-tools, .inspector .node-stack') && (node.scrollTop !== 0 || node.scrollLeft !== 0)) moved.push(`${node.tagName}.${node.className}: ${node.scrollTop},${node.scrollLeft}`);
+        }
+        return moved;
+      }, selector);
+      t.equal(`only the inspector body scrolls when reaching ${selector}`, moved, []);
+    };
+    const changeRange = async (id: string): Promise<void> => {
+      const initial = await page.evaluate(z.number(), (id) => {
+        const input = document.querySelector(`[data-testid="${id}"]`);
+        if (!(input instanceof HTMLInputElement)) throw new Error(`Missing ${id}`);
+        return input.valueAsNumber;
+      }, id);
+      await click(`[data-testid="${id}"]`);
+      const change = await page.evaluate(z.object({ before: z.number(), after: z.number(), expected: z.number(), documentChanged: z.boolean() }), async ({ id, initial }) => {
+        const input = document.querySelector(`[data-testid="${id}"]`);
+        if (!(input instanceof HTMLInputElement)) throw new Error(`Missing ${id}`);
+        const before = initial, min = Number(input.min), max = Number(input.max), step = Number(input.step);
+        const previous = JSON.stringify(window.__noisyTest?.demo.document());
+        const expected = min + Math.round((max - min) * (before < (min + max) / 2 ? .8 : .2) / step) * step;
+        input.value = String(expected);
+        input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        return { before, after: input.valueAsNumber, expected, documentChanged: JSON.stringify(window.__noisyTest?.demo.document()) !== previous };
+      }, { id, initial });
+      t.ok(`${id}: a value away from the current one changes the scene`, change.after !== change.before && Math.abs(change.after - change.expected) < .00001 && change.documentChanged, change);
+    };
+    for (const size of [{ width: 402, height: 874 }, { width: 834, height: 1194 }]) {
+      await page.emulate({ ...size, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+      await page.waitFor('portrait inspector', z.literal(true), () => document.querySelector('.sheet-inspector') === null ? null : true);
+      const initial = await page.evaluate(z.object({ names: z.array(z.string()), first: z.string(), closed: z.boolean() }), () => ({
+        names: Array.from(document.querySelectorAll('.sheet-inspector .node'), (node) => node.getAttribute('aria-label') ?? ''),
+        first: document.querySelector('.sheet-inspector .node')?.getAttribute('aria-label') ?? '',
+        closed: Array.from(document.querySelectorAll('.sheet-inspector .node:not([aria-label="Fry"]) .node-disclosure')).every((button) => button.getAttribute('aria-expanded') === 'false'),
+      }));
+      t.equal(`${size.width}: Fry is visibly named first`, initial.first, 'Fry');
+      t.equal(`${size.width}: all nodes and Layers are present`, initial.names, ['Fry', 'Layers', 'Motion', 'Parallax', 'Symbols', 'Surface', 'Palette', 'Camera']);
+      t.ok(`${size.width}: secondary groups start collapsed`, initial.closed, initial);
+      await click('[aria-controls="node-layers"]');
+      await click('.phone-tools .layer-row:first-child');
+      t.ok(`${size.width}: Plate deselects the object`, await page.evaluate(z.boolean(), () => !window.__noisyTest?.demo.objects().some((object) => object.selected)));
+      await click('.phone-tools .layer-row:last-child .layer-select');
+      const color = await page.evaluate(z.string(), () => document.querySelector('.phone-tools .swatch[aria-label="Green"]')?.getAttribute('aria-pressed') === 'true' ? 'Coral' : 'Green');
+      await click(`.phone-tools .swatch[aria-label="${color}"]`);
+      t.ok(`${size.width}: the selected layer's color changes`, await page.evaluate(z.boolean(), (color) => document.querySelector(`.phone-tools .swatch[aria-label="${color}"]`)?.getAttribute('aria-pressed') === 'true', color));
+      await click('[aria-controls="node-layers"]');
+      await changeRange('style-fry');
+      await page.click('.sheet-handle');
+      await page.click('.phone-toolbar [data-testid="motion-enabled"]');
+      await page.waitFor(`${size.width}: enabling Motion reopens the sheet and its export node`, z.literal(true), () =>
+        document.querySelector('.sheet-handle')?.getAttribute('aria-expanded') === 'true' &&
+        document.querySelector('[aria-controls="node-motion"]')?.getAttribute('aria-expanded') === 'true' &&
+        (document.querySelector('.phone-sheet .motion-export')?.getBoundingClientRect().height ?? 0) > 0 ? true : null);
+      await changeRange('motion-parallax');
+      const originalDirection = await page.evaluate(z.enum(['side', 'vertical', 'circle']), () => window.__noisyTest?.demo.document()?.motion.drift.direction ?? null);
+      const directions = ['side', 'vertical', 'circle'] as const;
+      for (const direction of [...directions.filter((direction) => direction !== originalDirection), originalDirection]) {
+        const before = await page.evaluate(z.string().nullable(), () => window.__noisyTest?.demo.document()?.motion.drift.direction ?? null);
+        await click(`[data-testid="motion-drift-${direction}"]`);
+        const changed = await page.evaluate(z.object({ direction: z.string().nullable(), pressed: z.array(z.string()) }), () => ({
+          direction: window.__noisyTest?.demo.document()?.motion.drift.direction ?? null,
+          pressed: Array.from(document.querySelectorAll('.motion-directions [aria-pressed="true"]'), (button) => button.getAttribute('data-testid') ?? ''),
+        }));
+        t.ok(`${size.width}: ${direction} changes Drift with exactly one pressed choice`, before !== direction && changed.direction === direction && changed.pressed.join(',') === `motion-drift-${direction}`, { before, ...changed });
+      }
+      await changeRange('motion-drift-amount');
+      await page.click('.phone-toolbar [data-testid="motion-enabled"]');
+      for (const [name, control] of [
+        ['Symbols', 'symbols-cellSize'], ['Surface', 'surface-relief'],
+        ['Palette', 'style-colors'], ['Camera', 'style-grain'],
+      ]) {
+        await click(`[aria-controls="node-${name?.toLowerCase()}"]`);
+        if (control === undefined) throw new Error('Missing node control');
+        await changeRange(control);
+      }
+      await click('[aria-controls="node-parallax"]');
+      await click('[data-testid="parallax-debug-toggle"]');
+      t.ok(`${size.width}: Parallax node works`, await page.evaluate(z.boolean(), () => document.querySelector('[data-testid="parallax-debug"]') !== null));
+      await click('[data-testid="parallax-debug-toggle"]');
+      // Native Tab must reveal each lower Camera control inside the one body.
+      await click('[data-testid="style-grain"]');
+      for (let i = 0; i < 4; i++) await page.press('Tab');
+      const focused = await page.evaluate(z.object({ last: z.boolean(), visible: z.boolean(), oneScroll: z.boolean(), noOverflow: z.boolean(), ancestorsStill: z.boolean(), anchored: z.boolean(), imageAbove: z.boolean() }), async () => {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        const active = document.activeElement, body = document.querySelector('.phone-tools'), sheet = document.querySelector('.phone-sheet');
+        const box = active?.getBoundingClientRect(), bounds = body?.getBoundingClientRect();
+        const stage = document.querySelector('[data-testid="stage"]')?.getBoundingClientRect();
+        let ancestorsStill = true;
+        for (let node = active?.parentElement; node !== null && node !== undefined; node = node.parentElement) if (node !== body) ancestorsStill &&= node.scrollTop === 0 && node.scrollLeft === 0;
+        const header = document.querySelector('.phone-strip')?.getBoundingClientRect(), toolbar = document.querySelector('.phone-toolbar')?.getBoundingClientRect();
+        return {
+          last: active?.getAttribute('data-testid') === 'style-clipping',
+          visible: box !== undefined && bounds !== undefined && box.top >= bounds.top && box.bottom <= bounds.bottom,
+          oneScroll: body instanceof HTMLElement && body.scrollHeight > body.clientHeight &&
+            Array.from(body.querySelectorAll('*')).every((node) => getComputedStyle(node).overflowY !== 'auto'),
+          noOverflow: scrollX === 0 && scrollY === 0 && document.documentElement.scrollWidth === innerWidth && document.documentElement.scrollHeight === innerHeight,
+          ancestorsStill,
+          anchored: header?.top === 0 && header.bottom === 44 && toolbar !== undefined && Math.abs(toolbar.bottom - (innerHeight - 12)) < 1,
+          imageAbove: stage !== undefined && sheet !== null && stage.bottom <= sheet.getBoundingClientRect().top + 1 && stage.height > 200,
+        };
+      });
+      t.ok(`${size.width}: tab reaches the last control in one scrolling body, with the picture unobscured`, Object.values(focused).every(Boolean), focused);
+      await page.screenshot(`inspector-last-${size.width}`);
+      const before = await page.evaluate(z.string(), () => JSON.stringify({ doc: window.__noisyTest?.demo.document(), selected: window.__noisyTest?.demo.objects().filter((object) => object.selected) }));
+      await page.click('.sheet-handle');
+      await page.click('.sheet-handle');
+      const after = await page.evaluate(z.string(), () => JSON.stringify({ doc: window.__noisyTest?.demo.document(), selected: window.__noisyTest?.demo.objects().filter((object) => object.selected) }));
+      t.equal(`${size.width}: collapse and reopen retain control values and selection`, after, before);
+      t.ok(`${size.width}: collapse and reopen retain disclosure choices`, await page.evaluate(z.boolean(), () => document.querySelector('[aria-controls="node-camera"]')?.getAttribute('aria-expanded') === 'true'));
+      for (const name of ['Motion', 'Parallax', 'Symbols', 'Surface', 'Palette', 'Camera']) await click(`[aria-controls="node-${name.toLowerCase()}"]`);
+      await page.evaluate(z.literal(true), async () => {
+        document.querySelector('.phone-tools')?.scrollTo(0, 0);
+        await new Promise((resolve) => setTimeout(resolve, 160));
+        return true;
+      });
+      await page.screenshot(size.width === 402 ? 'inspector-phone-402' : 'inspector-ipad-834');
+      await page.click('[data-testid="projects-toggle"]');
+      t.ok(`${size.width}: the hidden expanded sheet does not reserve space for Projects`, await page.evaluate(z.boolean(), () => {
+        const stage = document.querySelector('.phone-stage')?.getBoundingClientRect();
+        return stage !== undefined && stage.height > innerHeight * .75 && document.querySelector('.phone-sheet')?.hasAttribute('hidden') === true;
+      }));
+      await page.click('[data-testid="projects-toggle"]');
+    }
+    await page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
+    await page.waitFor('desktop inspector', z.literal(true), () => document.querySelector('.inspector') === null ? null : true);
+    const hierarchy = () => page.evaluate(z.object({ fryTop: z.number(), names: z.array(z.string()), separate: z.boolean(), secondaryClosed: z.boolean() }), () => ({
+      fryTop: document.querySelector('.inspector [aria-label="Fry"]')?.getBoundingClientRect().top ?? -1,
+      names: Array.from(document.querySelectorAll('.inspector .node'), (node) => node.getAttribute('aria-label') ?? ''),
+      separate: document.querySelector('.scene-nodes .object-node') === null && document.querySelector('.object-scope .object-node') !== null,
+      secondaryClosed: ['palette', 'camera'].every((name) => document.querySelector(`[aria-controls="node-${name}"]`)?.getAttribute('aria-expanded') === 'false'),
+    }));
+    const selected = await hierarchy();
+    t.ok('desktop: selected-object controls have their own scope and Palette/Camera default closed', selected.separate && selected.secondaryClosed, selected);
+    await click('.inspector .swatch[aria-label="Coral"]');
+    await page.press('Escape');
+    const deselected = await hierarchy();
+    await click('.scene-sidebar .layer-row:last-child .layer-select');
+    const reselected = await hierarchy();
+    t.ok('desktop: Fry and the scene node order never move on recolor, deselection or reselection', selected.fryTop === deselected.fryTop && selected.fryTop === reselected.fryTop && selected.names.join(',') === reselected.names.join(','), { selected, deselected, reselected });
+    await click('[aria-controls="node-palette"]');
+    await click('[aria-controls="node-camera"]');
+    await click('[data-testid="style-grain"]');
+    for (let i = 0; i < 4; i++) await page.press('Tab');
+    const lowerFocus = await page.evaluate(z.object({ id: z.string().nullable(), top: z.number(), bottom: z.number(), boundsTop: z.number(), boundsBottom: z.number(), scrollY: z.number(), ancestorsStill: z.boolean() }), async () => {
+      // Native focus scrolling settles at the next rendering opportunity.
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      const active = document.activeElement?.getBoundingClientRect(), bounds = document.querySelector('.inspector .node-stack')?.getBoundingClientRect();
+      let ancestorsStill = true;
+      for (let node = document.activeElement?.parentElement; node !== null && node !== undefined; node = node.parentElement) if (!node.matches('.inspector .node-stack')) ancestorsStill &&= node.scrollTop === 0 && node.scrollLeft === 0;
+      return { id: document.activeElement?.getAttribute('data-testid') ?? null, top: active?.top ?? -1, bottom: active?.bottom ?? -1, boundsTop: bounds?.top ?? -1, boundsBottom: bounds?.bottom ?? -1, scrollY, ancestorsStill };
+    });
+    t.ok('desktop: lower node keyboard focus scrolls inside the inspector without moving the page', lowerFocus.id === 'style-clipping' && lowerFocus.top >= lowerFocus.boundsTop && lowerFocus.bottom <= lowerFocus.boundsBottom && lowerFocus.scrollY === 0 && lowerFocus.ancestorsStill, lowerFocus);
+    await page.press('Escape');
+    await click('.scene-sidebar .layer-row:last-child .layer-select');
+    t.ok('desktop: disclosure choices survive selection changes', await page.evaluate(z.boolean(), () => ['palette', 'camera'].every((name) => document.querySelector(`[aria-controls="node-${name}"]`)?.getAttribute('aria-expanded') === 'true')));
+    await page.screenshot('inspector-desktop-1440');
+    await click('[data-testid="motion-enabled"]');
+    const selectionBefore = await page.evaluate(z.string(), () => JSON.stringify(window.__noisyTest?.demo.objects().filter((object) => object.selected)));
+    const focusSchema = z.object({ focused: z.boolean(), visible: z.boolean(), width: z.string(), color: z.string(), offset: z.string(), pressed: z.string().nullable() });
+    const focusedControl = () => page.evaluate(focusSchema, () => {
+      const element = document.activeElement;
+      if (!(element instanceof HTMLElement)) throw new Error('No active control');
+      const style = getComputedStyle(element), box = element.getBoundingClientRect();
+      return { focused: element.matches(':focus-visible'), visible: box.top >= 0 && box.bottom <= innerHeight,
+        width: style.outlineWidth, color: style.outlineColor, offset: style.outlineOffset, pressed: element.getAttribute('aria-pressed') };
+    });
+    const tabTo = async (selector: string): Promise<void> => {
+      for (let i = 0; i < 120; i++) {
+        await page.press('Tab');
+        if (await page.evaluate(z.boolean(), (selector) => document.activeElement?.matches(selector) === true, selector)) return;
+      }
+      throw new Error(`Tab did not reach ${selector}`);
+    };
+    const pinkFocus = async (label: string): Promise<void> => {
+      const focus = await focusedControl();
+      t.ok(`${label}: keyboard focus is a separate inset 2 px accent ring`, focus.focused && focus.visible && focus.width === '2px' && focus.color === 'rgb(255, 61, 127)' && focus.offset === '-2px', focus);
+    };
+    await page.click('[data-testid="projects-toggle"]');
+    await page.click('[data-testid="projects-return"]');
+    await tabTo('.scene-sidebar .layer-select[aria-pressed="true"]');
+    await pinkFocus('selected object layer');
+    t.equal('Tab focus never changes the selected layer', await page.evaluate(z.string(), () => JSON.stringify(window.__noisyTest?.demo.objects().filter((object) => object.selected))), selectionBefore);
+    await tabTo('[data-testid="style-fry"]');
+    await pinkFocus('Fry range');
+    await tabTo('.bottom-bar .mode-rail button:first-child');
+    await pinkFocus('pressed Motion mode');
+    t.equal('Motion retains its pressed state while focused', (await focusedControl()).pressed, 'true');
+    await tabTo('[data-testid="projects-toggle"]');
+    await page.press('Enter');
+    await pinkFocus('active Projects toggle');
+    t.equal('Projects retains its pressed state while focused', (await focusedControl()).pressed, 'true');
+    await tabTo('.top-bar .primary-action');
+    const downloadFocus = await focusedControl();
+    t.ok('Download retains the contrasting text ring inset 4 px', downloadFocus.focused && downloadFocus.width === '2px' && downloadFocus.color === 'rgb(230, 230, 230)' && downloadFocus.offset === '-4px', downloadFocus);
+    await page.click('[data-testid="projects-return"]');
+    await tabTo('.inspector .swatch[aria-label="Coral"]');
+    const swatchFocus = await focusedControl();
+    t.ok('swatches retain the contrasting ground ring inset 5 px', swatchFocus.focused && swatchFocus.width === '2px' && swatchFocus.color === 'rgb(26, 26, 26)' && swatchFocus.offset === '-5px', swatchFocus);
+    // Plate is a selected button itself, the original specificity regression.
+    await page.click('.scene-sidebar .layer-row:first-child');
+    const unfocused = await page.evaluate(z.string(), () => {
+      const plate = document.querySelector('.scene-sidebar .layer-row:first-child');
+      return plate === null ? '' : getComputedStyle(plate).outlineWidth;
+    });
+    await tabTo('.scene-sidebar button.layer-row.is-selected');
+    await pinkFocus('selected Plate layer');
+    t.equal('pointer selection stays 1 px', unfocused, '1px');
+    await page.screenshot('focus-1440');
+    await page.emulate({ width: 1440, height: 550, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
+    t.ok('short desktop height keeps the status and mode rail visible without page scrolling', await page.evaluate(z.boolean(), () => {
+      const footer = document.querySelector('.bottom-bar')?.getBoundingClientRect();
+      return footer !== undefined && footer.height === 44 && footer.bottom === innerHeight &&
+        document.querySelectorAll('.bottom-bar .mode-rail button').length === 3 &&
+        scrollY === 0 && document.documentElement.scrollHeight === innerHeight;
+    }));
   },
 }];

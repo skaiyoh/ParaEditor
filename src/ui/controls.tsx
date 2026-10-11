@@ -30,11 +30,12 @@ export function Node({ name, expanded, onExpand, toggle, children }: {
   </section>;
 }
 
-export function EnableSwitch({ name, checked, onChange }: {
+export function EnableSwitch({ name, checked, onChange, portrait = false }: {
   readonly name: 'Motion' | 'Symbols'; readonly checked: boolean; readonly onChange: (enabled: boolean) => void;
+  readonly portrait?: boolean;
 }) {
   return <label class="enable-switch" title={`${name} on or off`}>
-    <input data-testid={`${name.toLowerCase()}-enabled`} type="checkbox" aria-label={name} checked={checked}
+    <input data-testid={`${name.toLowerCase()}${portrait ? '-node' : ''}-enabled`} type="checkbox" aria-label={name} checked={checked}
       onChange={(event) => onChange(event.currentTarget.checked)} />
   </label>;
 }

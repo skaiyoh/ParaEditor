@@ -4,16 +4,15 @@ import { RANGES } from '../core/ranges.ts';
 import type { Motion } from '../core/types.ts';
 import type { DemoSession } from '../session/scene.ts';
 import { Node, RangeControl } from './controls.tsx';
-import { Layers, ObjectInspector } from './layers.tsx';
 
-export function PhoneFrame({ state, session, status, preparing, busy, touch, modelsReady, projectsOpen, projects, onProjects, onOpen, onSample, onDownload, onMotion, onSymbols, onParallax, debug, onDebug, children }: {
+export function PhoneFrame({ state, session, status, preparing, busy, touch, modelsReady, projectsOpen, projects, inspector, onProjects, onOpen, onSample, onDownload, onMotion, onSymbols, onParallax, children }: {
   readonly state: ReturnType<DemoSession['snapshot']>; readonly session: DemoSession;
   readonly status: string; readonly busy: boolean; readonly touch: boolean; readonly modelsReady: boolean;
   readonly preparing: string | null;
   readonly onOpen: (file: File | undefined) => void; readonly onSample: () => void;
   readonly onDownload: () => void; readonly onMotion: () => void; readonly onSymbols: () => void;
-  readonly onParallax: () => void; readonly debug: boolean; readonly onDebug: () => void; readonly children: ComponentChildren;
-  readonly projectsOpen: boolean; readonly projects: ComponentChildren; readonly onProjects: () => void;
+  readonly onParallax: () => void; readonly children: ComponentChildren; readonly inspector: ComponentChildren;
+  readonly projectsOpen: boolean; readonly projects: (onImport: () => void) => ComponentChildren; readonly onProjects: () => void;
 }) {
   const { scene, parallaxEnabled } = state;
   const cameraInput = useRef<HTMLInputElement>(null);
@@ -23,26 +22,29 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
   useLayoutEffect(() => {
     if (parallaxEnabled) setExpanded(false);
   }, [parallaxEnabled]);
-  const selected = scene?.doc.objects.find((object) => object.id === scene.selected);
+  const motionEnabled = scene?.doc.motion.enabled ?? false;
+  useLayoutEffect(() => {
+    if (motionEnabled) setExpanded(true);
+  }, [sceneId, motionEnabled]);
   const takePhoto = (): void => cameraInput.current?.click();
   return <>
     <header class="top-bar phone-strip">
       <span class="photo-name" title={scene?.doc.frame.original.name}>{scene?.doc.frame.original.name ?? 'No photo open'}</span>
       <div class="action-rail" aria-label="Photo actions">
         <button type="button" data-testid="projects-toggle" aria-pressed={projectsOpen} onClick={onProjects}>Projects</button>
-        {touch && <button type="button" data-testid="take-photo" onClick={takePhoto}>Take a photo</button>}
-        <button type="button" disabled={scene === null || busy} onClick={() => session.reset()}>Reset</button>
+        <button type="button" data-testid={touch ? 'take-photo' : 'open-photo'} onClick={takePhoto}>{touch ? 'Take a photo' : 'Open'}</button>
+        {!projectsOpen && <button type="button" disabled={scene === null || busy} onClick={() => session.reset()}>Reset</button>}
       </div>
-      {touch && <input ref={cameraInput} type="file" accept="image/*" capture="environment" hidden onChange={(event) => {
+      <input ref={cameraInput} type="file" accept="image/*" capture={touch ? 'environment' : undefined} hidden onChange={(event) => {
         onOpen(event.currentTarget.files?.[0]); event.currentTarget.value = '';
-      }} />}
+      }} />
     </header>
     <section class="phone-stage" aria-label="Photo viewer" aria-busy={busy}>
       {children}
       {!projectsOpen && preparing !== null && <p class="preparing" data-testid="preparing">{preparing}</p>}
-      {projectsOpen && projects}
+      {projectsOpen && projects(takePhoto)}
       {scene === null && !projectsOpen && <div class="empty-stage"><div class="empty-actions">
-        {touch && <button type="button" onClick={takePhoto}>Take a photo</button>}
+        <button type="button" onClick={takePhoto}>{touch ? 'Take a photo' : 'Open'}</button>
         <button type="button" onClick={onSample}>Try a sample</button>
       </div></div>}
     </section>
@@ -52,18 +54,10 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
         <span class="status-line" data-testid="status" role="status">{status}</span>
       </button>
       <div id="phone-tools" class="phone-tools" hidden={!expanded || projectsOpen}>
-        {scene !== null && <>
-          <section class="node" aria-label="Fry">
-            <RangeControl id="style-fry" label="Fry" min={0} max={1} step={0.01} value={scene.doc.style.fry} onInput={(value) => session.setFry(value)} />
-          </section>
-          {scene.doc.motion.enabled && <section class="node" aria-label="Motion"><MotionControls motion={scene.doc.motion} session={session} /><MotionExport session={session} /></section>}
-          <ParallaxNode enabled={parallaxEnabled} available={modelsReady} onParallax={onParallax} debug={debug} onDebug={onDebug} />
-          {selected !== undefined && <ObjectInspector key={selected.id} object={selected} session={session} />}
-          <Layers scene={scene} session={session} />
-        </>}
+        {inspector}
       </div>
     </section>
-    {scene !== null && <div class="mode-rail phone-toolbar" role="group" aria-label="Viewer modes">
+    {scene !== null && !projectsOpen && <div class="mode-rail phone-toolbar" role="group" aria-label="Viewer modes">
       <button type="button" data-testid="motion-enabled" aria-pressed={scene.doc.motion.enabled}
         onClick={onMotion}>Motion</button>
       <button type="button" data-testid="symbols-enabled" aria-pressed={scene.doc.symbols.enabled} onClick={onSymbols}>Symbols</button>
@@ -79,7 +73,7 @@ export function ParallaxNode({ enabled, available, onParallax, debug, onDebug }:
   readonly enabled: boolean; readonly available: boolean; readonly onParallax: () => void;
   readonly debug: boolean; readonly onDebug: () => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   return <Node name="Parallax" expanded={expanded} onExpand={() => setExpanded((open) => !open)}
     toggle={<label class="enable-switch" title="Parallax on or off">
       <input data-testid="parallax-node-enabled" type="checkbox" aria-label="Parallax" checked={enabled} disabled={!available} onChange={onParallax} />
