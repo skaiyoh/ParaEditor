@@ -7,6 +7,73 @@ import { createCleanup } from '../driver/processes.ts';
 import type {} from '../../../src/app/gallery-page.ts';
 
 const sizes = [{ width: 390, height: 844 }, { width: 1180, height: 820 }, { width: 1440, height: 900 }];
+const pieceSizes = [
+  { width: 1180, height: 820 }, { width: 820, height: 1180 },
+  { width: 1180, height: 740 }, { width: 820, height: 1100 }, { width: 390, height: 844 },
+];
+async function pieceScreen(t: ScenarioContext, name: 'piece-running' | 'piece-fallback', aspect: number): Promise<void> {
+  const { page } = t;
+  const rect = z.object({ left: z.number(), top: z.number(), right: z.number(), bottom: z.number(), width: z.number(), height: z.number() });
+  for (const size of pieceSizes) {
+    const label = `${name}-${size.width}-${size.height}`;
+    await page.emulate({ ...size, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
+    await page.evaluate(z.literal(true), async () => {
+      Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 5 });
+      dispatchEvent(new Event('resize'));
+      await document.fonts.ready;
+      await document.querySelector<HTMLImageElement>('[data-testid="gallery-poster"]')?.decode();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      return true;
+    });
+    const layout = await page.evaluate(z.object({
+      stage: rect, picture: rect, media: rect, top: rect, controls: rect, notice: rect,
+      rowEdges: z.array(z.number()), scrollWidth: z.number(), scrollHeight: z.number(),
+      width: z.number(), height: z.number(), locked: z.boolean(), inFlow: z.boolean(),
+      framed: z.boolean(), stagePadding: z.number(), posterAspect: z.number(),
+    }), () => {
+      const element = (selector: string): HTMLElement => {
+        const node = document.querySelector<HTMLElement>(selector);
+        if (node === null) throw new Error(`Missing ${selector}`);
+        return node;
+      };
+      const bounds = (node: HTMLElement) => {
+        const { left, top, right, bottom, width, height } = node.getBoundingClientRect();
+        return { left, top, right, bottom, width, height };
+      };
+      const piece = element('.gallery-piece'), stage = element('.gallery-piece-stage'), picture = element('.gallery-picture');
+      const top = element('.gallery-piece-top'), controls = element('.gallery-piece-controls');
+      const poster = document.querySelector<HTMLImageElement>('[data-testid="gallery-poster"]');
+      const scroll = document.scrollingElement;
+      if (poster === null || scroll === null) throw new Error('Missing poster or scrolling element');
+      const style = getComputedStyle(piece), frame = getComputedStyle(picture);
+      const rowEdges = [piece.getBoundingClientRect().top + parseFloat(style.paddingTop)];
+      for (const row of style.gridTemplateRows.split(' ')) rowEdges.push((rowEdges.at(-1) ?? 0) + parseFloat(row));
+      return {
+        stage: bounds(stage), picture: bounds(picture), top: bounds(top), controls: bounds(controls),
+        notice: bounds(element('[data-testid="gallery-status"]')),
+        media: bounds(poster.hidden ? element('[data-testid="gallery-canvas"]') : poster), rowEdges,
+        scrollWidth: scroll.scrollWidth, scrollHeight: scroll.scrollHeight, width: innerWidth, height: innerHeight,
+        locked: [document.documentElement, document.body].every((node) => {
+          const css = getComputedStyle(node);
+          return css.overflow === 'hidden' && css.overscrollBehavior === 'none';
+        }),
+        inFlow: style.display === 'grid' && [top, controls].every((node) => getComputedStyle(node).position === 'static'),
+        framed: frame.borderTopWidth === '1px' && frame.borderTopColor === 'rgb(58, 58, 58)' && frame.borderRadius === '8px' && frame.overflow === 'hidden',
+        stagePadding: parseFloat(getComputedStyle(stage).paddingTop), posterAspect: poster.naturalWidth / poster.naturalHeight,
+      };
+    });
+    const { stage, picture, media, top, controls, rowEdges } = layout;
+    t.ok(`${label}: document fits the viewport and disables bounce`, layout.scrollHeight <= layout.height && layout.scrollWidth <= layout.width && layout.locked, layout);
+    t.ok(`${label}: picture is centered in the stage within 1 px`, Math.abs(picture.left + picture.width / 2 - stage.left - stage.width / 2) <= 1 && Math.abs(picture.top + picture.height / 2 - stage.top - stage.height / 2) <= 1, layout);
+    t.ok(`${label}: frame and media preserve the published aspect within 1 percent`, Math.abs(picture.width / picture.height / aspect - 1) <= .01 && Math.abs(media.width / media.height / aspect - 1) <= .01 && Math.abs(layout.posterAspect / aspect - 1) <= .01, layout);
+    t.ok(`${label}: media fills the clipped hairline frame`, layout.framed && Math.abs(media.width - (picture.width - 2)) < .1 && Math.abs(media.height - (picture.height - 2)) < .1 && Math.abs(media.left - picture.left - 1) < .1 && Math.abs(media.top - picture.top - 1) < .1, layout);
+    const [start, first, second, end] = rowEdges;
+    t.ok(`${label}: top line and controls occupy rows 1 and 3 without picture overlap`, layout.inFlow && rowEdges.length === 4 && start !== undefined && first !== undefined && second !== undefined && end !== undefined && top.top >= start - .1 && top.bottom <= first + .1 && controls.top >= second - .1 && controls.bottom <= end + .1 && top.bottom <= picture.top && picture.bottom <= controls.top && controls.bottom <= layout.height, layout);
+    t.ok(`${label}: picture stays inside the padded stage`, layout.stagePadding === (size.width >= 744 ? 24 : 16) && picture.left >= stage.left + layout.stagePadding - .1 && picture.right <= stage.right - layout.stagePadding + .1 && picture.top >= stage.top + layout.stagePadding - .1 && picture.bottom <= stage.bottom - layout.stagePadding + .1, layout);
+    if (name === 'piece-fallback') t.ok(`${label}: status overlays the stage top inside row 2`, Math.abs(layout.notice.top - stage.top) < .1 && layout.notice.bottom <= stage.bottom, layout);
+    await page.screenshot(label);
+  }
+}
 async function captures(t: ScenarioContext, name: string): Promise<void> {
   const { page } = t;
   for (const size of sizes) {
@@ -93,6 +160,11 @@ export const scenarios: readonly Scenario[] = [{
     }), true);
     await page.click('[data-testid="try-sample"]');
     await page.waitFor('sample ready to publish', z.literal(true), () => window.__noisyTest?.demo.gallery.canPublish().kind === 'ready' ? true : null, { timeoutMs: 180_000 });
+    const pieceAspect = await page.evaluate(z.number(), () => {
+      const size = window.__noisyTest?.demo.document()?.frame.master.size;
+      if (size === undefined) throw new Error('No master size');
+      return size.width / size.height;
+    });
     // Freeze temporal effects so a later pixel change can only come from pointer input.
     await page.evaluate(z.literal(true), () => {
       window.__noisyTest?.demo.setMotion({ enabled: false }); window.__noisyTest?.demo.setStyle({ grain: 0 }); return true;
@@ -174,6 +246,7 @@ export const scenarios: readonly Scenario[] = [{
       });
       t.ok('desktop pointer changes the rendered view', center !== await canvasHash(page));
       await captures(t, 'piece-running');
+      await pieceScreen(t, 'piece-running', pieceAspect);
       await page.emulate({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await page.evaluate(z.literal(true), () => {
         Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 5 });
@@ -214,10 +287,12 @@ export const scenarios: readonly Scenario[] = [{
         return poster !== null && !poster.hidden && poster.complete && poster.naturalWidth > 0 && document.querySelector('[data-testid="gallery-status"]')?.textContent?.includes('poster') ? true : null;
       });
       await captures(t, 'piece-fallback');
+      await pieceScreen(t, 'piece-fallback', pieceAspect);
       await noInference(t, requestStart);
       await page.click('[data-testid="gallery-unpublish"]');
       await page.click('.gallery-confirm button');
       await page.waitFor('unpublish returns to grid', z.literal(true), () => location.pathname === '/gallery' && document.querySelector('[data-testid="gallery-empty"], [data-testid="gallery-grid"]') !== null ? true : null);
+      t.ok('returning to the grid releases the piece scroll lock', await page.evaluate(z.boolean(), () => [document.documentElement, document.body].every((node) => getComputedStyle(node).overflow !== 'hidden')));
       t.equal('unpublished piece leaves grid', await page.evaluate(z.boolean(), (url) => [...document.querySelectorAll<HTMLAnchorElement>('[data-testid="gallery-piece-link"]')].some((link) => link.getAttribute('href') === url), href), false);
       // Deterministic empty and failure cases even when another scenario left public pieces.
       await page.intercept([{ method: 'GET', path: '/api/gallery', action: { kind: 'respond', status: 200, body: JSON.stringify({ pieces: [] }) } }]);

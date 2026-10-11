@@ -144,7 +144,7 @@ The early-2000s identity lives in the type, the crunched key and the status voic
 The same mounted editor serves two tiers.
 The full tier (width at least 744 px and height above 500 px: iPad landscape and portrait, desktop) floats its panels over the picture.
 The compact tier (phones) hosts the same panels in one tabbed bottom sheet.
-The public gallery lives in the same room: a strip, a masonry grid of posters, then the piece full-bleed.
+The public gallery lives in the same room: a strip, a masonry grid of posters, then a framed piece on Room Ground.
 Further tools join the map as their stages land.
 
 **Key Characteristics:**
@@ -218,7 +218,10 @@ The Fry rail has half opacity when its input is disabled.
 
 **Gallery.**
 A 52 px strip, then a masonry grid with 12 px gutters: two columns, four from 1180 px, five from 1440 px.
-The piece page has a quiet top line and controls centered at the bottom; on phone portrait it letterboxes so the whole picture shows.
+The piece page is one safe-area-aware 100dvh screen with three grid rows: the quiet top line, a shrinking stage, and controls centered at the bottom in normal flow.
+The picture is centered in the stage with 16 px padding, increasing to 24 px from 744 px wide.
+Its aspect follows the document master size once loaded and the poster natural size beforehand, with canvas and poster filling the same clipped box inside a 1 px hairline and 8 px corners.
+The piece status notice overlays the stage's top edge, and the document disables scrolling and bounce only while the piece page is mounted.
 The timestamp aligns with the adjacent 44 px controls, and quiet piece controls carry the floating surface hairline.
 A centered 11 px secondary hint follows a nonempty grid.
 On touch devices its two sentences are "Tap a piece to step into it." and "Tilt your phone to look around."

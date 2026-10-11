@@ -35,13 +35,13 @@ export function createComposedAnalysisService(deps: Omit<RemoteDeps, 'base' | 'f
   let cleaning = false;
   const deferred: (() => void)[] = [];
   const terminal = (notify: () => void): void => { if (cleaning) deferred.push(notify); else notify(); };
-  const cleanup = (release: boolean): void => {
+  const cleanup = (release: boolean, reason?: 'timeout'): void => {
     const pending = choosing; choosing = null;
     if (release) { scene = null; gpuPlate = false; backend = { kind: 'device' }; }
     // Both transports must stop before a callback can start another sequence.
     cleaning = true;
     if (release) remote?.releaseSession(); else remote?.cancelHeavy();
-    deps.local.cancelHeavy(); pending?.abort();
+    deps.local.cancelHeavy(reason); pending?.abort();
     cleaning = false;
     const callbacks = deferred.splice(0);
     for (const notify of callbacks) notify();
@@ -147,8 +147,8 @@ export function createComposedAnalysisService(deps: Omit<RemoteDeps, 'base' | 'f
         }, combined);
       })().catch((error: unknown) => finish({ kind: 'worker', op: stages[0].kind, message: error instanceof Error ? error.message : 'Analysis selection failed.' }));
     },
-    cancelHeavy() {
-      cleanup(false);
+    cancelHeavy(reason) {
+      cleanup(false, reason);
     },
     releaseImport() {
       // Retire native work and the remote lease before terminal callbacks.

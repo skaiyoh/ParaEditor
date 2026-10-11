@@ -57,7 +57,7 @@ export type ServiceWorld = {
   readonly ports: Port[];
   /** The thread count of each service built, in order. */
   readonly built: number[];
-  /** How the port of run `run` (0-based, across services) answers `stage`; every product by default. */
+  /** How logical sequence `run` (0-based, across services) answers `stage`; every product by default. */
   answer: (stage: Stage, run: number) => Answer;
   /** What the loader's fetch answers, at once or when the promise settles; ok by default. */
   fetchModels: () => Result<void, AnalysisError> | Promise<Result<void, AnalysisError>>;
@@ -67,6 +67,7 @@ export type ServiceWorld = {
 
 export function serviceWorld(clock: Pick<Clock, 'now'>, lock: ParsedLock): ServiceWorld {
   let cancels = 0;
+  let nextRun = 0;
   const world: ServiceWorld = {
     get cancels() {
       return cancels;
@@ -77,11 +78,14 @@ export function serviceWorld(clock: Pick<Clock, 'now'>, lock: ParsedLock): Servi
     fetchModels: () => ok(undefined),
     service: (threads, diag) => {
       world.built.push(threads);
+      let currentRun = -1;
       const loader: ModelLoader = { lockHash: 'h', cacheName: 'noisy-models-h', partialCacheName: 'noisy-models-h-partial', fetchModels: async () => world.fetchModels() };
       const service = createAnalysisService({
-        clock,
+        // Harness timers own timeout/Stop coverage; service drain deadlines
+        // are driven by a fake clock in analysis-service.test.ts.
+        clock: { now: () => clock.now() },
         diag,
-        spawn: () => spawn(threads),
+        spawn: () => spawn(threads, () => currentRun),
         spawnDecoder: () => {
           throw new Error('the harness runner opens no decoder');
         },
@@ -91,7 +95,10 @@ export function serviceWorld(clock: Pick<Clock, 'now'>, lock: ParsedLock): Servi
         loader: Promise.resolve(ok(loader)),
       });
       return {
-        runSequence: (...args) => service.runSequence(...args),
+        runSequence: (...args) => {
+          currentRun = nextRun++;
+          service.runSequence(...args);
+        },
         cancelHeavy: () => {
           cancels += 1;
           service.cancelHeavy();
@@ -104,8 +111,7 @@ export function serviceWorld(clock: Pick<Clock, 'now'>, lock: ParsedLock): Servi
     },
   };
 
-  const spawn = (threads: number): Port => {
-    const run = world.ports.length;
+  const spawn = (threads: number, currentRun: () => number): Port => {
     const messages: ((event: { readonly data: unknown }) => void)[] = [];
     const errors: ((event: object) => void)[] = [];
     const reply = (data: SequenceReply): void => {
@@ -120,7 +126,7 @@ export function serviceWorld(clock: Pick<Clock, 'now'>, lock: ParsedLock): Servi
         port.posted.push(message);
         if (message.type !== 'run') return;
         const stage = message.stage;
-        const answer = world.answer(stage, run);
+        const answer = world.answer(stage, currentRun());
         setImmediate(() => {
           switch (answer.kind) {
             case 'product':

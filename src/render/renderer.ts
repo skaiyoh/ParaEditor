@@ -1335,7 +1335,7 @@ export function createRenderer(canvas: HTMLCanvasElement): ExportRenderer {
       gpu.dispose(); scopeTextures.clear(); preparedLocalEffects = []; legacyLookup = null; legacyWarp = null; lastFrameLookup = null; localBefore = null; localCoverageTarget = null;
       scene = null; buffers = null; cellBuffers = null; crunchBuffers = null; finalTarget = null; selectionSource = null; master = null; plate = null; depth = null; lut = null; palette = null;
     },
-    debug: probe === null ? null : { ...probe.debug, readGeometryPatch, perspectiveResources,
+    debug: probe === null ? null : { ...probe.debug, readGeometryPatch, perspectiveResources, resources: gpu.resources,
       readLocalEffectPatch, readLocalCoveragePatch, localResources,
       motionCamera: () => ({ ...renderedCamera }),
       setMotionFeather: (enabled: boolean): void => { featherEnabled = enabled; },

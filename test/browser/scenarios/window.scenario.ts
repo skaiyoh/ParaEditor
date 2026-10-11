@@ -197,8 +197,8 @@ export const scenarios: readonly Scenario[] = [{
         // Off is also the pre-click DOM state. Wait for the actual terminal result,
         // not a stale aria value before Preact commits the starting state.
         await wait(() => button.getAttribute('aria-pressed') === 'false' &&
-          /Camera unavailable/.test(demo.scene().status) && /Tilt unavailable/.test(demo.scene().status), 5000);
-        deniedSafe = demo.windowTracks().length === 0 && /Camera unavailable/.test(demo.scene().status);
+          /Camera permission was denied/.test(demo.scene().status) && /Tilt unavailable/.test(demo.scene().status), 5000);
+        deniedSafe = demo.windowTracks().length === 0 && /Camera permission was denied/.test(demo.scene().status);
         button.click();
         const tiltTimer = setInterval(() => demo.injectOrientation({ alpha: 0, beta: 0, gamma: 0 }), 60);
         try { await wait(() => demo.parallaxDebug().source === 'tilt', 5000); deniedCameraTilt = demo.windowTracks().length === 0; }
@@ -240,5 +240,167 @@ export const scenarios: readonly Scenario[] = [{
     t.ok('camera denial permits tilt; both unavailable leaves Parallax off', result.deniedCameraTilt && result.deniedSafe, observed);
     t.ok('debug shows matching camera pixels and timestamped observations without entering export', result.debugMatches && result.debugExportSafe, observed);
     t.ok('toggles reuse cached face model', result.noToggleFetch, observed);
+  },
+}, {
+  id: 'window.camera-permissions', title: 'CAM2 trusted taps, native camera permission outcomes and darkness versus startup failure', target: 'dev', covers: ['CAM2'], timeoutMs: 300_000,
+  async run(t) {
+    // Run the same real workflow with native Chrome denial using the documented
+    // --use-fake-ui-for-media-stream=deny flag and this explicit expectation.
+    const denied = process.env['NOISY_TEST_CAMERA_DENIED'] === '1';
+    const { page } = t;
+    const preparePage = async (): Promise<void> => {
+      await page.goto('/');
+      await page.evaluate(z.literal(true), () => {
+        const sample = [...document.querySelectorAll('button')].find((button) => button.textContent === 'Try a sample');
+        if (sample === undefined) throw new Error('No sample action.'); sample.click(); return true;
+      });
+      await page.waitFor('sample analysis', z.literal(true), () => {
+        const analysis = window.__noisyTest?.demo.analysis();
+        return analysis?.depth && analysis.decoderReady && !analysis.alive.heavy ? true : null;
+      }, { timeoutMs: 180_000 });
+      await page.evaluate(z.literal(true), () => {
+        const demo = window.__noisyTest?.demo; if (demo === undefined) throw new Error('No demo.');
+        let gesture: Event | null = null;
+        const probes: { api: string; event: string; inDispatch: boolean; trusted: boolean; active: boolean }[] = [];
+        const record = (api: string): void => {
+          probes.push({ api, event: gesture?.type ?? '', inDispatch: gesture !== null && gesture.eventPhase !== Event.NONE,
+            trusted: gesture?.isTrusted === true, active: navigator.userActivation.isActive });
+          document.body.dataset['cam2Probes'] = JSON.stringify(probes);
+        };
+        const clicked = (event: Event): void => { gesture = event; };
+        document.addEventListener('click', clicked, true); document.addEventListener('change', clicked, true);
+        const media = navigator.mediaDevices, getUserMedia = media.getUserMedia;
+        media.getUserMedia = (constraints) => {
+          record('camera');
+          return getUserMedia.call(media, constraints).catch((error: unknown) => {
+            document.body.dataset['cam2NativeError'] = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+            throw error;
+          });
+        };
+        // Chrome has no iOS orientation permission prompt. Only this API is
+        // simulated; the actual getUserMedia request and worker remain real.
+        const permission = Object.getOwnPropertyDescriptor(DeviceOrientationEvent, 'requestPermission');
+        Object.defineProperty(DeviceOrientationEvent, 'requestPermission', { configurable: true, value: () => { record('orientation'); return Promise.resolve('granted'); } });
+        const timer = setInterval(() => demo.injectOrientation({ alpha: 0, beta: 0, gamma: 0 }), 50);
+        const worker = window.Worker;
+        document.addEventListener('cam2-worker-fault', () => {
+          window.Worker = class extends worker {
+            constructor(url: string | URL, options?: WorkerOptions) {
+              if (String(url).includes('face-worker')) {
+                document.body.dataset['cam2WorkerFaults'] = String(Number(document.body.dataset['cam2WorkerFaults'] ?? '0') + 1);
+                throw new Error('CAM2 worker startup fault');
+              }
+              super(url, options);
+            }
+          };
+        }, { once: true });
+        document.addEventListener('cam2-cleanup', () => {
+          clearInterval(timer); media.getUserMedia = getUserMedia; window.Worker = worker;
+          document.removeEventListener('click', clicked, true); document.removeEventListener('change', clicked, true);
+          if (permission === undefined) Reflect.deleteProperty(DeviceOrientationEvent, 'requestPermission');
+          else Object.defineProperty(DeviceOrientationEvent, 'requestPermission', permission);
+        }, { once: true });
+        return true;
+      });
+    };
+    const openDiagnostics = async (): Promise<void> => {
+      const compact = await page.evaluate(z.boolean(), () => document.querySelector('.sheet-handle') !== null);
+      await page.click(compact ? '.sheet-handle' : '[data-testid="tool-adjust"]');
+      await page.evaluate(z.literal(true), () => {
+        const control = document.querySelector('[aria-controls="node-parallax"]');
+        const body = control?.closest('.phone-tools, .floating-panel-body');
+        if (control !== null && control !== undefined && body instanceof HTMLElement) body.scrollTop += control.getBoundingClientRect().top - body.getBoundingClientRect().top - 10;
+        return true;
+      });
+      await page.click('[aria-controls="node-parallax"]');
+      await page.evaluate(z.literal(true), () => {
+        const control = document.querySelector('[data-testid="parallax-debug-toggle"]');
+        const body = control?.closest('.phone-tools, .floating-panel-body');
+        if (control !== null && control !== undefined && body instanceof HTMLElement) body.scrollTop += control.getBoundingClientRect().top - body.getBoundingClientRect().top - 10;
+        return true;
+      });
+      await page.click('[data-testid="parallax-debug-toggle"]');
+      await page.click(compact ? '.sheet-handle' : '[data-testid="tool-adjust"]');
+    };
+    for (const size of [{ name: 'desktop', width: 1440, height: 900 }, { name: 'ipad-portrait', width: 820, height: 1180 }]) {
+      await page.emulate({ ...size, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
+      await preparePage();
+      try {
+        await page.click('[data-testid="parallax-enabled"]');
+        if (denied) {
+          await page.waitFor('native camera denial with tilt', z.literal(true), () => {
+            const demo = window.__noisyTest?.demo;
+            return demo?.parallaxDebug().source === 'tilt' && demo.scene().status.includes('Camera permission was denied') ? true : null;
+          });
+        } else {
+          await page.waitFor('native camera inference', z.literal(true), () => (window.__noisyTest?.demo.windowFrames() ?? 0) >= 2 ? true : null, { timeoutMs: 60_000 });
+        }
+        const probe = await page.evaluate(z.object({ probes: z.array(z.object({ api: z.string(), event: z.string(), inDispatch: z.boolean(), trusted: z.boolean(), active: z.boolean() })), nativeError: z.string().nullable(), frames: z.number(), tracks: z.number(), failure: z.object({ reason: z.string(), detail: z.string() }).nullable() }), () => {
+          const demo = window.__noisyTest?.demo; if (demo === undefined) throw new Error('No demo.');
+          return { probes: JSON.parse(document.body.dataset['cam2Probes'] ?? '[]'), nativeError: document.body.dataset['cam2NativeError'] ?? null,
+            frames: demo.windowFrames(), tracks: demo.windowTracks().length, failure: demo.parallaxDebug().failures.camera };
+        });
+        await t.file(`${size.name}-permission.json`, JSON.stringify(probe, null, 2));
+        t.ok(`${size.name}: both permission requests stay in the trusted tap dispatch`, probe.probes.length === 2 &&
+          probe.probes.every((request) => request.inDispatch && request.trusted && request.active) &&
+          probe.probes[0]?.api === 'camera' && probe.probes[1]?.api === 'orientation', probe);
+        t.ok(`${size.name}: native camera outcome matches the configured permission`, denied
+          ? probe.tracks === 0 && probe.nativeError?.startsWith('NotAllowedError:') === true && probe.failure?.detail === probe.nativeError
+          : probe.tracks > 0 && probe.frames >= 2 && probe.nativeError === null && probe.failure === null, probe);
+        await openDiagnostics();
+        if (denied) {
+          await page.waitFor('denial explanation in panel', z.literal(true), () => document.querySelector('[data-testid="parallax-camera-status"]')?.textContent === 'Camera permission was denied.' ? true : null);
+          await page.screenshot(`${size.name}-camera-denied`);
+        } else {
+          const dark = await page.evaluate(z.object({ source: z.string(), state: z.string(), quality: z.number().nullable(), running: z.boolean(), tracks: z.number(), status: z.string(), panel: z.string() }), async () => {
+            const demo = window.__noisyTest?.demo; if (demo === undefined) throw new Error('No demo.');
+            const darkFrame = new ImageData(320, 240);
+            const pump = setInterval(() => demo.injectCameraFrame(darkFrame, null), 50);
+            try {
+              await new Promise<void>((resolve) => setTimeout(resolve, 500));
+              const debug = demo.parallaxDebug();
+              return { source: debug.source, state: debug.cameraState, quality: debug.samples.camera?.quality ?? null,
+                running: debug.cameraRunning, tracks: demo.windowTracks().length, status: demo.scene().status,
+                panel: document.querySelector('[data-testid="parallax-camera-status"]')?.textContent ?? '' };
+            } finally { clearInterval(pump); }
+          });
+          t.ok(`${size.name}: a dark/no-face observation keeps the camera running and explains tilt`, dark.running && dark.tracks > 0 && dark.state === 'lost' && dark.quality === 0 &&
+            dark.source === 'tilt' && dark.status.includes('No clear face is in view, or the scene is too dark') && dark.panel === 'No clear face is in view, or the scene is too dark.', dark);
+          await t.file(`${size.name}-dark.json`, JSON.stringify(dark, null, 2));
+          await page.screenshot(`${size.name}-no-face`);
+          const camera = await page.evaluate(z.object({ source: z.string(), running: z.boolean() }), async () => {
+            const demo = window.__noisyTest?.demo; if (demo === undefined) throw new Error('No demo.');
+            const frame = new ImageData(320, 240), face = { center: { x: .5, y: .5 }, size: .2, confidence: .95 };
+            demo.recenterParallax();
+            const pump = setInterval(() => demo.injectCameraFrame(frame, face), 50);
+            try {
+              await new Promise<void>((resolve) => setTimeout(resolve, 700));
+              return { source: demo.parallaxDebug().source, running: demo.parallaxDebug().cameraRunning };
+            } finally { clearInterval(pump); }
+          });
+          t.ok(`${size.name}: calibrated observations select the acquired camera route`, camera.running && camera.source === 'camera', camera);
+          await page.click('[data-testid="parallax-enabled"]');
+          // MEM2 retains the face worker across toggles. A fresh page exercises
+          // the real constructor without discarding the product's resident worker.
+          await page.evaluate(z.literal(true), () => { document.dispatchEvent(new Event('cam2-cleanup')); return true; });
+          await preparePage();
+          await page.evaluate(z.literal(true), () => { document.dispatchEvent(new Event('cam2-worker-fault')); return true; });
+          await page.click('[data-testid="parallax-enabled"]');
+          await openDiagnostics();
+          await page.waitFor('worker failure explanation', z.literal(true), () => {
+            const demo = window.__noisyTest?.demo;
+            return demo?.parallaxDebug().source === 'tilt' && demo.scene().status.includes('Face tracking could not start') &&
+              document.querySelector('[data-testid="parallax-camera-status"]')?.textContent === 'Face tracking could not start.' ? true : null;
+          });
+          const failure = await page.evaluate(z.object({ reason: z.string(), detail: z.string() }).nullable(), () => window.__noisyTest?.demo.parallaxTrace().failures.camera ?? null);
+          t.equal(`${size.name}: worker startup failure preserves its exact error in the trace`, failure, { reason: 'Face tracking could not start', detail: 'Error: Error: CAM2 worker startup fault' });
+          const faults = await page.evaluate(z.number(), () => Number(document.body.dataset['cam2WorkerFaults'] ?? '0'));
+          t.equal(`${size.name}: the fault reached the real face worker constructor exactly once`, faults, 1);
+          await t.file(`${size.name}-worker-failure.json`, JSON.stringify({ faults, failure }, null, 2));
+          await page.screenshot(`${size.name}-worker-failure`);
+        }
+        await page.click('[data-testid="parallax-enabled"]');
+      } finally { await page.evaluate(z.literal(true), () => { document.dispatchEvent(new Event('cam2-cleanup')); return true; }); }
+    }
   },
 }];

@@ -54,6 +54,7 @@ export type RendererDebug = {
   /** Geometry id RGBA attachment, after a depth view or moving loop draw; dev only. */
   readGeometryPatch?(x: number, y: number, w: number, h: number): Uint8Array;
   perspectiveResources?(): { readonly targets: number; readonly textures: number };
+  resources?(): { readonly textures: number; readonly buffers: number; readonly framebuffers: number; readonly renderbuffers: number; readonly programs: number };
   readLocalEffectPatch?(x: number, y: number, w: number, h: number): LocalEffectReadback;
   /** RGBA8; R is the exact evaluated scope weight for this effect. */
   readLocalCoveragePatch?(id: EffectId, x: number, y: number, w: number, h: number): Uint8Array;

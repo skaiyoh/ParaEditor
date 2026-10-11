@@ -186,3 +186,41 @@ test('recenter during handoff resets its target and clock; restart cannot retain
   r.view.stop(); await r.view.start(); r.tick(500);
   assert.equal(r.view.diagnostics().center.x, .5);
 });
+
+test('camera denial remains visible during tilt and its exact error survives stop in the trace', async (t) => {
+  const r = rig(t); await r.view.start();
+  r.sources.camera?.failed('Camera permission was denied', 'NotAllowedError: Permission denied');
+  r.sample('tilt', .5); r.tick();
+  assert.equal(r.view.status(), 'Parallax: Camera permission was denied; using tilt.');
+  assert.deepEqual(r.view.trace().failures.camera, { reason: 'Camera permission was denied', detail: 'NotAllowedError: Permission denied' });
+  r.view.stop();
+  assert.equal(r.view.trace().failures.camera?.detail, 'NotAllowedError: Permission denied');
+  await r.view.start(); assert.equal(r.view.trace().failures.camera, null);
+});
+
+test('fallback distinguishes absent faces, calibration, slow observations, worker failure and explicit tilt', async (t) => {
+  const r = rig(t); await r.view.start();
+  r.sample('tilt', .5); r.tick(); assert.match(r.view.status(), /waiting for its first frame; using tilt/);
+  r.sample('camera', .5, 'calibrating'); r.sample('tilt', .5); r.tick();
+  assert.match(r.view.status(), /Hold still to calibrate the camera; using tilt/);
+  r.sample('camera', .5, 'lost'); r.sample('tilt', .5); r.tick();
+  assert.match(r.view.status(), /No clear face is in view, or the scene is too dark; using tilt/);
+  r.advance(300); r.sample('tilt', .5); r.tick();
+  assert.match(r.view.status(), /too slow or has stalled; using tilt/);
+  r.sources.camera?.failed('Face tracking could not start', 'Error: wasm allocation failed');
+  r.sample('tilt', .5); r.tick(); assert.match(r.view.status(), /Face tracking could not start; using tilt/);
+  r.view.setSourceMode('tilt'); r.tick(); assert.equal(r.view.status(), 'Parallax: using tilt by choice.');
+});
+
+test('stopping labels the camera off while retaining an isolated last-failure record', async (t) => {
+  const r = rig(t); await r.view.start();
+  r.sources.camera?.failed('Face tracking could not start', 'Error: wasm allocation failed');
+  const diagnostic = r.view.diagnostics(), trace = r.view.trace();
+  if (diagnostic.failures.camera !== null) diagnostic.failures.camera.reason = 'tampered';
+  if (trace.failures.camera !== null) trace.failures.camera.detail = 'tampered';
+  assert.equal(r.view.diagnostics().cameraStatus, 'Face tracking could not start.');
+  assert.equal(r.view.trace().failures.camera?.detail, 'Error: wasm allocation failed');
+  r.view.stop();
+  assert.equal(r.view.diagnostics().cameraState, 'Off');
+  assert.equal(r.view.diagnostics().cameraStatus, 'Parallax is off; last camera attempt: Face tracking could not start.');
+});

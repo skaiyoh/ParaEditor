@@ -200,5 +200,7 @@ export function createGl(canvas: HTMLCanvasElement) {
     gl.deleteVertexArray(vao);
     framebuffers.clear(); textures.clear(); programs.clear();
   }
-  return { gl, program, releaseProgram, texture, bitmap, target, draw, mesh, releaseMesh, attach, attachMany, attachDepth, release, dispose };
+  const resources = () => ({ textures: textures.size, buffers: meshes.size * 2,
+    framebuffers: framebuffers.size, renderbuffers: depths.size, programs: programs.size });
+  return { gl, program, releaseProgram, texture, bitmap, target, draw, mesh, releaseMesh, attach, attachMany, attachDepth, release, dispose, resources };
 }

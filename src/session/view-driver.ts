@@ -28,7 +28,7 @@ export type ViewAttempt = {
   dispose(action: () => void): void;
   target(center: Vec2, observation?: ViewObservation): void;
   onRecenter?(action: () => void): void;
-  failed(status: string): void;
+  failed(status: string, detail?: string): void;
 };
 export type ViewSource = (attempt: ViewAttempt) => Promise<(now: number) => void>;
 export type SourceName = 'camera' | 'tilt';
@@ -49,6 +49,9 @@ export function createViewDriver(host: ViewHost, sources: Readonly<Record<Source
   let mode: SourceMode = 'auto', selected: SourceName | 'none' = 'none';
   let transitionAt = 0, lastDecisionAt = 0, transitionFrom: Vec2 = CENTER, transitionTarget: Vec2 = CENTER;
   let status = 'Ready';
+  type Failure = Readonly<{ reason: string; detail: string }>;
+  let failures: Record<SourceName, Failure | null> = { camera: null, tilt: null };
+  const failureSnapshot = () => ({ camera: failures.camera === null ? null : { ...failures.camera }, tilt: failures.tilt === null ? null : { ...failures.tilt } });
   let trace: Trace[] = [], lastTrace = -Infinity;
   const names: readonly SourceName[] = ['camera', 'tilt'];
   const dispose = (input: Input): void => {
@@ -74,11 +77,22 @@ export function createViewDriver(host: ViewHost, sources: Readonly<Record<Source
   }
   const fresh = (input: Input, now: number): boolean => input.state.kind !== 'unavailable'
     && input.observation?.state === 'tracking' && now - input.observation.capturedAt <= HOLD_MS;
+  const cameraReason = (now: number): string => {
+    const input = attempt?.inputs.camera;
+    if (input === undefined) return failures.camera === null ? 'Parallax is off' : `Parallax is off; last camera attempt: ${failures.camera.reason}`;
+    if (input.state.kind === 'unavailable') return input.state.status;
+    if (input.state.kind === 'pending') return 'Camera and face tracking are starting';
+    if (input.observation === null) return 'Camera is waiting for its first frame';
+    if (now - input.observation.capturedAt > HOLD_MS) return 'Camera tracking is too slow or has stalled';
+    if (input.observation.state === 'calibrating') return 'Hold still to calibrate the camera';
+    if (input.observation.state === 'lost') return 'No clear face is in view, or the scene is too dark';
+    return 'Camera is tracking your face';
+  };
   async function start(): Promise<void> {
     if (attempt !== null || host.read() === null) return;
     const input = (): Input => ({ state: { kind: 'pending' }, target: CENTER, raw: CENTER, observation: null, receivedAt: -Infinity, receivedSequence: -1, receivedEvent: null, dispose: [], recenter: [] });
     const current: Attempt = { generation: host.generation(), inputs: { camera: input(), tilt: input() }, request: 0, cleanup: [] };
-    attempt = current; trace = []; lastTrace = -Infinity;
+    attempt = current; trace = []; lastTrace = -Infinity; failures = { camera: null, tilt: null };
     const valid = (): boolean => attempt === current && host.generation() === current.generation;
     const changed = (): void => {
       if (!valid()) return;
@@ -139,8 +153,9 @@ export function createViewDriver(host: ViewHost, sources: Readonly<Record<Source
         const drawStartedAt = performance.now();
         const submission = host.draw(camera, frame) ?? null;
         const submittedAt = performance.now();
-        const nextStatus = selected === 'camera' ? 'Parallax: tracking face' : selected === 'tilt' ? 'Parallax: tilt fallback'
-          : names.some((name) => current.inputs[name].observation?.state === 'calibrating') ? 'Parallax: hold still to calibrate' : 'Parallax: tracking lost';
+        const nextStatus = selected === 'camera' ? 'Parallax: tracking face'
+          : selected === 'tilt' ? mode === 'tilt' ? 'Parallax: using tilt by choice.' : `Parallax: ${cameraReason(decisionAt)}; using tilt.`
+          : mode !== 'tilt' ? `Parallax: ${cameraReason(decisionAt)}.` : 'Parallax: waiting for tilt.';
         if (nextStatus !== status) { status = nextStatus; host.changed(); }
         if (decisionAt - lastTrace >= 50) {
           const age = (name: SourceName): number | null => {
@@ -164,8 +179,9 @@ export function createViewDriver(host: ViewHost, sources: Readonly<Record<Source
     await Promise.all(names.map(async (name) => {
       const input = current.inputs[name];
       const sourceValid = (): boolean => valid() && input.state.kind !== 'unavailable';
-      const failed = (message: string): void => {
+      const failed = (message: string, detail = message): void => {
         if (!sourceValid()) return;
+        failures[name] = { reason: message, detail };
         input.state = { kind: 'unavailable', status: message }; dispose(input); changed();
       };
       const context: ViewAttempt = {
@@ -199,9 +215,12 @@ export function createViewDriver(host: ViewHost, sources: Readonly<Record<Source
     ready: (name: SourceName): boolean => attempt?.inputs[name].state.kind === 'running',
     status: (): string => status,
     targets: () => ({ faceTarget: attempt?.inputs.camera.target ?? CENTER, tilt: attempt?.inputs.tilt.target ?? CENTER }),
-    diagnostics: () => ({ source: selected, sourceMode: mode, center: { ...center }, samples: {
+    diagnostics: () => ({ source: selected, sourceMode: mode, center: { ...center }, failures: failureSnapshot(), cameraStatus: `${cameraReason(performance.now())}.`,
+      cameraState: attempt === null ? 'Off' : attempt.inputs.camera.state.kind === 'unavailable' ? 'Failed'
+        : attempt.inputs.camera.state.kind === 'pending' ? 'Starting'
+        : attempt.inputs.camera.observation?.state ?? 'Waiting for frame', samples: {
       camera: attempt?.inputs.camera.observation ?? null, tilt: attempt?.inputs.tilt.observation ?? null }, latest: trace.at(-1) ?? null }),
-    trace: () => ({ version: 1, smoothingMs: SMOOTH_MS, holdMs: HOLD_MS, handoffMs: HANDOFF_MS, samples: trace.map((sample) => ({ ...sample })) }),
+    trace: () => ({ version: 1, smoothingMs: SMOOTH_MS, holdMs: HOLD_MS, handoffMs: HANDOFF_MS, failures: failureSnapshot(), samples: trace.map((sample) => ({ ...sample })) }),
     camera: (): Vec2 => camera,
     frame: (): number => host.read()?.motion.enabled === true ? frame : 0,
   };

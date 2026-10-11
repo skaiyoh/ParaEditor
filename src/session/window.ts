@@ -7,6 +7,25 @@ import { parseFaceReply, type FaceDetection } from '../analysis/protocol.ts';
 const CAPTURE_MS = 1000 / 15;
 const WORKER_TIMEOUT_MS = 15_000;
 
+/** Keep the actionable sentence separate from the browser/worker's exact error. */
+class CameraFailure extends Error {
+  readonly reason: string;
+  constructor(reason: string, cause: unknown) {
+    super(cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause), { cause });
+    this.reason = reason;
+  }
+}
+
+function cameraFailure(error: unknown): CameraFailure {
+  const name = error instanceof Error ? error.name : '';
+  const reason = name === 'NotAllowedError' || name === 'SecurityError' ? 'Camera permission was denied'
+    : name === 'NotFoundError' ? 'No camera was found'
+    : name === 'NotReadableError' || name === 'AbortError' ? 'Camera could not start or is in use'
+    : name === 'OverconstrainedError' ? 'Camera does not support the requested video settings'
+    : 'Camera could not start';
+  return new CameraFailure(reason, error);
+}
+
 /** Face tracking supplies mirrored selfie targets to the shared view clock. */
 export function createWindowSource(host: { openTracker(): FaceTracker }) {
   type FaceInput = { injected: boolean; trackedFrames: number; tracks: readonly MediaStreamTrack[]; target: ViewAttempt['target']; receive(face: FaceDetection | null, width: number, height: number, capturedAt: number): void; sequence: number; frame: HTMLCanvasElement | null; face: FaceDetection | null };
@@ -34,36 +53,44 @@ export function createWindowSource(host: { openTracker(): FaceTracker }) {
       attempt.target({ x: .5, y: .5 }, { capturedAt: performance.now(), sequence: ++current.sequence, state: 'calibrating' });
     });
     attempt.dispose(() => { if (input === current) input = null; });
-    let failureStatus = 'Camera unavailable';
     try {
+      if (navigator.mediaDevices?.getUserMedia === undefined) throw new CameraFailure('Camera access is unavailable in this browser', 'getUserMedia is unavailable');
       const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, facingMode: 'user' } });
       if (!attempt.valid()) { stream.getTracks().forEach((track) => track.stop()); return () => {}; }
-      failureStatus = 'Face tracking unavailable'; current.tracks = stream.getTracks();
+      current.tracks = stream.getTracks();
       attempt.dispose(() => stream.getTracks().forEach((track) => track.stop()));
       for (const track of current.tracks) {
-        const ended = (): void => attempt.failed('Camera unavailable');
+        const ended = (): void => attempt.failed('Camera stopped sending video');
         track.addEventListener('ended', ended);
         attempt.dispose(() => track.removeEventListener('ended', ended));
       }
       const video = document.createElement('video'); video.muted = true; video.playsInline = true; video.srcObject = stream;
       attempt.dispose(() => { video.pause(); video.srcObject = null; });
-      const tracker = host.openTracker(); attempt.dispose(() => tracker.release());
+      let tracker: FaceTracker;
+      try { tracker = host.openTracker(); }
+      catch (error) { throw new CameraFailure('Face tracking could not start', error); }
+      attempt.dispose(() => tracker.release());
       const pending = new Set<() => void>();
       attempt.dispose(() => { for (const cancel of pending) cancel(); });
-      const within = async <T>(job: Promise<T>): Promise<T> => {
+      const within = async <T>(job: Promise<T>, reason: string, timeout: string): Promise<T> => {
         let timer = 0;
         let cancel = (): void => {};
         try {
           return await Promise.race([job, new Promise<never>((_, reject) => {
             cancel = () => reject(new Error('Face tracking stopped.')); pending.add(cancel);
-            timer = window.setTimeout(() => reject(new Error('Face tracking timed out.')), WORKER_TIMEOUT_MS);
+            timer = window.setTimeout(() => reject(new CameraFailure(timeout, new Error(`Timed out after ${WORKER_TIMEOUT_MS} ms`))), WORKER_TIMEOUT_MS);
           })]);
+        } catch (error) {
+          throw error instanceof CameraFailure ? error : new CameraFailure(reason, error);
         } finally { clearTimeout(timer); pending.delete(cancel); }
       };
-      await within(Promise.all([video.play(), tracker.ready]));
+      await Promise.all([
+        within(video.play(), 'Camera video could not play', 'Camera video did not start within 15 seconds'),
+        within(tracker.ready, 'Face tracking could not start', 'Face tracking did not start within 15 seconds'),
+      ]);
       if (!attempt.valid()) return () => {};
       const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 240;
-      const context = canvas.getContext('2d', { willReadFrequently: true }); if (context === null) throw new Error('Camera canvas unavailable.');
+      const context = canvas.getContext('2d', { willReadFrequently: true }); if (context === null) throw new CameraFailure('Camera frame could not be read', 'Camera canvas unavailable');
       let lastCapture = -Infinity, inFlight = false;
       const capture = async (): Promise<void> => {
         inFlight = true;
@@ -75,7 +102,7 @@ export function createWindowSource(host: { openTracker(): FaceTracker }) {
           context.drawImage(video, transform.x, transform.y, transform.drawWidth, transform.drawHeight);
           const bitmap = await createImageBitmap(canvas);
           if (!attempt.valid() || current.injected) { bitmap.close(); return; }
-          const face = await within(tracker.track(bitmap));
+          const face = await within(tracker.track(bitmap), 'Face tracking failed', 'Face tracking stopped responding for 15 seconds');
           if (attempt.valid()) current.trackedFrames++;
           if (attempt.valid() && !current.injected && captureGeneration === calibrationGeneration) {
             current.frame ??= document.createElement('canvas');
@@ -83,7 +110,12 @@ export function createWindowSource(host: { openTracker(): FaceTracker }) {
             current.frame.getContext('2d', { willReadFrequently: true })?.drawImage(canvas, 0, 0); current.face = face;
             current.receive(face, width, height, capturedAt);
           }
-        } catch { if (attempt.valid()) attempt.failed('Face tracking unavailable'); }
+        } catch (error) {
+          if (attempt.valid()) {
+            const failure = error instanceof CameraFailure ? error : new CameraFailure('Camera frame could not be read', error);
+            attempt.failed(failure.reason, failure.message);
+          }
+        }
         finally { inFlight = false; }
       };
       return (now) => {
@@ -91,7 +123,13 @@ export function createWindowSource(host: { openTracker(): FaceTracker }) {
           lastCapture = now; void capture();
         }
       };
-    } catch { attempt.failed(failureStatus); return () => {}; }
+    } catch (error) {
+      if (attempt.valid()) {
+        const failure = error instanceof CameraFailure ? error : cameraFailure(error);
+        attempt.failed(failure.reason, failure.message);
+      }
+      return () => {};
+    }
   };
   return {
     source,

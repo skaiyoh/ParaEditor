@@ -140,10 +140,7 @@ export function PhoneFrame({ state, session, status, preparing, busy, touch, mod
         <div class="phone-tabs" role="tablist" aria-label="Photo controls">
           {tabs.map(({ id, label }, index) => <button type="button" key={id} id={`phone-tab-${id}`} role="tab" aria-selected={tab === id} aria-controls={`panel-${id}`} tabIndex={tab === id ? 0 : -1} onKeyDown={(event) => tabKey(event, index)} onClick={() => setTab(id)}>{label}</button>)}
         </div>
-        {tabs.map(({ id }) => <section key={id} id={`panel-${id}`} data-testid={`panel-${id}`} class={`phone-tools panel-${id}`} role="tabpanel" aria-labelledby={`phone-tab-${id}`} tabIndex={0} hidden={tab !== id} onClick={(event) => {
-            // Shared Layers selects synchronously. Collapse only for its selection buttons.
-            if (event.target instanceof Element && event.target.closest('button.layer-select, button.layer-name[aria-label^="Select "]') !== null) setExpanded(false);
-          }}>
+        {tabs.map(({ id }) => <section key={id} id={`panel-${id}`} data-testid={`panel-${id}`} class={`phone-tools panel-${id}`} role="tabpanel" aria-labelledby={`phone-tab-${id}`} tabIndex={0} hidden={tab !== id}>
           {id === 'adjust' && inspector}
           {id === 'layers' && <Layers scene={scene} session={session} full />}
           {id === 'color' && color(expanded && !projectsOpen && tab === 'color')}

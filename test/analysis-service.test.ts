@@ -19,6 +19,7 @@ import {
   type AnalysisError,
   type AnalysisEvent,
   type AnalysisService,
+  type AnalysisServiceDeps,
   type HeavyStage,
   type HeavyTermination,
   type SequenceListener,
@@ -49,6 +50,7 @@ type ScriptedPort = SequenceWorkerPort & {
   readonly posted: SequenceRequest[];
   readonly transfers: Transferable[][];
   terminated: boolean;
+  terminations: number;
   /** When set, postMessage throws this for a message it returns true for. */
   throwOn: ((message: SequenceRequest) => boolean) | null;
   reply(data: unknown): void;
@@ -64,6 +66,7 @@ function scriptedPort(): ScriptedPort {
     posted: [],
     transfers: [],
     terminated: false,
+    terminations: 0,
     throwOn: null,
     postMessage(message, transfer) {
       if (port.throwOn?.(message) === true) throw new Error('DataCloneError: An ImageBitmap is detached and could not be cloned.');
@@ -72,6 +75,7 @@ function scriptedPort(): ScriptedPort {
     },
     terminate() {
       port.terminated = true;
+      port.terminations += 1;
     },
     addEventListener(...args: ['message', (event: { readonly data: unknown }) => void] | ['error', (event: object) => void] | ['messageerror', () => void]) {
       if (args[0] === 'message') messages.push(args[1]);
@@ -165,14 +169,14 @@ type Started = {
   release(): void;
 };
 
-function harness(loader: Promise<Result<ModelLoader, AnalysisError>> = Promise.resolve(err({ kind: 'quota' }))): Harness {
+function harness(loader: Promise<Result<ModelLoader, AnalysisError>> = Promise.resolve(err({ kind: 'quota' })), clock?: AnalysisServiceDeps['clock']): Harness {
   let now = 0;
   let spawnError: Error | null = null;
   const ports: ScriptedPort[] = [];
   const events: AnalysisEvent[] = [];
   const bitmaps: FakeBitmap[] = [];
   const service = createAnalysisService({
-    clock: { now: () => now },
+    clock: clock ?? { now: () => now },
     diag: { log: (e) => events.push(e) },
     spawn: () => {
       if (spawnError !== null) throw spawnError;
@@ -220,7 +224,6 @@ function harness(loader: Promise<Result<ModelLoader, AnalysisError>> = Promise.r
         calls.push(call);
         options.inside?.(call);
       };
-      const before = ports.length;
       const listener: SequenceListener = {
         onPhase: (stage, which) => record({ kind: 'phase', stage, phase: which }),
         onDepth: () => record({ kind: 'depth' }),
@@ -240,7 +243,7 @@ function harness(loader: Promise<Result<ModelLoader, AnalysisError>> = Promise.r
       service.runSequence(SCENE, stages, { master }, listener, options.signal ?? new AbortController().signal);
       return {
         calls,
-        port: ports.length > before ? ports.at(-1) : undefined,
+        port: ports.findLast((port) => !port.terminated),
         release: () => {
           for (const resolve of held.splice(0)) resolve();
         },
@@ -272,7 +275,7 @@ const hole = (): HeavyStage => ({ kind: 'inpaint', hole: { format: 'u8', size: {
 
 // ---------------------------------------------------------------- the full sequence
 
-test('[depth, encode]: one worker, one bitmap at a time, both products, end, terminate, the record, then onDone', async () => {
+test('[depth, encode]: one resident worker, one bitmap at a time, both products, the record, then onDone', async () => {
   const h = harness();
   h.setNow(1_000);
   const started = h.run([DEPTH, ENCODE]);
@@ -297,8 +300,8 @@ test('[depth, encode]: one worker, one bitmap at a time, both products, end, ter
   port.reply(phase('encode', 'infer'));
   h.setNow(6_500);
   port.reply(embeddingsReply());
-  assert.deepEqual(postedKinds(port), ['init', 'run depth', 'run encode', 'end']);
-  assert.equal(port.terminated, true);
+  assert.deepEqual(postedKinds(port), ['init', 'run depth', 'run encode']);
+  assert.equal(port.terminated, false);
   assert.deepEqual(calls, [
     { kind: 'phase', stage: 'depth', phase: 'session' },
     { kind: 'phase', stage: 'depth', phase: 'infer' },
@@ -306,7 +309,7 @@ test('[depth, encode]: one worker, one bitmap at a time, both products, end, ter
     { kind: 'phase', stage: 'encode', phase: 'session' },
     { kind: 'phase', stage: 'encode', phase: 'infer' },
     { kind: 'embeddings' },
-    { kind: 'done', heavy: false, terminated: true, record: { atMs: 6_500, largest: 'encode' } },
+    { kind: 'done', heavy: false, terminated: false, record: { atMs: 6_500, largest: 'encode' } },
   ]);
   assert.deepEqual(h.service.lastHeavyTermination, { atMs: 6_500, largest: 'encode' });
   assert.equal(h.service.alive.heavy, false);
@@ -316,11 +319,12 @@ test('[depth, encode]: one worker, one bitmap at a time, both products, end, ter
     { event: 'stage.end', op: 'depth', ms: 250, wasmHighWaterBytes: 290_000_000 },
     { event: 'stage.start', op: 'encode', ms: 0, wasmHighWaterBytes: null },
     { event: 'stage.end', op: 'encode', ms: 5_250, wasmHighWaterBytes: 794_000_000 },
-    { event: 'worker.terminate', worker: 'sequence', reason: 'done' },
   ]);
 
-  // A late reply, error, or abort after the end changes nothing.
+  // An unsolicited idle reply is fatal, but cannot call the ended listener.
   port.reply(depthReply());
+  assert.equal(port.terminated, true);
+  assert.equal(port.terminations, 1);
   port.error('late');
   port.messageError();
   h.service.cancelHeavy();
@@ -340,6 +344,29 @@ test('inpaint: the hole is cloned with the run, not transferred, and the plate i
   answer(port, 'inpaint');
   assert.deepEqual(calls.map((c) => c.kind), ['phase', 'phase', 'plate', 'done']);
   assert.deepEqual(h.service.lastHeavyTermination?.largest, 'inpaint');
+});
+
+test('five complete sequences share one spawn and init without terminating the resident worker', async () => {
+  const h = harness();
+  for (let index = 0; index < 5; index += 1) {
+    const started = h.run([DEPTH, ENCODE]);
+    await h.settle();
+    assert.equal(started.port, h.ports[0]);
+    answer(started.port, 'depth');
+    await h.settle();
+    answer(started.port, 'encode');
+    assert.deepEqual(terminals(started.calls).map((call) => call.kind), ['done']);
+    assert.equal(h.service.alive.heavy, false);
+  }
+  assert.equal(h.ports.length, 1);
+  const port = h.ports[0];
+  assert.ok(port !== undefined);
+  assert.equal(port.posted.filter((message) => message.type === 'init').length, 1);
+  assert.equal(port.posted.filter((message) => message.type === 'run').length, 10);
+  assert.equal(port.posted.filter((message) => message.type === 'end').length, 0);
+  assert.equal(port.terminations, 0);
+  assert.deepEqual(h.events.filter((event) => event.event === 'worker.spawn'), [{ event: 'worker.spawn', worker: 'sequence', reason: 'depth,encode' }]);
+  assert.deepEqual(h.events.filter((event) => event.event === 'worker.terminate'), []);
 });
 
 // ---------------------------------------------------------------- failures
@@ -378,13 +405,14 @@ const AT: Record<Point, { readonly stage: StageKind; readonly ran: StageKind | n
 };
 const POINTS = Object.keys(AT).filter((p): p is Point => p in AT);
 
-type Failure = { readonly name: string; readonly fire: (port: ScriptedPort) => void; readonly message: RegExp };
+type Failure = { readonly name: string; readonly fatal: boolean; readonly fire: (port: ScriptedPort) => void; readonly message: RegExp };
 const FAILURES: readonly Failure[] = [
-  { name: 'a failed reply', fire: (port) => port.reply({ type: 'failed', stage: 'depth', message: 'the run threw RangeError: out of memory' }), message: /^the run threw RangeError: out of memory$/ },
-  { name: 'an error event', fire: (port) => port.error('Uncaught Error: boom'), message: /^the worker raised an error: Uncaught Error: boom$/ },
-  { name: 'an error event without a message', fire: (port) => port.error(null), message: /^the worker raised an error: an error event without a message$/ },
-  { name: 'a messageerror event', fire: (port) => port.messageError(), message: /^a reply from the worker could not be deserialized$/ },
-  { name: 'a reply that does not parse', fire: (port) => port.reply({ type: 'depth', map: 'nope' }), message: /^a reply from the worker did not parse: / },
+  { name: 'a failed reply', fatal: false, fire: (port) => port.reply({ type: 'failed', stage: 'depth', message: 'the run threw RangeError: out of memory' }), message: /^the run threw RangeError: out of memory$/ },
+  { name: 'a fatal failed reply', fatal: true, fire: (port) => port.reply({ type: 'failed', stage: 'depth', message: 'the worker could not release its session', fatal: true }), message: /^the worker could not release its session$/ },
+  { name: 'an error event', fatal: true, fire: (port) => port.error('Uncaught Error: boom'), message: /^the worker raised an error: Uncaught Error: boom$/ },
+  { name: 'an error event without a message', fatal: true, fire: (port) => port.error(null), message: /^the worker raised an error: an error event without a message$/ },
+  { name: 'a messageerror event', fatal: true, fire: (port) => port.messageError(), message: /^a reply from the worker could not be deserialized$/ },
+  { name: 'a reply that does not parse', fatal: true, fire: (port) => port.reply({ type: 'depth', map: 'nope' }), message: /^a reply from the worker did not parse: / },
 ];
 
 /** A record made before the sequence under test, so "unchanged" is visible as this object. */
@@ -399,7 +427,7 @@ async function priorRecord(h: Harness): Promise<HeavyTermination | null> {
 
 for (const failure of FAILURES) {
   for (const point of POINTS) {
-    test(`${failure.name} at ${point}: one onFailed with worker for its stage, after the products that landed, the worker terminated, the record ${AT[point].ran === null ? 'unchanged' : `naming ${AT[point].ran}`}`, async () => {
+    test(`${failure.name} at ${point}: one onFailed with worker for its stage, after the products that landed, the worker ${failure.fatal ? 'retired' : 'retained'}, the record ${AT[point].ran === null ? 'unchanged' : `naming ${AT[point].ran}`}`, async () => {
       const h = harness();
       const prior = await priorRecord(h);
       assert.deepEqual(prior, { atMs: 100, largest: 'inpaint' });
@@ -418,22 +446,22 @@ for (const failure of FAILURES) {
       assert.ok(end.error.kind === 'worker' && end.error.op === expected.stage && expected.stage === end.stage);
       assert.match(end.error.message, failure.message);
       assert.deepEqual(calls.filter((c) => c.kind === 'depth' || c.kind === 'embeddings' || c.kind === 'plate').map((c) => c.kind), expected.products);
-      assert.equal(port.terminated, true);
-      assert.equal(end.terminated, true, 'terminated before onFailed');
+      assert.equal(port.terminated, failure.fatal);
+      assert.equal(end.terminated, failure.fatal, 'fatal errors retire the worker before onFailed');
       assert.equal(end.heavy, false);
       const record = expected.ran === null ? prior : { atMs: 7_000, largest: expected.ran };
       assert.deepEqual(end.record, record, 'the record is set before onFailed');
       if (expected.ran === null) assert.equal(h.service.lastHeavyTermination, prior, 'unchanged: the same object');
       assert.ok(!postedKinds(port).includes('end'));
-      assert.deepEqual(h.events.slice(eventsBefore), [
-        { event: 'stage.failed', op: expected.stage, error: end.error },
+      assert.deepEqual(h.events.slice(eventsBefore), failure.fatal ? [
         { event: 'worker.terminate', worker: 'sequence', reason: 'failed' },
-      ]);
+        { event: 'stage.failed', op: expected.stage, error: end.error },
+      ] : [{ event: 'stage.failed', op: expected.stage, error: end.error }]);
       // A held master resolving after the end gives a bitmap that is closed and never posted.
       started.release();
       await h.settle();
       assert.ok(h.bitmaps.every((b) => b.closed || transferred(h, b)), 'every bitmap was transferred or closed');
-      assert.equal(port.posted.filter((m) => m.type === 'run').length, point === 'before-run' ? 0 : point === 'depth-session' || point === 'depth-infer' ? 1 : point === 'between' ? 1 : 2);
+      assert.equal(port.posted.filter((m) => m.type === 'run').length, 1 + (point === 'before-run' ? 0 : point === 'depth-session' || point === 'depth-infer' ? 1 : point === 'between' ? 1 : 2));
       // Nothing after the end reaches the listener.
       const callsAtEnd = calls.length;
       port.reply(embeddingsReply());
@@ -458,7 +486,7 @@ test('master() rejecting, for the first stage and between stages, fails that sta
     assert.equal(end.stage, stage);
     assert.match(end.error.message, new RegExp(`^the master bitmap for the ${stage} stage could not be made: Error: createImageBitmap failed$`));
     assert.deepEqual(calls.filter((c) => c.kind === 'depth').map((c) => c.kind), products);
-    assert.equal(port?.terminated, true);
+    assert.equal(port?.terminated, false);
     assert.equal(h.service.lastHeavyTermination?.largest ?? null, call === 1 ? 'depth' : null);
     assert.deepEqual(h.events.filter((e) => e.event === 'stage.failed').map((e) => e.event === 'stage.failed' && e.op), [stage]);
   }
@@ -483,7 +511,7 @@ test('a postMessage that throws, as a closed bitmap\'s does, fails the stage wit
   assert.deepEqual(h.service.lastHeavyTermination, { atMs: 50, largest: 'depth' });
   assert.deepEqual(
     h.events.map((e) => `${e.event}${'op' in e ? ` ${e.op}` : ''}`),
-    ['worker.spawn', 'stage.start depth', 'stage.end depth', 'stage.start encode', 'stage.failed encode', 'worker.terminate'],
+    ['worker.spawn', 'stage.start depth', 'stage.end depth', 'stage.start encode', 'worker.terminate', 'stage.failed encode'],
   );
 });
 
@@ -545,7 +573,7 @@ test('an unexpected reply fails the stage with worker: a product of another stag
 
 for (const how of ['cancelHeavy', 'abort'] as const) {
   for (const point of POINTS) {
-    test(`${how} at ${point}: one onFailed with cancelled for its stage, the worker terminated at once, the record ${AT[point].ran === null ? 'unchanged' : `naming ${AT[point].ran}`}`, async () => {
+    test(`${how} at ${point}: one onFailed with cancelled for its stage, the worker retained, the record ${AT[point].ran === null ? 'unchanged' : `naming ${AT[point].ran}`}`, async () => {
       const h = harness();
       const prior = await priorRecord(h);
       const controller = new AbortController();
@@ -558,12 +586,11 @@ for (const how of ['cancelHeavy', 'abort'] as const) {
       else controller.abort();
       const expected = AT[point];
       assert.deepEqual(terminals(calls), [
-        { kind: 'failed', stage: expected.stage, error: { kind: 'cancelled' }, heavy: false, terminated: true, record: expected.ran === null ? prior : { atMs: 9_000, largest: expected.ran } },
+        { kind: 'failed', stage: expected.stage, error: { kind: 'cancelled' }, heavy: false, terminated: false, record: expected.ran === null ? prior : { atMs: 9_000, largest: expected.ran } },
       ]);
-      assert.equal(port.terminated, true);
+      assert.equal(port.terminated, false);
       assert.deepEqual(h.events.slice(eventsBefore), [
         { event: 'stage.failed', op: expected.stage, error: { kind: 'cancelled' } },
-        { event: 'worker.terminate', worker: 'sequence', reason: 'cancelled' },
       ]);
       // The other way to cancel, a late reply, and a held master all change nothing more.
       const callsAtEnd = calls.length;
@@ -608,22 +635,167 @@ test('runSequence while a sequence is alive cancels it first: one terminal callb
   const first = await driveTo(h, 'depth-infer');
   h.setNow(3_000);
   const second = h.run([ENCODE]);
-  assert.deepEqual(terminals(first.calls), [{ kind: 'failed', stage: 'depth', error: { kind: 'cancelled' }, heavy: false, terminated: true, record: { atMs: 3_000, largest: 'depth' } }]);
-  assert.equal(first.port?.terminated, true);
-  assert.notEqual(second.port, first.port);
+  assert.deepEqual(terminals(first.calls), [{ kind: 'failed', stage: 'depth', error: { kind: 'cancelled' }, heavy: false, terminated: false, record: { atMs: 3_000, largest: 'depth' } }]);
+  assert.equal(first.port?.terminated, false);
+  assert.equal(second.port, first.port);
   assert.equal(second.port?.terminated, false);
   assert.equal(h.service.alive.heavy, true);
   assert.equal(h.ports.filter((p) => !p.terminated).length, 1);
   assert.deepEqual(
     h.events.map((e) => (e.event === 'worker.spawn' || e.event === 'worker.terminate' ? `${e.event} ${e.reason}` : e.event)),
-    ['worker.spawn depth,encode', 'stage.start', 'stage.failed', 'worker.terminate cancelled', 'worker.spawn encode'],
+    ['worker.spawn depth,encode', 'stage.start', 'stage.failed'],
   );
-  // A reply to the cancelled worker does not reach either listener.
+  assert.deepEqual(postedKinds(second.port), ['init', 'run depth'], 'the next run waits for the cancelled run to drain');
+  // The cancelled run drains on the same worker without reaching either listener.
   first.port?.reply(depthReply());
   await h.settle();
   answer(second.port, 'encode');
   assert.equal(terminals(first.calls).length, 1);
   assert.deepEqual(terminals(second.calls).map((c) => c.kind), ['done']);
+});
+
+test('rapid replacements ignore stale products and run only the newest sequence after the old flight drains', async () => {
+  const h = harness();
+  const first = h.run([DEPTH, ENCODE]);
+  await h.settle();
+  first.port?.reply(phase('depth', 'infer'));
+  const second = h.run([ENCODE]);
+  const newest = h.run([hole()]);
+  assert.equal(h.ports.length, 1);
+  assert.equal(second.port, first.port);
+  assert.equal(newest.port, first.port);
+  assert.deepEqual(terminals(first.calls).map((call) => call.kind === 'failed' ? call.error.kind : call.kind), ['cancelled']);
+  assert.deepEqual(terminals(second.calls).map((call) => call.kind === 'failed' ? call.error.kind : call.kind), ['cancelled']);
+  assert.deepEqual(postedKinds(newest.port), ['init', 'run depth']);
+  assert.equal(h.bitmaps.length, 1, 'replacements do not prepare or queue another bitmap behind an active flight');
+  first.port?.reply(phase('depth', 'session'));
+  first.port?.reply(phase('depth', 'infer'));
+  assert.equal(newest.calls.length, 0);
+  first.port?.reply(depthReply());
+  await h.settle();
+  assert.deepEqual(postedKinds(newest.port), ['init', 'run depth', 'run inpaint']);
+  assert.equal(h.bitmaps.length, 2);
+  assert.equal(first.calls.filter((call) => call.kind === 'depth').length, 0);
+  assert.deepEqual(second.calls.map((call) => call.kind), ['failed']);
+  answer(newest.port, 'inpaint');
+  assert.deepEqual(newest.calls.map((call) => call.kind), ['phase', 'phase', 'plate', 'done']);
+  assert.equal(newest.port?.terminations, 0);
+});
+
+function drainClock(): AnalysisServiceDeps['clock'] & { advance(ms: number): void; readonly pending: number } {
+  let now = 0;
+  let nextId = 0;
+  const timers = new Map<number, { at: number; run(): void }>();
+  return {
+    now: () => now,
+    setTimeout(run, ms) { const id = nextId++; timers.set(id, { at: now + ms, run }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    advance(ms) {
+      const target = now + ms;
+      while (true) {
+        const next = [...timers].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+        if (next === undefined) break;
+        timers.delete(next[0]); now = next[1].at; next[1].run();
+      }
+      now = target;
+    },
+    get pending() { return timers.size; },
+  };
+}
+
+test('a cancelled stalled flight retires once after 120 seconds and resumes the queued sequence in one replacement', async () => {
+  const clock = drainClock();
+  const h = harness(Promise.resolve(err({ kind: 'quota' })), clock);
+  const first = h.run([DEPTH]);
+  await h.settle();
+  const next = h.run([ENCODE]);
+  assert.deepEqual(terminals(first.calls).map((call) => call.kind === 'failed' ? call.error.kind : call.kind), ['cancelled']);
+  assert.equal(first.port?.terminations, 0);
+  assert.equal(clock.pending, 1);
+  clock.advance(119_999);
+  assert.equal(first.port?.terminations, 0);
+  assert.equal(h.ports.length, 1);
+  assert.equal(next.calls.length, 0, 'the queued sequence waits for the cancelled flight');
+  clock.advance(1);
+  assert.equal(first.port?.terminations, 1);
+  assert.equal(clock.pending, 0);
+  assert.equal(h.ports.length, 2, 'one replacement automatically continues the queued sequence');
+  const replacement = h.ports.at(-1);
+  assert.ok(replacement !== undefined);
+  assert.notEqual(replacement, first.port);
+  await h.settle();
+  assert.deepEqual(postedKinds(replacement), ['init', 'run encode']);
+  clock.advance(120_000);
+  first.port?.error('late failure');
+  first.port?.reply(depthReply());
+  assert.equal(first.port?.terminations, 1);
+  assert.equal(h.ports.length, 2);
+  assert.equal(next.calls.length, 0, 'a late failure or product from the retired worker cannot fail the new owner');
+  answer(replacement, 'encode');
+  assert.deepEqual(terminals(next.calls).map((call) => call.kind), ['done']);
+  assert.equal(replacement.terminations, 0);
+  assert.equal(h.events.filter((event) => event.event === 'worker.terminate').length, 1);
+});
+
+test('a fatal reply from cancelled work replaces its worker and cannot fail the queued newest sequence', async () => {
+  const h = harness();
+  const first = h.run([DEPTH]);
+  await h.settle();
+  const next = h.run([ENCODE]);
+  first.port?.reply({ type: 'failed', stage: 'depth', message: 'session release failed', fatal: true });
+  assert.equal(first.port?.terminations, 1);
+  assert.equal(h.ports.length, 2);
+  const replacement = h.ports.at(-1);
+  assert.ok(replacement !== undefined);
+  await h.settle();
+  assert.deepEqual(postedKinds(replacement), ['init', 'run encode']);
+  assert.equal(next.calls.length, 0);
+  first.port?.messageError();
+  first.port?.reply({ type: 'failed', stage: 'depth', message: 'late stale failure', fatal: true });
+  assert.equal(h.ports.length, 2);
+  assert.equal(next.calls.length, 0);
+  answer(replacement, 'encode');
+  assert.deepEqual(terminals(next.calls).map((call) => call.kind), ['done']);
+  assert.deepEqual(h.events.filter((event) => event.event === 'stage.failed'), [{ event: 'stage.failed', op: 'depth', error: { kind: 'cancelled' } }]);
+});
+
+test('draining a cancelled flight clears its watchdog before the resident worker runs the replacement', async () => {
+  const clock = drainClock();
+  const h = harness(Promise.resolve(err({ kind: 'quota' })), clock);
+  const first = h.run([DEPTH]);
+  await h.settle();
+  const next = h.run([ENCODE]);
+  assert.equal(clock.pending, 1);
+  assert.deepEqual(postedKinds(next.port), ['init', 'run depth']);
+  clock.advance(5_000);
+  first.port?.reply(depthReply());
+  await h.settle();
+  assert.equal(clock.pending, 0);
+  assert.deepEqual(postedKinds(next.port), ['init', 'run depth', 'run encode']);
+  answer(next.port, 'encode');
+  clock.advance(120_000);
+  assert.equal(h.ports.length, 1);
+  assert.equal(next.port?.terminations, 0);
+  assert.deepEqual(terminals(next.calls).map((call) => call.kind), ['done']);
+});
+
+test('cancelHeavy timeout retires a busy flight immediately instead of waiting for its drain deadline', async () => {
+  const clock = drainClock();
+  const h = harness(Promise.resolve(err({ kind: 'quota' })), clock);
+  const first = h.run([DEPTH]);
+  await h.settle();
+  h.service.cancelHeavy('timeout');
+  assert.deepEqual(terminals(first.calls).map((call) => call.kind === 'failed' ? call.error.kind : call.kind), ['cancelled']);
+  assert.equal(first.port?.terminations, 1);
+  assert.equal(clock.pending, 0);
+  h.service.cancelHeavy('timeout');
+  clock.advance(120_000);
+  assert.equal(first.port?.terminations, 1);
+  const next = h.run([ENCODE]);
+  await h.settle();
+  answer(next.port, 'encode');
+  assert.equal(h.ports.length, 2);
+  assert.deepEqual(terminals(next.calls).map((call) => call.kind), ['done']);
 });
 
 test('a sequence started from the cancelled one\'s onFailed stands, and the outer start ends at once in cancelled without a worker', async () => {
@@ -641,10 +813,11 @@ test('a sequence started from the cancelled one\'s onFailed stands, and the oute
   assert.deepEqual(terminals(first.calls).map((c) => c.kind), ['failed']);
   assert.deepEqual(innerStarted.calls, []);
   assert.deepEqual(outer.calls, [{ kind: 'failed', stage: 'encode', error: { kind: 'cancelled' }, heavy: true, terminated: false, record: null }]);
-  assert.equal(h.ports.length, 2, 'the outer start spawned no worker');
+  assert.equal(h.ports.length, 1, 'the inner start reused the resident worker and the outer start spawned none');
   assert.equal(h.ports.filter((p) => !p.terminated).length, 1);
   assert.equal(innerStarted.port?.terminated, false);
   assert.equal(h.service.alive.heavy, true);
+  first.port?.reply(depthReply());
   await h.settle();
   answer(innerStarted.port, 'depth');
   assert.deepEqual(terminals(innerStarted.calls).map((c) => c.kind), ['done']);
@@ -681,24 +854,25 @@ test('a listener that cancels inside a product callback ends the sequence at the
     answer(port, 'depth');
     await h.settle();
     assert.deepEqual(calls.map((c) => (c.kind === 'failed' ? `failed ${c.stage} ${c.error.kind}` : c.kind)), ['phase', 'phase', 'depth', 'failed encode cancelled'], how);
-    assert.deepEqual(postedKinds(port), ['init', 'run depth'], how);
+    assert.deepEqual(postedKinds(port), how === 'cancelHeavy' ? ['init', 'run depth'] : ['init', 'run depth', 'run depth'], how);
     assert.equal(h.bitmaps.length, how === 'cancelHeavy' ? 1 : 2, how);
     assert.deepEqual(
-      h.events.slice(0, 5).map((e) => `${e.event}${'op' in e ? ` ${e.op}` : ''}`),
-      ['worker.spawn', 'stage.start depth', 'stage.end depth', 'stage.failed encode', 'worker.terminate'],
+      h.events.slice(0, 4).map((e) => `${e.event}${'op' in e ? ` ${e.op}` : ''}`),
+      ['worker.spawn', 'stage.start depth', 'stage.end depth', 'stage.failed encode'],
       `${how}: depth ends once and is not failed`,
     );
   }
 });
 
-test('a cancel or a new sequence inside the last product\'s callback leaves the sequence done: the worker is already terminated', async () => {
+test('a cancel or a new sequence inside the last product\'s callback leaves the sequence done and the worker resident', async () => {
   for (const how of ['cancelHeavy', 'runSequence'] as const) {
     const h = harness();
     h.setNow(70);
     const { port, calls } = h.run([DEPTH], {
       inside: (call) => {
         if (call.kind !== 'depth') return;
-        assert.equal(port?.terminated, true, `${how}: terminated before the last product is handed on`);
+        assert.equal(port?.terminated, false, `${how}: the resident worker is retained`);
+        assert.equal(h.service.alive.heavy, false, `${how}: the sequence ended before its last product was handed on`);
         assert.deepEqual(h.service.lastHeavyTermination, { atMs: 70, largest: 'depth' });
         if (how === 'cancelHeavy') h.service.cancelHeavy();
         else h.run([ENCODE]);
@@ -708,8 +882,8 @@ test('a cancel or a new sequence inside the last product\'s callback leaves the 
     answer(port, 'depth');
     assert.deepEqual(calls.map((c) => c.kind), ['phase', 'phase', 'depth', 'done'], how);
     assert.deepEqual(
-      h.events.slice(0, 4).map((e) => `${e.event}${'op' in e ? ` ${e.op}` : ''}`),
-      ['worker.spawn', 'stage.start depth', 'stage.end depth', 'worker.terminate'],
+      h.events.slice(0, 3).map((e) => `${e.event}${'op' in e ? ` ${e.op}` : ''}`),
+      ['worker.spawn', 'stage.start depth', 'stage.end depth'],
       how,
     );
     assert.equal(h.service.alive.heavy, how === 'runSequence', how);
@@ -718,7 +892,7 @@ test('a cancel or a new sequence inside the last product\'s callback leaves the 
 
 // ---------------------------------------------------------------- the termination record
 
-test('the record: unchanged by a worker that ran no stage, set at a terminate after an infer phase, before the terminal callback', async () => {
+test('the record: unchanged by a sequence that ran no stage, set after an infer phase, before the terminal callback', async () => {
   const h = harness();
   // A worker that reported only its session phase.
   const a = await driveTo(h, 'depth-session');
@@ -751,6 +925,9 @@ test('the record: unchanged by a worker that ran no stage, set at a terminate af
   h.setNow(40);
   h.service.cancelHeavy();
   assert.deepEqual(h.service.lastHeavyTermination, { atMs: 40, largest: 'depth' });
+  // Its cancelled inpaint must drain before the resident worker runs encode.
+  answer(d.port, 'inpaint');
+  await h.settle();
   // A worker that ran encode and then inpaint, each past its infer phase: encode is the larger.
   const e = h.run([ENCODE, hole()]);
   await h.settle();
@@ -830,6 +1007,7 @@ test('face handle consumes one frame, closes dropped frames, cancels on release 
   const posted: import('../src/analysis/protocol.ts').FaceRequest[] = [];
   const listeners: ((event: { data: unknown }) => void)[] = [];
   let terminated = 0;
+  let spawned = 0;
   const events: AnalysisEvent[] = [];
   const port: import('../src/analysis/service.ts').FaceWorkerPort = {
     postMessage(message, transfer) { posted.push(message); if (message.type === 'track') assert.deepEqual(transfer, [message.frame]); },
@@ -841,7 +1019,7 @@ test('face handle consumes one frame, closes dropped frames, cancels on release 
   const service = createAnalysisService({
     clock: { now: () => 0 }, diag: { log: (event) => events.push(event) },
     spawn: () => { throw new Error('No heavy worker expected.'); }, spawnDecoder: () => { throw new Error('No decoder expected.'); },
-    spawnFaceTracker: () => port, ortBase: '/vendor/ort/1.30.0/', threads: 2, lock, loader: Promise.resolve(err({ kind: 'quota' })),
+    spawnFaceTracker: () => { spawned += 1; return port; }, ortBase: '/vendor/ort/1.30.0/', threads: 2, lock, loader: Promise.resolve(err({ kind: 'quota' })),
   });
   const tracker = service.openFaceTracker();
   assert.deepEqual(posted, [{ type: 'init', ortBase: '/vendor/ort/1.30.0/' }]);
@@ -857,12 +1035,34 @@ test('face handle consumes one frame, closes dropped frames, cancels on release 
   reply({ type: 'tracked', jobId: request.jobId, face: { center: { x: .7, y: .5 }, size: .3 } });
   assert.deepEqual(await first, { center: { x: .7, y: .5 }, size: .3 });
   const pending = tracker.track(bitmap()); const cancelled = assert.rejects(pending, /released/);
+  const pendingRequest = posted.at(-1); assert.ok(pendingRequest?.type === 'track');
   tracker.release(); tracker.release(); await cancelled;
-  assert.equal(terminated, 1);
+  assert.equal(terminated, 0);
   reply({ type: 'tracked', jobId: request.jobId, face: null });
   await assert.rejects(tracker.track(bitmap()), /released/);
   assert.equal(closed, 2, 'the frame offered after release is closed');
-  assert.deepEqual(events.filter((event) => event.event === 'worker.terminate'), [{ event: 'worker.terminate', worker: 'face', reason: 'released' }]);
+  const reopened = service.openFaceTracker();
+  await reopened.ready;
+  assert.equal(spawned, 1, 'a restarted tracker keeps the same worker and session');
+  assert.equal(listeners.length, 1, 'the resident worker attaches one message listener');
+  assert.equal(posted.filter((message) => message.type === 'init').length, 1);
+  assert.equal(await reopened.track(bitmap()), null, 'the released handle\'s frame remains busy until its matching reply drains');
+  assert.equal(closed, 3);
+  assert.equal(posted.length, 3, 'a stale reply to the prior finished frame does not clear the current busy ID');
+  reply({ type: 'tracked', jobId: pendingRequest.jobId, face: null });
+  const current = reopened.track(bitmap());
+  const currentRequest = posted.at(-1); assert.ok(currentRequest?.type === 'track');
+  assert.notEqual(currentRequest.jobId, pendingRequest.jobId);
+  let currentFinished = false;
+  void current.then(() => { currentFinished = true; });
+  reply({ type: 'tracked', jobId: pendingRequest.jobId, face: null });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(currentFinished, false, 'a stale reply cannot settle the restarted tracker\'s frame');
+  reply({ type: 'tracked', jobId: currentRequest.jobId, face: { center: { x: .4, y: .6 }, size: .2 } });
+  assert.deepEqual(await current, { center: { x: .4, y: .6 }, size: .2 });
+  reopened.release();
+  assert.equal(terminated, 0);
+  assert.deepEqual(events.filter((event) => event.event === 'worker.terminate'), []);
 });
 
 test('face init failure and malformed detection stop the worker and settle startup/tracking', async () => {

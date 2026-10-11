@@ -238,9 +238,9 @@ export const scenarios: readonly Scenario[] = [
       await t.page.waitFor('portrait full top bar', z.literal(true), () => ['tool-actions', 'tool-adjust', 'tool-layers'].every((id) => document.querySelector(`[data-testid=${id}]`)?.checkVisibility() === true) && document.querySelector('.phone-editor') === null ? true : null);
       await t.page.emulate({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true, colorScheme: 'dark' });
       await t.page.waitFor('phone camera input requests JPEG/PNG too', z.literal(true), () =>
-        document.querySelector<HTMLInputElement>('.phone-strip input[type=file]')?.accept === 'image/jpeg,image/png' ? true : null);
+        document.querySelector<HTMLInputElement>('.phone-strip input[type=file][capture]')?.accept === 'image/jpeg,image/png' ? true : null);
       t.equal('portrait capture keeps rear camera hint', await t.page.evaluate(z.string().nullable(), () =>
-        document.querySelector('.phone-strip input[type=file]')?.getAttribute('capture') ?? null), 'environment');
+        document.querySelector('.phone-strip input[type=file][capture]')?.getAttribute('capture') ?? null), 'environment');
     },
   },
   {

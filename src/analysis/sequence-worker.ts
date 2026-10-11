@@ -72,6 +72,7 @@ function fromPixels<T>(bitmap: ImageBitmap, size: Size, build: (rgba: Uint8Clamp
 }
 
 type Ready = Extract<State, { readonly kind: 'ready' }>;
+type FatalFailure = { readonly message: string; readonly fatal: true };
 
 /**
  * Creates the session of `files`, runs it on `feeds`, and gives its outputs to
@@ -88,12 +89,12 @@ async function inSession<T>(
   files: OpFiles,
   feeds: InferenceSession.FeedsType,
   use: (outputs: TensorMap) => Result<T, string>,
-): Promise<Result<{ readonly product: T; readonly timings: StageTimings }, string>> {
+): Promise<Result<{ readonly product: T; readonly timings: StageTimings }, string | FatalFailure>> {
   post({ type: 'phase', stage, phase: 'session', fraction: null });
   const opened = await createSession(ready.runtime, ready.store, files);
-  if (!opened.ok) return opened;
+  if (!opened.ok) return err({ message: opened.error, fatal: true });
   const { session, sessionMs } = opened.value;
-  let outcome: Result<{ readonly product: T; readonly inferMs: number }, string>;
+  let outcome: Result<{ readonly product: T; readonly inferMs: number }, string | FatalFailure>;
   try {
     post({ type: 'phase', stage, phase: 'infer', fraction: null });
     const ran = await runSession(session, feeds);
@@ -101,13 +102,13 @@ async function inSession<T>(
       const product = use(ran.value.outputs);
       outcome = product.ok ? ok({ product: product.value, inferMs: ran.value.inferMs }) : product;
     } else {
-      outcome = ran;
+      outcome = err({ message: ran.error, fatal: true });
     }
   } catch (thrown) {
-    outcome = err(describeThrown(thrown));
+    outcome = err({ message: describeThrown(thrown), fatal: true });
   }
   const released = await releaseSession(session);
-  if (!released.ok) return released;
+  if (!released.ok) return err({ message: released.error, fatal: true });
   if (!outcome.ok) return outcome;
   const wasmHighWaterBytes = ready.runtime.wasmHighWaterBytes();
   if (wasmHighWaterBytes === null) return err('the runtime created no wasm memory this worker saw, so the stage has no high-water mark');
@@ -115,7 +116,7 @@ async function inSession<T>(
 }
 
 /** One stage on one bitmap: its input, its session, and its reply. */
-async function runStage(ready: Ready, request: RunRequest): Promise<Result<Product, string>> {
+async function runStage(ready: Ready, request: RunRequest): Promise<Result<Product, string | FatalFailure>> {
   const { ort } = ready.runtime;
   const { ops } = ready.lock;
   const master: Size = { width: request.image.width, height: request.image.height };
@@ -170,7 +171,7 @@ async function handleInit(request: Extract<SequenceRequest, { readonly type: 'in
       return;
     }
     const store = await modelStore({ lock: lock.value, subtle: crypto.subtle, caches, origin: self.location.origin });
-    const runtime = await loadOrt({ ortBase: request.ortBase, threads: request.threads });
+    const runtime = await loadOrt({ ortBase: request.ortBase, threads: request.threads, worker: 'sequence' });
     state = runtime.ok ? { kind: 'ready', runtime: runtime.value, store, lock: lock.value } : { kind: 'init-failed', message: runtime.error };
   } catch (thrown) {
     state = { kind: 'init-failed', message: describeThrown(thrown) };
@@ -181,9 +182,10 @@ async function handleInit(request: Extract<SequenceRequest, { readonly type: 'in
 async function handleRun(request: RunRequest): Promise<void> {
   try {
     if (state.kind === 'waiting-for-init') return fail(request.stage, 'no init request came before this run');
-    if (state.kind === 'init-failed') return fail(request.stage, `the worker did not start: ${state.message}`);
+    if (state.kind === 'init-failed') return post({ type: 'failed', stage: request.stage, message: oneLine(`the worker did not start: ${state.message}`), fatal: true });
     const product = await runStage(state, request);
-    if (!product.ok) return fail(request.stage, product.error);
+    if (!product.ok) return typeof product.error === 'string' ? fail(request.stage, product.error)
+      : post({ type: 'failed', stage: request.stage, message: oneLine(product.error.message), fatal: true });
     post(product.value.reply, product.value.transfer);
   } catch (thrown) {
     fail(request.stage, describeThrown(thrown));

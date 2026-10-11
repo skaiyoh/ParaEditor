@@ -17,7 +17,8 @@
 // not an index, or a missing field fails. A value the caller built in its own
 // realm is read the way zod reads it, so an inherited field or a getter counts
 // as present; for such a value the parse promises only that it never throws.
-// They read no browser global, so node tests run them as the workers will.
+// Node supplies the MessagePort constructor used to validate a transferred
+// control endpoint; the other structured-clone checks need no browser global.
 
 import type { AnalysisOp } from '../core/derive.ts';
 import { isModelId, type ModelId, type NonEmpty } from '../core/ids.ts';
@@ -159,6 +160,12 @@ const imageBitmapSchema = z.unknown().transform((value, ctx) => {
   } else return value;
   return z.NEVER;
 });
+
+/** A received transferred port belongs to the receiving realm's constructor. */
+const messagePortSchema = z.custom<MessagePort>((value) =>
+  typeof MessagePort !== 'undefined' && value instanceof MessagePort,
+  { message: 'expected a MessagePort' },
+);
 
 /** Whether `key` names an element of an array: a canonical index below 2^32 - 1. */
 function isArrayIndex(key: string): boolean {
@@ -439,16 +446,24 @@ const sequenceReplySchema = z
     z.strictObject({ type: z.literal('depth'), map: f32PlaneSchema, stats: statsSchema, timings: stageTimingsSchema }),
     z.strictObject({ type: z.literal('embeddings'), embeddings: samEmbeddingsSchema, timings: stageTimingsSchema }),
     z.strictObject({ type: z.literal('plate'), image: rgb8Schema, timings: stageTimingsSchema }),
-    z.strictObject({ type: z.literal('failed'), stage: heavyStageKindSchema, message: z.string() }),
+    z.strictObject({ type: z.literal('failed'), stage: heavyStageKindSchema, message: z.string(), fatal: z.boolean().optional() }),
   ])
   .readonly();
 
 /** The page to the decode worker. */
 const decodeRequestSchema = z
   .discriminatedUnion('type', [
+    /** One lifetime channel for lifecycle acknowledgements, separate from decode results. */
+    z.strictObject({ type: z.literal('control'), port: messagePortSchema }),
     /** Asks the worker to load ORT and the decoder and to keep the embeddings and the guide's size for every decode; the guide's size is not checked here. */
     z.strictObject({ type: z.literal('init'), ortBase: ortBaseSchema, embeddings: samEmbeddingsSchema, guide: rgb8Schema }),
+    /** The page owner's init, identified so only its completion stops the initialization deadline. */
+    z.strictObject({ type: z.literal('initialize'), requestId: jobIdSchema, ortBase: ortBaseSchema, embeddings: samEmbeddingsSchema, guide: rgb8Schema }),
     z.strictObject({ type: z.literal('decode'), jobId: jobIdSchema, points: nonEmptyListOf(tapSchema) }),
+    /** Releases the scene's decoder session and tensors while keeping the worker's runtime for the next init. */
+    z.strictObject({ type: z.literal('release') }),
+    /** The page owner's release, acknowledged only after the session is released. */
+    z.strictObject({ type: z.literal('dispose'), requestId: jobIdSchema }),
   ])
   .readonly();
 
@@ -457,6 +472,14 @@ const decodeReplySchema = z
   .discriminatedUnion('type', [
     z.strictObject({ type: z.literal('decoded'), jobId: jobIdSchema, result: decodeResultSchema, timings: stageTimingsSchema }),
     z.strictObject({ type: z.literal('failed'), jobId: jobIdSchema, message: z.string() }),
+  ])
+  .readonly();
+
+/** Lifecycle replies are separate from decode results for legacy dev listeners. */
+const decodeLifecycleReplySchema = z
+  .discriminatedUnion('type', [
+    z.strictObject({ type: z.literal('initialized'), requestId: jobIdSchema, message: z.string().nullable() }),
+    z.strictObject({ type: z.literal('disposed'), requestId: jobIdSchema }),
   ])
   .readonly();
 
@@ -469,6 +492,7 @@ export type SequenceRequest = z.infer<typeof sequenceRequestSchema>;
 export type SequenceReply = z.infer<typeof sequenceReplySchema>;
 export type DecodeRequest = z.infer<typeof decodeRequestSchema>;
 export type DecodeReply = z.infer<typeof decodeReplySchema>;
+export type DecodeLifecycleReply = z.infer<typeof decodeLifecycleReplySchema>;
 
 const faceCandidateShape = {
   center: strictObject({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
@@ -606,6 +630,11 @@ export function parseDecodeRequest(value: unknown): Result<DecodeRequest, Messag
 /** The page parses each message it receives from the decode worker with this. */
 export function parseDecodeReply(value: unknown): Result<DecodeReply, MessageError> {
   return parseMessage(decodeReplySchema, value);
+}
+
+/** The service parses an identified initialization or release acknowledgement. */
+export function parseDecodeLifecycleReply(value: unknown): Result<DecodeLifecycleReply, MessageError> {
+  return parseMessage(decodeLifecycleReplySchema, value);
 }
 
 export function parseFaceRequest(value: unknown): Result<FaceRequest, MessageError> {

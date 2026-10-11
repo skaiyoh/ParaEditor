@@ -231,13 +231,13 @@ function ParallaxDebug({ session }: { readonly session: DemoSession }) {
         aria-pressed={readings.sourceMode === value} onClick={() => session.setParallaxSource(value)}>{label}</button>)}
     </div>
     <canvas ref={canvas} width="320" height="240" data-testid="parallax-debug-frame" aria-label="Camera frame with detected face box" />
-    {readings.frame === null && <p class="parallax-camera-status">{readings.cameraRunning ? 'Waiting for camera frame' : 'Camera unavailable'}</p>}
+    <p class="parallax-camera-status" data-testid="parallax-camera-status">{readings.cameraStatus}</p>
     <dl>
       <div><dt>View coverage</dt><dd data-testid="parallax-coverage">{readings.coverage.reason ?? 'Ready'}</dd></div>
       <div><dt>Background preparation</dt><dd>{readings.preparation}</dd></div>
       <div><dt>View sample</dt><dd>{readings.viewId}</dd></div>
       <div><dt>Active source</dt><dd data-testid="parallax-active-source">{readings.source === 'none' ? 'Waiting' : readings.source}</dd></div>
-      <div><dt>Camera state</dt><dd data-testid="parallax-camera-state">{readings.samples.camera?.state ?? 'Unavailable'}</dd></div>
+      <div><dt>Camera state</dt><dd data-testid="parallax-camera-state">{readings.cameraState === 'lost' ? 'No clear face' : readings.cameraState}</dd></div>
       <div><dt>Camera age / sample</dt><dd>{age(readings.samples.camera?.capturedAt)} / {readings.samples.camera?.sequence ?? '-'}</dd></div>
       <div><dt>Camera quality</dt><dd>{number(readings.samples.camera?.quality)}</dd></div>
       <div><dt>Tilt state</dt><dd>{readings.state} ({readings.reason})</dd></div>

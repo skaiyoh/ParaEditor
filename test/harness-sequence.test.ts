@@ -1,9 +1,10 @@
 // src/dev/harness/sequence-run.ts, inputs.ts, and the runner's sequence
 // executor and reconciliation, over the real analysis service on scripted
 // worker ports and node's timers: a [depth, encode] run reporting wait,
-// setup, run:depth, run:encode, and after, after only once its worker is
-// terminated, and its reading, every field; the cooldown from the latest
-// termination before each run, the setup after it, and the gap recorded; the
+// setup, run:depth, run:encode, and after, once its sequence is complete while
+// its worker remains resident, and its reading, every available field; the
+// cooldown from the latest completion record, the setup after it, and worker
+// lifetime metrics unavailable without a new spawn or termination; the
 // stand-in filled once, held across runs, summed after each, and released by
 // a step that does not keep it and by release(); the kill-point ballast gone
 // before a sequence runs; the cooldown before ballast and untouched steps
@@ -122,13 +123,13 @@ function ran(outcome: StepOutcome): Extract<StepOutcome, { readonly kind: 'ran' 
   return outcome;
 }
 
-test('a [depth, encode] run reports wait, setup, run:depth, run:encode, and after, after only once its worker is terminated, and survives with a reading of every field', async () => {
+test('a [depth, encode] run reports wait, setup, run:depth, run:encode, and after with its worker resident, and survives with a reading of every available field', async () => {
   const w = world();
   w.setFacts({ load: 3, hiddenMs: 1_200, longestHiddenMs: 900 });
   const { outcome, phases } = await w.execute(RUN);
   assert.deepEqual(names(phases), ['wait', 'setup', 'run:depth', 'run:encode', 'after']);
   assert.deepEqual(at(phases, 'run:encode').terminated, [false], 'the worker is alive while the encoder runs');
-  assert.deepEqual(at(phases, 'after').terminated, [true], 'after is reported once the worker is terminated');
+  assert.deepEqual(at(phases, 'after').terminated, [false], 'after is reported once the sequence ends, retaining its worker');
   const { score, reading } = ran(outcome);
   assert.deepEqual(score, { kind: 'survived' });
   assert.deepEqual(reading.stages.map((stage) => [stage.op, stage.wasmHighWaterBytes]), [
@@ -136,7 +137,7 @@ test('a [depth, encode] run reports wait, setup, run:depth, run:encode, and afte
     ['encode', HIGH_WATER.encode],
   ]);
   assert.ok(reading.stages.every((stage) => stage.ms >= 0), JSON.stringify(reading.stages));
-  assert.ok(reading.wallMs !== null && reading.wallMs >= 0 && reading.wallMs >= reading.stages.reduce((sum, stage) => sum + stage.ms, 0) - 1, JSON.stringify(reading));
+  assert.equal(reading.wallMs, null, 'the historical worker-lifetime reading has no termination event on success');
   assert.equal(reading.gapMs, null, 'no worker terminated before the first run');
   assert.ok(reading.setupMs >= 0);
   assert.deepEqual(reading.product, { map: { size: { width: 3, height: 2 }, min: 0, max: 1 }, embeddings: { dims: [[1, 2], [1, 2], [1, 2]] }, plate: null });
@@ -152,29 +153,45 @@ test('a [depth, encode] run reports wait, setup, run:depth, run:encode, and afte
   });
   assert.deepEqual([reading.hiddenMs, reading.longestHiddenMs, reading.load], [1_200, 900, 3]);
   assert.deepEqual(w.services.built, [2], 'one service, at 2 threads');
-  assert.deepEqual(w.services.ports[0]?.posted.map((m) => (m.type === 'init' ? `init ${m.threads}` : m.type === 'run' ? `run ${m.stage}` : m.type)), ['init 2', 'run depth', 'run encode', 'end']);
+  assert.deepEqual(w.services.ports[0]?.posted.map((m) => (m.type === 'init' ? `init ${m.threads}` : m.type === 'run' ? `run ${m.stage}` : m.type)), ['init 2', 'run depth', 'run encode']);
   assert.deepEqual(w.inputs.fetched, [masterUrl(MASTER)]);
 });
 
-test('the next run waits the encoder\'s cooldown from the termination before its setup, records that gap, and keeps the stand-in it filled once, summed after each run', async () => {
+test('the next run waits the encoder\'s cooldown from its completion before setup, reuses its worker, and keeps the stand-in it filled once, summed after each run', async () => {
   const w = world();
   const first = await w.execute(RUN);
-  const terminated = ran(first.outcome).reading;
+  const completed = ran(first.outcome).reading;
   const firstAfter = at(first.phases, 'after').at;
   const second = await w.execute(RUN);
   const waitMs = COOLDOWN_MS.encode * SCALE;
   const setupAt = at(second.phases, 'setup').at;
   assert.ok(setupAt - firstAfter >= waitMs - 1, `the setup came ${setupAt - firstAfter} ms after the termination, the wait being ${waitMs} ms`);
   const reading = ran(second.outcome).reading;
-  assert.ok(reading.gapMs !== null && reading.gapMs >= waitMs + reading.setupMs - 1, `the gap ${reading.gapMs} ms holds the wait ${waitMs} ms and the setup ${reading.setupMs} ms after it`);
-  assert.ok(terminated.wallMs !== null);
+  assert.equal(reading.gapMs, null, 'the historical spawn gap cannot describe a run in an already resident worker');
+  assert.equal(completed.wallMs, null);
   assert.deepEqual(w.allocated, [1], 'the stand-in was allocated once');
   assert.deepEqual(at(second.phases, 'wait').holding, { chunks: 1, mb: 1 }, 'and held across the runs');
   assert.deepEqual(reading.condition.standIn, [{ chunk: STAND_IN_CHUNK, fill: STAND_IN_SUM(1), after: STAND_IN_SUM(1) }]);
-  assert.equal(w.services.ports.length, 2, 'a new worker for each run');
+  assert.equal(w.services.ports.length, 1, 'one resident worker serves both runs');
   assert.deepEqual(w.inputs.fetched, [masterUrl(MASTER)], 'the master was fetched once');
   w.runner.release();
   assert.deepEqual(w.runner.holding, { chunks: 0, mb: 0 }, 'release() drops the stand-in');
+});
+
+test('the worker fixture scripts logical runs independently of the resident worker count', async () => {
+  const w = world();
+  const requested: [string, number][] = [];
+  w.services.answer = (stage, run) => {
+    requested.push([stage, run]);
+    return stage === 'encode' && run === 1 ? { kind: 'failed', message: 'the second photo could not encode' } : { kind: 'product' };
+  };
+  assert.deepEqual(ran((await w.execute(RUN)).outcome).score, { kind: 'survived' });
+  assert.deepEqual(ran((await w.execute(RUN)).outcome).score, { kind: 'failed', phase: 'run:encode', error: { kind: 'worker', op: 'encode', message: 'the second photo could not encode' } });
+  assert.deepEqual(ran((await w.execute(RUN)).outcome).score, { kind: 'survived' });
+  assert.deepEqual(requested, [['depth', 0], ['encode', 0], ['depth', 1], ['encode', 1], ['depth', 2], ['encode', 2]]);
+  assert.equal(w.services.ports.length, 1);
+  assert.equal(w.services.ports[0]?.terminated, false);
+  assert.equal(w.services.ports[0]?.posted.filter((message) => message.type === 'init').length, 1);
 });
 
 test('the kill-point ballast is gone before a sequence runs, the stand-in at 100 MB beside it; the ballast and untouched steps after a run wait the cooldown and release the stand-in', async () => {
@@ -213,7 +230,7 @@ test('a sequence step without the stand-in releases the one held; release() keep
   assert.deepEqual(reloaded.allocated, [1]);
 });
 
-test('the setup\'s time, from setup to its answer, is the reading\'s setupMs, and the gap holds it after the wait', async () => {
+test('the setup\'s time, from setup to its answer, is the reading\'s setupMs after the wait, while a reused worker has no spawn gap', async () => {
   const w = world();
   await w.execute(RUN);
   const SETUP_MS = 40;
@@ -222,13 +239,13 @@ test('the setup\'s time, from setup to its answer, is the reading\'s setupMs, an
   const reading = ran(outcome).reading;
   const measured = at(phases, 'run:depth').at - at(phases, 'setup').at;
   assert.ok(reading.setupMs >= SETUP_MS - 1 && reading.setupMs <= measured, `setupMs ${reading.setupMs}, the model fetch ${SETUP_MS} ms, setup to run:depth ${measured} ms`);
-  assert.ok(reading.gapMs !== null && reading.gapMs >= COOLDOWN_MS.encode * SCALE + reading.setupMs, JSON.stringify(reading));
+  assert.equal(reading.gapMs, null, 'there was no worker spawn in this run');
 });
 
 test('a run that ends before its timeout leaves no timer: nothing is cancelled after it', async () => {
-  const w = world({ ...SMALL, timeoutS: 0.1 });
+  const w = world({ ...SMALL, timeoutS: 0.25 });
   assert.equal(ran((await w.execute(RUN)).outcome).score.kind, 'survived');
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  await new Promise((resolve) => setTimeout(resolve, 500));
   assert.equal(w.services.cancels, 0);
 });
 
@@ -257,16 +274,17 @@ test('the wait ends no earlier than its end on the clock, though the clock\'s ti
   assert.equal(await waitOut({ clock: early, wait: { kind: 'cooldown', scale: SCALE }, latest: null, phase: () => undefined, signal: stopped.signal }), false, 'an aborted wait with nothing to wait answers false');
 });
 
-test('a run that has not ended within the timeoutS lever is cancelled in its phase and scores timeout, with after once the worker is terminated', async () => {
-  const w = world({ ...SMALL, timeoutS: 0.05 });
+test('a run that has not ended within the timeoutS lever is cancelled in its phase and scores timeout, retaining its worker in after', async () => {
+  const w = world({ ...SMALL, timeoutS: 0.25 });
   w.services.answer = (stage) => (stage === 'encode' ? { kind: 'hang' } : { kind: 'product' });
   const { outcome, phases } = await w.execute(RUN);
   assert.deepEqual(names(phases), ['wait', 'setup', 'run:depth', 'run:encode', 'after']);
-  assert.deepEqual(at(phases, 'after').terminated, [true]);
+  assert.deepEqual(at(phases, 'after').terminated, [false]);
   const { score, reading } = ran(outcome);
   assert.deepEqual(score, { kind: 'timeout', phase: 'run:encode' });
   assert.deepEqual(reading.stages.map((stage) => stage.op), ['depth']);
-  assert.ok(reading.wallMs !== null && reading.wallMs >= 45, String(reading.wallMs));
+  assert.equal(reading.wallMs, null, 'logical timeout leaves no worker termination event');
+  assert.ok(at(phases, 'after').at - at(phases, 'setup').at >= 245, 'the timeout did not fire early');
   assert.equal(reading.condition.checksumsMatch, true, 'the stand-in is summed after a timeout too');
 });
 
@@ -293,7 +311,7 @@ test('Stop in the run cancels the sequence and in the wait spawns nothing; each 
   });
   assert.deepEqual(inRun.outcome, ABORTED);
   assert.ok(clock.now() - started < 1_000, 'the 10 s encoder ended at the abort');
-  assert.deepEqual([w.services.ports[0]?.terminated, w.runner.holding], [true, { chunks: 0, mb: 0 }]);
+  assert.deepEqual([w.services.ports[0]?.terminated, w.runner.holding], [false, { chunks: 0, mb: 0 }]);
   const slow = world({ ...SMALL, defaultsScale: 1 });
   await slow.execute({ ...RUN, wait: { kind: 'cooldown', scale: 1 } });
   const waiting = await slow.execute({ ...RUN, wait: { kind: 'cooldown', scale: 1 } }, (name, controller) => {

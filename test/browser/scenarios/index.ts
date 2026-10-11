@@ -10,6 +10,7 @@ import { scenarios as creativeC1 } from './creative-c1.scenario.ts';
 import { scenarios as boot } from './boot.scenario.ts';
 import { scenarios as checklist } from './checklist.scenario.ts';
 import { scenarios as demo } from './demo.scenario.ts';
+import { scenarios as importMemory } from './import-memory.scenario.ts';
 import { scenarios as decoder } from './decoder.scenario.ts';
 import { scenarios as driver } from './driver.scenario.ts';
 // driver also registers D3's real-model import, plate and fault scenarios.
@@ -48,6 +49,7 @@ export const SCENARIO_FILES = {
   'shell.scenario.ts': shell,
   'boot.scenario.ts': boot,
   'demo.scenario.ts': demo,
+  'import-memory.scenario.ts': importMemory,
   'levers.scenario.ts': levers,
   'threads.scenario.ts': threads,
   'story.scenario.ts': story,

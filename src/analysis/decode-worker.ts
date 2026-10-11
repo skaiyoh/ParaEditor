@@ -1,11 +1,12 @@
-// The decode worker: the resident SAM decoder for one scene. `init` loads the
+// The decode worker: one resident runtime reused across scenes. `init` loads the
 // runtime once, creates the decoder's session from the verified model cache,
 // and keeps the scene's embeddings, as input tensors, and the guide's size;
 // each `decode` runs the session on its tap points and posts the three
 // candidate masks at the guide's size, made by analysis/stage-math.ts. Every
 // request is parsed on receipt and handled one at a time, in arrival order,
 // and every `decode` is answered with exactly one `decoded` or one `failed`.
-// The protocol has no `end` for this worker: the page terminates it.
+// `release` drops the scene's session and tensors; another `init` replaces it
+// only after that release completes. The page terminates only a fatal worker.
 // docs/ARCHITECTURE.md ("The decode worker") documents each request's answer
 // and the failure paths.
 //
@@ -16,11 +17,11 @@ import type { InferenceSession, Tensor } from 'noisy:vendor-ort';
 import type { Size } from '../core/raster.ts';
 import { err, ok, type Result } from '../core/result.ts';
 import { bundledLock } from './bundled-lock.ts';
-import { createSession, describeThrown, loadOrt, modelStore, runSession, type OrtRuntime } from './ort-runtime.ts';
-import { oneLine, parseDecodeRequest, type DecodeReply, type DecodeRequest } from './protocol.ts';
+import { createSession, describeThrown, loadOrt, modelStore, releaseSession, runSession, type ModelStore, type OrtRuntime } from './ort-runtime.ts';
+import { oneLine, parseDecodeRequest, type DecodeLifecycleReply, type DecodeReply, type DecodeRequest } from './protocol.ts';
 import { decodeCandidates, decoderEmbeddings, decoderPrompt, DECODER_BOXES, DECODER_LABELS, DECODER_POINTS } from './stage-math.ts';
 
-type InitRequest = Extract<DecodeRequest, { readonly type: 'init' }>;
+type InitRequest = Extract<DecodeRequest, { readonly type: 'init' | 'initialize' }>;
 type DecodeJob = Extract<DecodeRequest, { readonly type: 'decode' }>;
 
 /** What the worker holds between requests. */
@@ -41,23 +42,46 @@ type State =
     };
 
 let state: State = { kind: 'waiting-for-init' };
-/** Requests received and not yet handled, in arrival order. */
+let runtime: Promise<Result<OrtRuntime, string>> | null = null;
+let store: Promise<ModelStore> | null = null;
+/** Pending requests for only the newest scene, handled in arrival order. */
 const queue: DecodeRequest[] = [];
 let draining = false;
+let stopped = false;
+let control: MessagePort | null = null;
 
 const post = (reply: DecodeReply, transfer: readonly ArrayBuffer[] = []): void => self.postMessage(reply, [...transfer]);
+const acknowledge = (reply: DecodeLifecycleReply): void => {
+  if (control === null) throw new Error('the decoder has no lifecycle channel');
+  control.postMessage(reply);
+};
 
 const fail = (jobId: number, message: string): void => post({ type: 'failed', jobId, message: oneLine(message) });
 
+/** A release failure is fatal: creating another session could leave two alive. */
+async function release(session: InferenceSession): Promise<void> {
+  const released = await releaseSession(session);
+  if (!released.ok) throw new Error(`the decoder could not release its session: ${released.error}`);
+}
+
+/** Drops scene data before awaiting release; the queue admits no next init yet. */
+async function handleRelease(): Promise<void> {
+  const previous = state;
+  state = { kind: 'waiting-for-init' };
+  if (previous.kind === 'ready') await release(previous.session);
+}
+
 /**
  * Loads the lock, the runtime, and the decoder's session, and keeps the
- * embeddings and the guide's size; a failure is held and answered to every
- * later decode. Only the first `init` counts. The embeddings are checked
+ * embeddings and the guide's size. Invalid embeddings fail later decodes;
+ * runtime or session initialization failures are fatal. Every `init` releases
+ * the previous session first. The embeddings are checked
  * against the lock before the model store, the runtime, and the session are
  * loaded, so embeddings of another model or with other tensors fail at once.
  */
 async function handleInit(request: InitRequest): Promise<void> {
-  if (state.kind !== 'waiting-for-init') return;
+  await handleRelease();
+  let openedSession: InferenceSession | null = null;
   try {
     const lock = bundledLock();
     if (!lock.ok) {
@@ -70,30 +94,34 @@ async function handleInit(request: InitRequest): Promise<void> {
       state = { kind: 'init-failed', message: tensors.error };
       return;
     }
-    const store = await modelStore({ lock: lock.value, subtle: crypto.subtle, caches, origin: self.location.origin });
-    const runtime = await loadOrt({ ortBase: request.ortBase, threads: 'default' });
-    if (!runtime.ok) {
-      state = { kind: 'init-failed', message: runtime.error };
-      return;
-    }
-    const opened = await createSession(runtime.value, store, files);
-    if (!opened.ok) {
-      state = { kind: 'init-failed', message: opened.error };
-      return;
-    }
-    const { ort } = runtime.value;
+    const verified = await (store ??= modelStore({ lock: lock.value, subtle: crypto.subtle, caches, origin: self.location.origin }));
+    runtime ??= loadOrt({ ortBase: request.ortBase, threads: 'default', worker: 'decode' });
+    const loaded = await runtime;
+    if (!loaded.ok) throw new Error(loaded.error);
+    const opened = await createSession(loaded.value, verified, files);
+    if (!opened.ok) throw new Error(opened.error);
+    openedSession = opened.value.session;
+    const { ort } = loaded.value;
     const embeddings: Record<string, Tensor> = {};
     for (const tensor of tensors.value) embeddings[tensor.name] = new ort.Tensor('float32', tensor.data, tensor.dims);
     state = {
       kind: 'ready',
-      runtime: runtime.value,
+      runtime: loaded.value,
       session: opened.value.session,
       embeddings,
       guide: { width: request.guide.size.width, height: request.guide.size.height },
       sessionMs: opened.value.sessionMs,
     };
+    openedSession = null;
   } catch (thrown) {
     state = { kind: 'init-failed', message: describeThrown(thrown) };
+    // A runtime or session initialization failure can leave ORT's backend
+    // poisoned. Only a new worker can reliably retry it.
+    throw thrown;
+  } finally {
+    // Tensor construction can fail after session creation; that session still
+    // belongs to this init until the ready state takes ownership of it.
+    if (openedSession !== null) await release(openedSession);
   }
 }
 
@@ -140,17 +168,32 @@ async function handleDecode(request: DecodeJob): Promise<void> {
   }
 }
 
-/** Handles the queued requests one at a time, in arrival order; each handler answers its own failures and never rejects. */
+/** Handles requests in arrival order; fatal initialization or release rejects and stops the worker. */
 async function drain(): Promise<void> {
   draining = true;
   try {
     for (let request = queue.shift(); request !== undefined; request = queue.shift()) {
       switch (request.type) {
+        case 'control':
+          if (control !== null) throw new Error('the decoder already has a lifecycle channel');
+          control = request.port;
+          break;
         case 'init':
           await handleInit(request);
           break;
+        case 'initialize':
+          await handleInit(request);
+          acknowledge({ type: 'initialized', requestId: request.requestId, message: state.kind === 'init-failed' ? state.message : null });
+          break;
         case 'decode':
           await handleDecode(request);
+          break;
+        case 'release':
+          await handleRelease();
+          break;
+        case 'dispose':
+          await handleRelease();
+          acknowledge({ type: 'disposed', requestId: request.requestId });
           break;
         default: {
           const exhaustive: never = request;
@@ -166,10 +209,25 @@ async function drain(): Promise<void> {
 // A request that does not parse is thrown from the handler, so the page's
 // Worker receives an `error` event naming it; nothing here cancels that event.
 self.onmessage = (event: MessageEvent<unknown>) => {
+  if (stopped) return;
   const parsed = parseDecodeRequest(event.data);
   if (!parsed.ok) throw new Error(`the decode worker cannot read a request: ${parsed.error.detail}`);
+  if (parsed.value.type === 'init' || parsed.value.type === 'initialize' || parsed.value.type === 'release' || parsed.value.type === 'dispose') {
+    // A running init/release may await ORT while new scenes arrive. Keep only
+    // the newest queued scene so obsolete 16 MiB embeddings can be collected.
+    // Init releases the current session itself, so a queued release is redundant.
+    for (const obsolete of queue.splice(0)) {
+      if (obsolete.type === 'decode') fail(obsolete.jobId, 'the decoder scene was replaced before this decode could run');
+    }
+  }
   queue.push(parsed.value);
-  if (!draining) void drain();
+  if (!draining) void drain().catch((thrown: unknown) => {
+    stopped = true;
+    queue.length = 0;
+    // A rejected promise is not a Worker error event. Throw on a task so the
+    // owner receives the fatal error and terminates this runtime before reuse.
+    setTimeout(() => { throw new Error(`the decoder worker failed: ${describeThrown(thrown)}`); }, 0);
+  });
 };
 
 self.onmessageerror = () => {

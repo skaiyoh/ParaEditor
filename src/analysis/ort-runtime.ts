@@ -7,8 +7,8 @@
 // module") documents how they use it.
 //
 // Worker-safe: it makes no worker-global call (those stay in the *-worker.ts
-// entries) and reads no compile-time constant; every browser object it needs
-// arrives as a parameter or is a global both a page and a worker have.
+// entries); every browser object it needs arrives as a parameter or is a
+// global both a page and a worker have. NOISY_DEV enables scalar memory probes.
 
 import type { InferenceSession } from 'noisy:vendor-ort';
 import { err, ok, type Result } from '../core/result.ts';
@@ -32,6 +32,31 @@ export type OrtRuntime = {
    */
   readonly wasmHighWaterBytes: () => number | null;
 };
+
+// Dev-only, scalar telemetry. A channel lets the import scenario measure even
+// short-lived sequence workers without retaining their sessions or heaps.
+let memoryProbe: { opened(session: InferenceSession, kind: string): void; sample(): void } | null = null;
+function observeMemory(worker: string, wasmHighWaterBytes: () => number | null): void {
+  const channel = new BroadcastChannel('noisy-analysis-memory');
+  const id = crypto.randomUUID();
+  let sessions = 0, peakSessions = 0;
+  let sessionsCreated = 0, encoderSessionsCreated = 0;
+  const sample = (): void => channel.postMessage({ id, worker, sessions, peakSessions, sessionsCreated, encoderSessionsCreated, wasmHighWaterBytes: wasmHighWaterBytes() });
+  channel.onmessage = (event: MessageEvent<unknown>) => { if (event.data === 'sample') sample(); };
+  memoryProbe = {
+    sample,
+    opened(session, kind) {
+      sessionsCreated++; if (kind === 'encoder') encoderSessionsCreated++;
+      sessions++; peakSessions = Math.max(peakSessions, sessions); sample();
+      const release = session.release.bind(session);
+      session.release = async () => { await release(); sessions--; sample(); };
+    },
+  };
+  sample();
+}
+
+/** Includes the face session, whose creation needs different logging options. */
+export function observeSession(session: InferenceSession, kind = 'face'): void { memoryProbe?.opened(session, kind); }
 
 /** One line describing a thrown value: an Error's name and message, anything else as text. */
 export function describeThrown(thrown: unknown): string {
@@ -64,8 +89,9 @@ function trackWasmMemory(): () => number | null {
  * thread when the scope is not cross-origin isolated. Call it once per
  * worker. An error names what failed, the import's own message included.
  */
-export async function loadOrt(settings: { readonly ortBase: string; readonly threads: number | 'default' }): Promise<Result<OrtRuntime, string>> {
+export async function loadOrt(settings: { readonly ortBase: string; readonly threads: number | 'default'; readonly worker: 'sequence' | 'decode' | 'face' }): Promise<Result<OrtRuntime, string>> {
   const wasmHighWaterBytes = trackWasmMemory();
+  if (NOISY_DEV) observeMemory(settings.worker, wasmHighWaterBytes);
   let ort: Ort;
   try {
     ort = await import('noisy:vendor-ort');
@@ -139,6 +165,7 @@ export async function createSession(runtime: OrtRuntime, store: ModelStore, file
   };
   try {
     const session = await runtime.ort.InferenceSession.create(graph, options);
+    observeSession(session, files.session);
     return ok({ session, sessionMs: performance.now() - started });
   } catch (thrown) {
     return err(`the ${files.session} session could not be created: ${describeThrown(thrown)}`);
@@ -153,6 +180,8 @@ export async function runSession(session: InferenceSession, feeds: InferenceSess
     return ok({ outputs, inferMs: performance.now() - started });
   } catch (thrown) {
     return err(`the run threw ${describeThrown(thrown)}`);
+  } finally {
+    memoryProbe?.sample();
   }
 }
 

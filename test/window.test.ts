@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { parseLock } from '../src/analysis/lock.ts';
+import { createAnalysisService } from '../src/analysis/service.ts';
+import { err } from '../src/core/result.ts';
 import { createWindowSource } from '../src/session/window.ts';
 import type { FaceDetection } from '../src/analysis/protocol.ts';
 import type { ViewAttempt } from '../src/session/view-driver.ts';
@@ -47,4 +51,85 @@ test('camera source retains capture time, bounds inference and discards recenter
   await complete(null);
   assert.equal(targets.length, count); assert.equal(trackStops, 1); assert.equal(releases, 1); assert.equal(pauses, 1);
   assert.equal(source.preview().frame, null);
+});
+
+for (const failure of [
+  { stage: 'permission', error: new DOMException('User denied camera access', 'NotAllowedError'), reason: 'Camera permission was denied' },
+  { stage: 'permission', error: new DOMException('No device', 'NotFoundError'), reason: 'No camera was found' },
+  { stage: 'permission', error: new DOMException('Device busy', 'NotReadableError'), reason: 'Camera could not start or is in use' },
+  { stage: 'play', error: new DOMException('Playback blocked', 'NotAllowedError'), reason: 'Camera video could not play' },
+  { stage: 'worker', error: new Error('wasm allocation failed'), reason: 'Face tracking could not start' },
+  { stage: 'inference', error: new Error('ORT run failed'), reason: 'Face tracking failed' },
+]) {
+  test(`camera preserves ${failure.stage} failure reason and releases resources: ${failure.error.name}`, async (t) => {
+    const globals = (name: string, value: unknown): void => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+      Object.defineProperty(globalThis, name, { configurable: true, value });
+      t.after(() => { if (descriptor === undefined) Reflect.deleteProperty(globalThis, name); else Object.defineProperty(globalThis, name, descriptor); });
+    };
+    let alive = true, stops = 0, releases = 0, requested = false;
+    const disposal: (() => void)[] = [], failures: Parameters<ViewAttempt['failed']>[] = [];
+    const track = { stop() { stops++; }, addEventListener() {}, removeEventListener() {} };
+    globals('navigator', { mediaDevices: { getUserMedia() {
+      requested = true;
+      return failure.stage === 'permission' ? Promise.reject(failure.error) : Promise.resolve({ getTracks: () => [track] });
+    } } });
+    const context = { fillRect() {}, drawImage() {} };
+    globals('document', { createElement: (name: string) => name === 'video' ? {
+      readyState: 4, videoWidth: 320, videoHeight: 240, pause() {},
+      play: () => failure.stage === 'play' ? Promise.reject(failure.error) : Promise.resolve(),
+    } : { getContext: () => context } });
+    globals('window', { setTimeout, clearTimeout });
+    globals('HTMLMediaElement', { HAVE_CURRENT_DATA: 2 });
+    globals('createImageBitmap', async () => ({ close() {} }));
+    const source = createWindowSource({ openTracker: () => ({
+      ready: failure.stage === 'worker' ? Promise.reject(failure.error) : Promise.resolve(),
+      release() { releases++; }, track: () => Promise.reject(failure.error),
+    }) });
+    const attempt: ViewAttempt = {
+      valid: () => alive, dispose: (fn) => disposal.push(fn), target() {},
+      failed(...args) { failures.push(args); alive = false; disposal.toReversed().forEach((fn) => fn()); },
+    };
+    const opening = source.source(attempt);
+    assert.equal(requested, true, 'getUserMedia is invoked before the source yields');
+    const poll = await opening;
+    if (failure.stage === 'inference') { poll(performance.now()); for (let i = 0; i < 20; i++) await Promise.resolve(); }
+    assert.deepEqual(failures, [[failure.reason, `${failure.error.name}: ${failure.error.message}`]]);
+    assert.equal(stops, failure.stage === 'permission' ? 0 : 1);
+    assert.equal(releases, failure.stage === 'permission' ? 0 : 1);
+    assert.equal(source.tracks().length, 0);
+  });
+}
+
+test('a real analysis-service face worker construction failure reaches the camera source and releases the stream', { timeout: 5000 }, async (t) => {
+  const globals = (name: string, value: unknown): void => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+    Object.defineProperty(globalThis, name, { configurable: true, value });
+    t.after(() => { if (descriptor === undefined) Reflect.deleteProperty(globalThis, name); else Object.defineProperty(globalThis, name, descriptor); });
+  };
+  const parsed = parseLock(JSON.parse(await readFile(new URL('../models.lock.json', import.meta.url), 'utf8')));
+  assert.ok(parsed.ok);
+  let alive = true, stops = 0, spawns = 0;
+  const disposal: (() => void)[] = [], failures: Parameters<ViewAttempt['failed']>[] = [];
+  const track = { stop() { stops++; }, addEventListener() {}, removeEventListener() {} };
+  globals('navigator', { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [track] }) } });
+  globals('document', { createElement: () => ({ pause() {}, play: async () => {} }) });
+  globals('window', { setTimeout, clearTimeout });
+  const service = createAnalysisService({
+    clock: { now: () => 0 }, diag: { log() {} }, lock: parsed.value, threads: 2, ortBase: '/vendor/ort/1.30.0/',
+    loader: Promise.resolve(err({ kind: 'quota' })),
+    spawn: () => { throw new Error('No sequence worker expected.'); },
+    spawnDecoder: () => { throw new Error('No decoder expected.'); },
+    spawnFaceTracker: () => { spawns++; throw new Error('CAM2 worker startup fault'); },
+  });
+  const source = createWindowSource({ openTracker: () => service.openFaceTracker() });
+  await source.source({
+    valid: () => alive, dispose: (fn) => disposal.push(fn), target() {},
+    failed(...args) { failures.push(args); alive = false; disposal.toReversed().forEach((fn) => fn()); },
+  });
+  assert.equal(spawns, 1);
+  assert.deepEqual(failures, [['Face tracking could not start', 'Error: Error: CAM2 worker startup fault']]);
+  assert.equal(stops, 1, 'startup failure releases the acquired camera stream');
+  assert.equal(source.tracks().length, 0);
+  assert.equal(source.trackedFrames(), 0);
 });

@@ -259,7 +259,7 @@ const Products = z.object({
 });
 const Preparing = z.object({
   text: z.string().nullable(), font: z.string(), color: z.string(), background: z.string(), radius: z.string(),
-  padding: z.string(), shadow: z.string(), centered: z.boolean(), x: z.number(), y: z.number(), withinStage: z.boolean(),
+  padding: z.string(), shadow: z.string(), centered: z.boolean(), x: z.number(), xRight: z.number(), y: z.number(), withinStage: z.boolean(),
 });
 
 function readPreparing(): unknown {
@@ -270,6 +270,7 @@ function readPreparing(): unknown {
   return { text: pill?.textContent ?? null, font: style?.fontSize ?? '', color: style?.color ?? '',
     background: style?.backgroundColor ?? '', radius: style?.borderRadius ?? '', padding: style?.padding ?? '', shadow: style?.boxShadow ?? '',
     x: p !== undefined && s !== undefined ? p.left - s.left : -1, y: p !== undefined && s !== undefined ? p.top - s.top : -1,
+    xRight: p !== undefined && s !== undefined ? s.right - p.right : -1,
     centered: p !== undefined && s !== undefined && Math.abs((p.left + p.right) / 2 - (s.left + s.right) / 2) < 1,
     withinStage: p !== undefined && s !== undefined && p.right <= s.right && p.bottom <= s.bottom };
 }
@@ -295,6 +296,91 @@ function workerOrder(): unknown {
   }
   return { decoders, maxDecoders, overlap, underflow, opens, releases };
 }
+
+const ImportWorkerMemory = z.object({
+  id: z.string(), worker: z.enum(['sequence', 'decode', 'face']), sessions: z.int().min(0),
+  peakSessions: z.int().min(0), sessionsCreated: z.int().min(0), wasmHighWaterBytes: z.int().positive().nullable(),
+});
+// MEM2 Resume 3 measured 76,808,192 -> 92,209,152 bytes (14.6875 MiB).
+// Permit 16 MiB above the first import: that rise plus 21 wasm pages spare.
+const DECODER_REUSE_MARGIN_BYTES = 16 * 1024 * 1024;
+declare global {
+  interface Window {
+    __driverImportProbe?: {
+      readonly channel: BroadcastChannel;
+      readonly workers: Map<string, z.infer<typeof ImportWorkerMemory>>;
+      tap: 'idle' | 'pending' | 'settled';
+      capture: { readonly kind: 'idle' | 'armed' }
+        | { readonly kind: 'held'; readonly worker: Worker; readonly data: unknown; deliveries: number };
+      restore(): void;
+    };
+  }
+}
+
+/** Observe real session counters and hold one actual tap reply until its scene is replaced. */
+function observeDriverImports(): true {
+  const NativeWorker = Worker;
+  const channel = new BroadcastChannel('noisy-analysis-memory');
+  const probe: NonNullable<Window['__driverImportProbe']> = {
+    channel, workers: new Map(), tap: 'idle', capture: { kind: 'idle' },
+    restore() { window.Worker = NativeWorker; channel.close(); delete window.__driverImportProbe; },
+  };
+  channel.onmessage = (event: MessageEvent<z.infer<typeof ImportWorkerMemory>>) => probe.workers.set(event.data.id, event.data);
+  window.Worker = class extends NativeWorker {
+    constructor(url: string | URL, options?: WorkerOptions) {
+      super(url, options);
+      if (options?.name !== 'decode') return;
+      this.addEventListener('message', (event: MessageEvent<unknown>) => {
+        if (probe.capture.kind !== 'armed' || typeof event.data !== 'object' || event.data === null
+          || !('type' in event.data) || event.data.type !== 'decoded') return;
+        event.stopImmediatePropagation();
+        probe.capture = { kind: 'held', worker: this, data: event.data, deliveries: 0 };
+      });
+    }
+  };
+  window.__driverImportProbe = probe;
+  return true;
+}
+
+async function readImportMemory(): Promise<unknown> {
+  const probe = window.__driverImportProbe;
+  if (probe === undefined) throw new Error('The import memory observer is missing.');
+  probe.channel.postMessage('sample');
+  await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  return [...probe.workers.values()];
+}
+
+function holdDriverTap(): true {
+  const demo = window.__noisyTest?.demo, probe = window.__driverImportProbe;
+  if (demo === undefined || probe === undefined || probe.capture.kind !== 'idle') throw new Error('The stale tap cannot be armed.');
+  probe.capture = { kind: 'armed' }; probe.tap = 'pending';
+  void demo.tap(.5, .5).then(() => { probe.tap = 'settled'; });
+  return true;
+}
+
+const StaleScene = z.object({
+  generation: z.number(), sceneId: z.string().nullable(), masterAsset: z.string().nullable(),
+  objects: z.number(), masks: z.number(), undoDepth: z.number(), redoDepth: z.number(),
+});
+const StaleReply = z.object({ before: StaleScene, after: StaleScene, tapSettled: z.boolean(), cancelled: z.boolean(), deliveries: z.number() });
+
+/** Deliver a genuine canceled decode and replay it after later imports are ready. */
+async function replayDriverTap(): Promise<unknown> {
+  const demo = window.__noisyTest?.demo, probe = window.__driverImportProbe;
+  if (demo === undefined || probe === undefined || probe.capture.kind !== 'held') throw new Error('No delayed decoder reply was captured.');
+  const read = () => ({
+    generation: demo.products().generation, sceneId: demo.document()?.id ?? null,
+    masterAsset: demo.document()?.frame.master.asset ?? null, objects: demo.objects().length, masks: demo.products().masks,
+    undoDepth: demo.historyState().undoDepth, redoDepth: demo.historyState().redoDepth,
+  });
+  const before = read(), tapSettled = probe.tap === 'settled';
+  probe.capture.worker.dispatchEvent(new MessageEvent('message', { data: probe.capture.data }));
+  probe.capture.deliveries++;
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  return { before, after: read(), tapSettled, deliveries: probe.capture.deliveries,
+    cancelled: demo.analysisDiagnostics().events.some((event) => event.event === 'stage.failed' && event.op === 'decode' && event.error.kind === 'cancelled') };
+}
+
 const DriverView = z.object({
   analysis: Analysis, products: Products, depthDocument: z.boolean(), sceneId: z.string().nullable(),
   masterAsset: z.string().nullable(), masterSize: z.object({ width: z.number(), height: z.number() }).nullable(),
@@ -394,7 +480,7 @@ async function replaceDriverTwice(): Promise<unknown> {
 
 const analysisScenarios: readonly Scenario[] = [
   {
-    id: 'driver.import', title: 'repeated imports keep one decoder, ordered heaps and preparation pills on both frames',
+    id: 'driver.import', title: 'repeated imports reuse one decoder, bound its sessions and heap, and isolate stale replies on both frames',
     target: 'dev', covers: [], timeoutMs: 600_000,
     async run(t) {
       await t.page.emulate({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, colorScheme: 'dark' });
@@ -404,10 +490,25 @@ const analysisScenarios: readonly Scenario[] = [
         const a = window.__noisyTest?.demo.analysis(); return a?.modelsReady ? a : null;
       }, { timeoutMs: 120_000 });
       t.equal('models ready before analysis', boot.modelsReady, true);
+      await t.page.evaluate(z.literal(true), observeDriverImports);
+      const memory: { step: string; workers: z.infer<typeof ImportWorkerMemory>[] }[] = [];
+      const stale: { step: string; reply: z.infer<typeof StaleReply> }[] = [];
+      const recordMemory = async (step: string): Promise<void> => {
+        memory.push({ step, workers: await t.page.evaluate(z.array(ImportWorkerMemory), readImportMemory) });
+        await t.file('driver-import-memory.json', JSON.stringify(memory, null, 2));
+      };
+      const replayStale = async (step: string): Promise<void> => {
+        const reply = await t.page.evaluate(StaleReply, replayDriverTap);
+        stale.push({ step, reply });
+        t.equal(`${step}: old tap settled as cancelled before its delayed reply`, [reply.tapSettled, reply.cancelled], [true, true]);
+        t.equal(`${step}: stale decoder reply cannot change the current scene, masks or history`, reply.after, reply.before);
+        t.equal(`${step}: later import retains no stale object or mask`, [reply.after.objects, reply.after.masks, reply.after.undoDepth, reply.after.redoDepth], [0, 0, 0, 0]);
+        await t.file('driver-stale-replies.json', JSON.stringify(stale, null, 2));
+      };
       await t.page.evaluate(z.literal(true), driverImport, 4032, 3024, 0);
       await t.page.waitFor('depth preparation pill', z.literal(true), () => document.querySelector('[data-testid=preparing]')?.textContent === 'Preparing: depth' ? true : null);
       const desktopPill = await t.page.evaluate(Preparing, readPreparing);
-      t.equal('quiet pill uses the pinned tokens and the top-center notice slot', Preparing.omit({ x: true }).parse(desktopPill), {
+      t.equal('quiet pill uses the pinned tokens and the top-center notice slot', Preparing.omit({ x: true, xRight: true }).parse(desktopPill), {
         text: 'Preparing: depth', font: '13px', color: 'rgb(230, 230, 230)', background: 'rgb(38, 38, 38)',
         radius: '12px', padding: '8px 12px', shadow: 'none', centered: true, y: 8, withinStage: true,
       });
@@ -417,7 +518,7 @@ const analysisScenarios: readonly Scenario[] = [
       }, { timeoutMs: 60_000 });
       const depth = await t.page.evaluate(DriverView, readDriver);
       t.ok('depth lands within 60 seconds of import and has a document reference', depth.elapsedMs <= 60_000 && depth.depthDocument, depth);
-      await t.page.waitFor('resident warmed decoder and terminated heavy worker', z.literal(true), () => {
+      await t.page.waitFor('resident warmed decoder and idle heavy work', z.literal(true), () => {
         const a = window.__noisyTest?.demo.analysis(); return a?.decoderReady && a.alive.decoder && !a.alive.heavy ? true : null;
       }, { timeoutMs: Math.max(1, 150_000 - depth.elapsedMs) });
       const ready = await t.page.evaluate(DriverView, readDriver);
@@ -434,10 +535,15 @@ const analysisScenarios: readonly Scenario[] = [
       // A verified warm Cache Storage need not issue any model HTTP requests.
       await t.file('driver-initial-timeline.json', JSON.stringify({ depth, ready, modelRequests }, null, 2));
       await t.page.screenshot('driver-ready');
+      await recordMemory('first import ready');
+      await t.page.evaluate(z.literal(true), holdDriverTap);
+      await t.page.waitFor('real first-import tap reply held before delivery', z.literal(true), () =>
+        window.__driverImportProbe?.capture.kind === 'held' ? true : null, { timeoutMs: 10_000 });
       const replacements = await t.page.evaluate(z.object({ before: z.number(), after: z.number(), during: Analysis }), replaceDriverTwice);
       t.equal('two replacement generations', replacements.after, replacements.before + 2);
       t.equal('second import started heavy work and released the old decoder', replacements.during.alive, { heavy: true, decoder: false });
       t.ok('replacement never claims the old decoder is ready', !replacements.during.decoderReady && replacements.during.status !== 'Ready to tap', replacements.during);
+      await replayStale('third import preparing');
       await t.page.waitFor('only the third import warmed and complete', z.literal(true), () => {
         const d = window.__noisyTest?.demo; const a = d?.analysis();
         return a?.decoderReady && !a.alive.heavy && a.alive.decoder && d?.document()?.frame.master.size.width === 2048 && d.document()?.frame.master.size.height === 2048 ? true : null;
@@ -450,6 +556,8 @@ const analysisScenarios: readonly Scenario[] = [
       // The browser driver also enforces same-origin requests and zero page/server CSP violations.
       await t.file('driver-replacement-timeline.json', JSON.stringify({ replacements, final }, null, 2));
       await t.page.screenshot('driver-replaced');
+      await replayStale('third import ready');
+      await recordMemory('third import ready');
       // Three complete imports in one session, including the phone frame.
       for (const variant of [1, 2]) {
         if (variant === 2) await t.page.emulate({ width: 402, height: 874, deviceScaleFactor: 3, mobile: true, colorScheme: 'dark' });
@@ -457,21 +565,37 @@ const analysisScenarios: readonly Scenario[] = [
         if (variant === 2) {
           await t.page.waitFor('phone depth preparation pill', z.literal(true), () => document.querySelector('.phone-stage [data-testid=preparing]')?.textContent === 'Preparing: depth' ? true : null);
           const phonePill = await t.page.evaluate(Preparing, readPreparing);
-          t.equal('phone pill is 12 px under the strip inside the stage', [phonePill.text, phonePill.x, phonePill.y, phonePill.withinStage], ['Preparing: depth', 12, 12, true]);
+          // RS1b: the Fry rail holds the left edge, so the phone pill sits 12 px in from the stage's right instead of its left.
+      t.equal('phone pill is 12 px under the strip inside the stage, clear of the Fry rail', [phonePill.text, phonePill.xRight, phonePill.y, phonePill.withinStage], ['Preparing: depth', 12, 12, true]);
           await t.page.screenshot('preparing-phone-402');
         }
         await t.page.waitFor('replacement Ready to tap', z.literal(true), () => {
           const a = window.__noisyTest?.demo.analysis();
           return a?.decoderReady && a.status === 'Ready to tap' && document.querySelector('[data-testid=preparing]') === null ? true : null;
         }, { timeoutMs: 150_000 });
+        await replayStale(`variant ${variant} ready`);
+        await recordMemory(`variant ${variant} ready`);
       }
       const order = await t.page.evaluate(WorkerOrder, workerOrder);
       const pillFrames = await t.page.evaluate(z.array(z.object({ width: z.number(), text: z.string() })), () => JSON.parse(document.body.dataset['preparingFrames'] ?? '[]'));
       const phoneSentences = pillFrames.filter((frame) => frame.width === 402).map((frame) => frame.text);
       for (const sentence of ['Preparing: depth', 'Preparing: encoder', 'Warming decoder']) t.ok(`phone pill passed through ${sentence}`, phoneSentences.includes(sentence), phoneSentences);
-      t.equal('all imports have at most one live decoder and no import heap overlap', [order.decoders, order.maxDecoders, order.overlap, order.underflow], [1, 1, false, false]);
-      t.equal('four completed imports each opened one decoder', order.opens.length, 4);
+      t.equal('all imports retain one decoder worker without worker-count underflow', [order.decoders, order.maxDecoders, order.underflow], [1, 1, false]);
+      t.equal('four completed imports reuse exactly one decoder worker without retiring it', [memory.length, order.opens.length, order.releases.length], [4, 1, 0]);
+      const decoder = memory.map((row) => row.workers.filter((worker) => worker.worker === 'decode'));
+      const sequence = memory.map((row) => row.workers.filter((worker) => worker.worker === 'sequence'));
+      t.equal('all imports use the same single decoder runtime', decoder.map((workers) => workers.map((worker) => worker.id)), memory.map(() => [decoder[0]?.[0]?.id]));
+      t.equal('all imports use the same single sequence runtime', sequence.map((workers) => workers.map((worker) => worker.id)), memory.map(() => [sequence[0]?.[0]?.id]));
+      t.equal('decoder session lifetime peak is one, including between snapshots', decoder.map((workers) => workers.map(({ sessions, peakSessions }) => [sessions, peakSessions])), memory.map(() => [[1, 1]]));
+      t.equal('each completed import releases the previous decoder session before creating one', decoder.map((workers) => workers[0]?.sessionsCreated), [1, 2, 3, 4]);
+      const firstPeak = decoder[0]?.[0]?.wasmHighWaterBytes;
+      t.ok('decoder wasm HWM stays within first-import peak plus 16 MiB', typeof firstPeak === 'number'
+        && decoder.every((workers) => workers.length === 1 && typeof workers[0]?.wasmHighWaterBytes === 'number'
+          && workers[0].wasmHighWaterBytes <= firstPeak + DECODER_REUSE_MARGIN_BYTES),
+      { firstPeak, marginBytes: DECODER_REUSE_MARGIN_BYTES, imports: decoder });
+      t.equal('real canceled decoder output was delivered during preparation and replayed after every later completed import', stale.map((row) => row.reply.deliveries), [1, 2, 3, 4]);
       await t.file('driver-heap-order.json', JSON.stringify(order, null, 2));
+      await t.page.evaluate(z.literal(true), () => { window.__driverImportProbe?.restore(); return true; });
     },
   },
   {

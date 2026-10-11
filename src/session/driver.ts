@@ -1,11 +1,12 @@
 import { bundledLock } from '../analysis/bundled-lock.ts';
 import type { AnalysisError, AnalysisEvent, AnalysisService, AnalysisServiceDeps, Decoder, FaceTracker, HeavyStage } from '../analysis/service.ts';
 import type { AnalysisBackend, ComposedAnalysisService } from '../analysis/composed.ts';
+import type { SamEmbeddings } from '../analysis/protocol.ts';
 import { holeMask, plateNeeded, reconcile } from '../core/derive.ts';
 import { liveCoverage, liveHoleMask, type LiveCoverage } from '../core/live-coverage.ts';
 import type { PerspectiveGeometry } from '../core/perspective.ts';
 import type { Produce } from '../core/edits.ts';
-import type { ModelId, NonEmpty } from '../core/ids.ts';
+import type { AssetId, ModelId, NonEmpty } from '../core/ids.ts';
 import { sortedMasks } from '../core/produce.ts';
 import type { Rgb8 } from '../core/raster.ts';
 import type { SceneDocument } from '../core/types.ts';
@@ -13,6 +14,7 @@ import { createBrowserClock } from '../platform/clock.ts';
 import { createDiagnostics } from '../platform/diagnostics.ts';
 import { initialPolicy, nextWake, transition, type PolicyEvent, type Stage } from './policy.ts';
 import { productAsset, type Products, type LivePlateProduct } from './products.ts';
+import { createEmbeddingCache, type EmbeddingCache } from './embedding-cache.ts';
 
 export type LivePlateState =
   | { readonly kind: 'off' }
@@ -45,7 +47,8 @@ type Host = {
 };
 const reason = (error: unknown): string => error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error);
 
-type DriverEvent = AnalysisEvent | { readonly event: 'fetch.failed'; readonly error: unknown };
+type DriverEvent = AnalysisEvent | { readonly event: 'fetch.failed'; readonly error: unknown }
+  | { readonly event: 'analysis.failed'; readonly op: Stage; readonly error: unknown };
 const modelsUnavailable = 'Models unavailable: reload to try loading the models again.';
 
 /** Product copy never includes model identifiers or diagnostic messages. */
@@ -64,6 +67,22 @@ function modelFailure(error: AnalysisError): string {
   }
 }
 
+/** Recovery copy never serializes a worker error or a thrown value. */
+function analysisRecovery(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'kind' in error) {
+    switch (error.kind) {
+      case 'download': return 'status' in error && error.status === 'offline'
+        ? 'Check your connection and reopen this photo.' : 'Reload this page to load the models and try again.';
+      case 'integrity': return 'Reload this page to load a fresh copy of the models.';
+      case 'quota': return 'Free some device storage and reload this page.';
+      case 'timeout':
+      case 'cancelled': return 'Reopen this photo to try again.';
+      case 'worker': return 'Reload this page to try again.';
+    }
+  }
+  return 'Reload this page to try again.';
+}
+
 function retryDelay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) { resolve(); return; }
@@ -71,6 +90,12 @@ function retryDelay(ms: number, signal: AbortSignal): Promise<void> {
     const timer = setTimeout(finish, ms);
     signal.addEventListener('abort', finish, { once: true });
   });
+}
+
+/** Optional storage never gates readiness or retains the driver's scene. */
+function persistEmbeddings(cache: EmbeddingCache, master: AssetId, value: SamEmbeddings): void {
+  try { void cache.put(master, value).catch(() => undefined); }
+  catch { /* Unavailable storage leaves the active embeddings usable. */ }
 }
 
 /** Warming owns its worker until ready; abort also ends a pending retry. */
@@ -96,7 +121,9 @@ export async function warmDecoder({ open, releaseHeavy, signal, now, report, onR
         if (signal.aborted || (typeof error === 'object' && error !== null
           && (('kind' in error && error.kind === 'cancelled') || ('name' in error && error.name === 'AbortError')))) return { kind: 'cancelled' };
         report(error);
-        const startupFailure = /out of memory|no available backend|decoder (?:did not start|session could not be created)/i.test(reason(error));
+        const deadlineFailure = typeof error === 'object' && error !== null
+          && 'kind' in error && error.kind === 'timeout' && 'op' in error && error.op === 'decode';
+        const startupFailure = deadlineFailure || /out of memory|no available backend|decoder (?:did not start|session could not be created)/i.test(reason(error));
         if (attempt !== 0 || !startupFailure) return { kind: 'failed', reload: attempt !== 0 };
         releaseHeavy();
         await retryDelay(1500, signal);
@@ -145,21 +172,22 @@ export function createAnalysisDriver(host: Host) {
   driver = createDriver(host, {
     clock, diag, service, threads, prepareGuide: makeGuide,
     models: lock.ok ? { kind: 'ready', ids: [...new Set(Object.values(lock.value.ops).map((op) => op.model))],
-      depth: lock.value.ops.depth.model, inpaint: lock.value.ops.inpaint.model, count: Object.keys(lock.value.lock.models).length }
+      depth: lock.value.ops.depth.model, encode: lock.value.ops.encode.model, inpaint: lock.value.ops.inpaint.model, count: Object.keys(lock.value.lock.models).length }
       : { kind: 'unavailable', message: lock.error },
   });
   return driver;
 }
 
 /** Policy execution takes its service and guide boundary explicitly for lifecycle tests. */
-export function createDriver(host: Host, { clock, diag, service, threads, prepareGuide, models }: {
+export function createDriver(host: Host, { clock, diag, service, threads, prepareGuide, models, embeddingCache = createEmbeddingCache() }: {
   readonly clock: Pick<ReturnType<typeof createBrowserClock>, 'now'>;
   readonly diag: Pick<ReturnType<typeof createDiagnostics<DriverEvent>>, 'log' | 'events'>;
   readonly service: (AnalysisService & { readonly backend?: AnalysisBackend; readonly routing?: ComposedAnalysisService['routing']; readonly remoteTimings?: ComposedAnalysisService['remoteTimings']; readonly releaseImport?: () => void }) | null;
   readonly threads: number;
   readonly prepareGuide: typeof makeGuide;
-  readonly models: { readonly kind: 'ready'; readonly ids: readonly ModelId[]; readonly depth: ModelId; readonly inpaint: ModelId; readonly count: number }
+  readonly models: { readonly kind: 'ready'; readonly ids: readonly ModelId[]; readonly depth: ModelId; readonly encode: ModelId; readonly inpaint: ModelId; readonly count: number }
     | { readonly kind: 'unavailable'; readonly message: string };
+  readonly embeddingCache?: EmbeddingCache;
 }) {
   let policy = initialPolicy();
   let status = 'Fetching models 0%';
@@ -171,6 +199,7 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
   let pendingWarmup: (() => void) | null = null;
   let guide: Rgb8 | null = null;
   let embeddings = false;
+  let cachedEmbeddings: SamEmbeddings | null = null;
   let decoderReady = false;
   let tapFailure: string | null = null;
   let sequenceFailure: string | null = null;
@@ -225,10 +254,14 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
     // State changes first: cancelHeavy can synchronously deliver a terminal callback.
     for (const effect of next.effects) {
       switch (effect.kind) {
-        case 'cancel-heavy': heavy?.abort(); heavy = null; liveHeavy = null; service?.cancelHeavy(); break;
+        case 'cancel-heavy':
+          heavy?.abort(); heavy = null; liveHeavy = null;
+          service?.cancelHeavy(next.effects.some((item) => item.kind === 'status' && item.text.startsWith('Analysis timed out')) ? 'timeout' : undefined);
+          break;
         case 'release-decoder': warming?.abort(); warming = null; decoder?.release(); decoder = null; decoderReady = false; break;
         case 'drop-products':
           settle('The photo was replaced.'); host.products.clear(); guide = null; embeddings = false;
+          cachedEmbeddings = null;
           liveGeometry = null;
           pendingWarmup = null;
           tapFailure = null; sequenceFailure = null; timings = {}; lastTiming = null; started.clear();
@@ -277,9 +310,43 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
     const products: Promise<void>[] = [];
     const failed = (stage: Stage, error: unknown): void => {
       if (!active()) return;
+      diag.log({ event: 'analysis.failed', op: stage, error });
       finishProduct(stage, generation);
-      dispatch({ kind: 'failed', generation, stage, reason: reason(error) });
+      dispatch({ kind: 'failed', generation, stage, reason: analysisRecovery(error) });
     };
+    const queueDecoder = (value: SamEmbeddings): void => {
+      // Dispatch invokes this only when import and queued background workers have ended.
+      pendingWarmup = () => { void (async () => {
+        if (!valid(generation) || controller.signal.aborted) return;
+        const preparedGuide = guide;
+        if (preparedGuide === null) { tapFailure = 'Tapping unavailable - try another photo'; setStatus(restingStatus()); return; }
+        const warm = new AbortController(); warming = warm;
+        setStatus('Warming decoder');
+        const result = await warmDecoder({
+          open: () => service.openDecoder({ scene: scene.doc.id, embeddings: value, guide: preparedGuide }),
+          releaseHeavy: () => { heavy?.abort(); heavy = null; service.cancelHeavy(); },
+          signal: warm.signal, now: () => clock.now(),
+          report: (error) => { if (NOISY_DEV) diag.log({ event: 'stage.failed', op: 'decode', error: { kind: 'worker', op: 'decode', message: reason(error) } }); },
+          onReady: (resident, ms) => {
+            if (!valid(generation) || warm.signal.aborted || warming !== warm) { resident.release(); return; }
+            warming = null; pendingWarmup = null; decoder = resident; decoderReady = true;
+            note('warmup', ms, generation);
+            if (valid(generation) && !warm.signal.aborted) {
+              if (policy.sequence !== 'plate' && !policy.plateQueued) setStatus(restingStatus());
+              else host.changed();
+            }
+          },
+        });
+        if (result.kind === 'ready' || !valid(generation) || warm.signal.aborted || warming !== warm) return;
+        warming = null; pendingWarmup = null;
+        if (result.kind === 'failed') {
+          decoderReady = false;
+          tapFailure = result.reload ? 'Tapping needs a reload on this device' : 'Tapping unavailable - try another photo';
+        }
+        setStatus(restingStatus());
+      })(); };
+    };
+    if (!plate && cachedEmbeddings !== null) queueDecoder(cachedEmbeddings);
     try {
       service.runSequence(scene.doc.id, stages, { master: () => createImageBitmap(scene.masterPixels) }, {
         onPhase(stage, phase) {
@@ -302,36 +369,9 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
         onEmbeddings(value) {
           if (!active()) return;
           finishProduct('encode', generation); embeddings = true;
-          // Dispatch invokes this only when import and queued background workers have ended.
-          pendingWarmup = () => { void (async () => {
-            if (!valid(generation) || controller.signal.aborted) return;
-            const preparedGuide = guide;
-            if (preparedGuide === null) { tapFailure = 'Tapping unavailable - try another photo'; setStatus(restingStatus()); return; }
-            const warm = new AbortController(); warming = warm;
-            setStatus('Warming decoder');
-            const result = await warmDecoder({
-              open: () => service.openDecoder({ scene: scene.doc.id, embeddings: value, guide: preparedGuide }),
-              releaseHeavy: () => { heavy?.abort(); heavy = null; service.cancelHeavy(); },
-              signal: warm.signal, now: () => clock.now(),
-              report: (error) => { if (NOISY_DEV) diag.log({ event: 'stage.failed', op: 'decode', error: { kind: 'worker', op: 'decode', message: reason(error) } }); },
-              onReady: (resident, ms) => {
-                if (!valid(generation) || warm.signal.aborted || warming !== warm) { resident.release(); return; }
-                warming = null; pendingWarmup = null; decoder = resident; decoderReady = true;
-                note('warmup', ms, generation);
-                if (valid(generation) && !warm.signal.aborted) {
-                  if (policy.sequence !== 'plate' && !policy.plateQueued) setStatus(restingStatus());
-                  else host.changed();
-                }
-              },
-            });
-            if (result.kind === 'ready' || !valid(generation) || warm.signal.aborted || warming !== warm) return;
-            warming = null; pendingWarmup = null;
-            if (result.kind === 'failed') {
-              decoderReady = false;
-              tapFailure = result.reload ? 'Tapping needs a reload on this device' : 'Tapping unavailable - try another photo';
-            }
-            setStatus(restingStatus());
-          })(); };
+          cachedEmbeddings = value;
+          persistEmbeddings(embeddingCache, scene.doc.frame.master.asset, value);
+          queueDecoder(value);
         },
         onPlate(image) {
           if (!active()) return;
@@ -421,10 +461,16 @@ export function createDriver(host: Host, { clock, diag, service, threads, prepar
       dispatch({ kind: 'import-failed', generation }); settle('The photo could not be imported.');
     },
     async sceneReady(generation: number, master: ImageData): Promise<void> {
+      const scene = host.read();
       try {
         const made = await prepareGuide(master);
         if (!valid(generation)) return;
         guide = made;
+        if (scene !== null && models.kind === 'ready') {
+          const cached = await embeddingCache.get(scene.doc.frame.master.asset, models.encode);
+          if (!valid(generation)) return;
+          cachedEmbeddings = cached; embeddings = cached !== null;
+        }
       } catch (error) {
         if (!valid(generation)) return;
         if (NOISY_DEV) diag.log({ event: 'stage.failed', op: 'decode', error: { kind: 'worker', op: 'decode', message: reason(error) } });

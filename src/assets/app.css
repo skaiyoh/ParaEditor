@@ -394,18 +394,23 @@ button.layer-row.is-selected:focus-visible,
 .gallery-piece-link:active img { filter: brightness(.9); }
 .gallery-piece-link:focus-visible { outline-offset: 3px; }
 .gallery-message { display: flex; min-height: 240px; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; line-height: 1.5; text-align: center; }
-.gallery-piece { position: fixed; inset: 0; }
-.gallery-media { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.gallery-piece-top { position: absolute; top: max(8px, env(safe-area-inset-top)); left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right)); display: flex; align-items: center; gap: 8px; pointer-events: none; }
+html:has(.gallery-piece), body:has(.gallery-piece) { overflow: hidden; overscroll-behavior: none; }
+.gallery-piece { position: relative; height: 100dvh; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); overflow: clip; }
+.gallery-piece-stage { position: relative; min-width: 0; min-height: 0; display: grid; place-items: center; padding: 16px; container-type: size; }
+/* Fit the content aspect within both stage axes, reserving the frame's two border pixels. */
+.gallery-picture { position: relative; box-sizing: content-box; width: min(calc(100% - 2px), calc((100cqh - 2px) * var(--piece-aspect))); aspect-ratio: var(--piece-aspect); max-width: 100%; max-height: 100%; border: 1px solid var(--hairline); border-radius: var(--radius); overflow: hidden; }
+@media (min-width: 744px) { .gallery-piece-stage { padding: 24px; } }
+.gallery-media { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+.gallery-piece-top { padding: 8px; display: flex; align-items: center; gap: 8px; }
 .gallery-piece-top > * { background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--radius); pointer-events: auto; }
 .gallery-piece-top time { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 12px; }
 .gallery-remove { margin-left: auto; }
-.gallery-piece-controls { position: absolute; bottom: max(24px, env(safe-area-inset-bottom)); left: max(16px, env(safe-area-inset-left)); right: max(16px, env(safe-area-inset-right)); display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.gallery-piece-controls { padding: 0 16px 24px; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .gallery-piece-controls button { display: inline-flex; gap: 8px; align-items: center; justify-content: center; background-color: var(--panel); }
 .gallery-piece-controls button:not(.primary-action) { border: 1px solid var(--hairline); }
 .gallery-piece-controls button.primary-action { background-color: var(--key); }
 .gallery-piece-controls .gallery-tilt-state { color: var(--secondary); }
-.gallery-piece-status { border: 1px solid var(--hairline); position: absolute; top: calc(max(8px, env(safe-area-inset-top)) + 60px); left: 16px; max-width: min(440px, calc(100% - 32px)); padding: 12px 16px; background: var(--panel); border-radius: var(--r-float); line-height: 1.5; }
+.gallery-piece-status { border: 1px solid var(--hairline); position: absolute; top: 0; left: 16px; max-width: min(440px, calc(100% - 32px)); padding: 12px 16px; background: var(--panel); border-radius: var(--r-float); line-height: 1.5; }
 .gallery-confirm { position: absolute; top: 72px; right: 16px; max-width: calc(100% - 32px); padding: 16px; background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-float); }
 .gallery-confirm > div { display: flex; justify-content: flex-end; margin-top: 12px; }
 .share-group { border-top: 1px solid var(--hairline); padding-bottom: 8px; }
@@ -436,7 +441,7 @@ button.layer-row.is-selected:focus-visible,
   #phone-projects { width: 100%; height: 100%; }
   .phone-stage .projects-editor-status { padding-bottom: calc(13px + env(safe-area-inset-bottom)); min-height: calc(44px + env(safe-area-inset-bottom)); }
   .phone-stage .stage-canvas { width: 100%; height: 100%; object-fit: contain; touch-action: none; }
-  .phone-stage > .preparing { z-index: 5; max-width: calc(100% - 96px); left: auto; right: 8px; top: 8px; }
+  .phone-stage > .preparing { z-index: 5; max-width: calc(100% - 96px); left: auto; right: 12px; top: 12px; }
   .phone-editor button, .phone-editor input, .phone-editor select { touch-action: manipulation; }
   .phone-editor .phone-sheet { position: absolute; z-index: 4; bottom: 0; left: 0; right: 0; display: flex; flex-direction: column; background: var(--panel); border-top: 1px solid var(--hairline); border-radius: 16px 16px 0 0; padding: 0 max(4px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(4px, env(safe-area-inset-left)); }
   .phone-sheet[data-expanded="true"] { height: min(46dvh, calc(100dvh - var(--phone-top) - 200px)); }

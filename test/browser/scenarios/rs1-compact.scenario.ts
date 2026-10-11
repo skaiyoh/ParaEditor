@@ -174,7 +174,8 @@ export const scenarios: readonly Scenario[] = [{
       await touch(t, '[data-testid="projects-return"]');
       await touch(t, '[data-testid="tool-layers"]');
       await touch(t, '.layer-row.is-selected .layer-select');
-      t.equal(`${label}: selecting the same object also collapses`, await t.page.evaluate(z.string(), () => document.querySelector('.sheet-handle')?.getAttribute('aria-expanded')), 'false');
+      // UI session decision (2026-10-11): a stage tap that selects collapses the sheet; choosing a row in the Layers tab keeps the sheet open for layer work.
+      t.equal(`${label}: selecting from the Layers tab keeps the sheet open`, await t.page.evaluate(z.string(), () => document.querySelector('.sheet-handle')?.getAttribute('aria-expanded')), 'true');
       await touch(t, '.context-bar [aria-label="Deselect"]');
       await touch(t, '[data-testid="tool-adjust"]');
       await select(t);

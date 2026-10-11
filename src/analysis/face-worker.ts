@@ -1,7 +1,7 @@
 import type { InferenceSession } from 'noisy:vendor-ort';
 import { bundledLock } from './bundled-lock.ts';
 import { checkFaceKnownAnswer, decodeFace, faceInput, FACE_SIZE } from './face-check.ts';
-import { describeThrown, loadOrt, modelStore, runSession, type OrtRuntime } from './ort-runtime.ts';
+import { describeThrown, loadOrt, modelStore, observeSession, runSession, type OrtRuntime } from './ort-runtime.ts';
 import { modelFileUrl } from './lock.ts';
 import { oneLine, parseFaceRequest, type FaceReply, type FaceRequest } from './protocol.ts';
 
@@ -20,7 +20,7 @@ async function init(ortBase: string): Promise<void> {
   try {
     const lock = bundledLock(); if (!lock.ok) throw new Error(lock.error);
     const store = await modelStore({ lock: lock.value, subtle: crypto.subtle, caches, origin: self.location.origin });
-    const runtime = await loadOrt({ ortBase, threads: 1 }); if (!runtime.ok) throw new Error(runtime.error);
+    const runtime = await loadOrt({ ortBase, threads: 1, worker: 'face' }); if (!runtime.ok) throw new Error(runtime.error);
     // This old exporter lists weights as inputs, which ORT warns about.
     // They are valid initializers; keep graph warnings out of the page console.
     // env.logLevel does not suppress the native graph warnings. This single
@@ -32,6 +32,7 @@ async function init(ortBase: string): Promise<void> {
     const session = await runtime.value.ort.InferenceSession.create(new Uint8Array(await response.arrayBuffer()), {
       executionProviders: ['wasm'], graphOptimizationLevel: 'all', logSeverityLevel: 3,
     });
+    observeSession(session);
     if (session.inputNames.join(',') !== 'input' || session.outputNames.join(',') !== 'scores,boxes') throw new Error('Unexpected UltraFace input/output names.');
     const warm = await runSession(session, { input: new runtime.value.ort.Tensor('float32', new Float32Array(3 * 240 * 320), [1, 3, 240, 320]) });
     if (!warm.ok) throw new Error(warm.error);

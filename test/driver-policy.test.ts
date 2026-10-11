@@ -4,12 +4,14 @@ import { initialPolicy, nextWake, transition, type Policy, type PolicyEvent, typ
 import { createProducts, productAsset } from '../src/session/products.ts';
 import { createDriver, warmDecoder } from '../src/session/driver.ts';
 import type { AnalysisError, AnalysisService, Decoder, SequenceListener } from '../src/analysis/service.ts';
+import type { SamEmbeddings } from '../src/analysis/protocol.ts';
 import { isAssetId, isBuildId, isModelId, isObjectId, isSceneId } from '../src/core/ids.ts';
 import { newDocument, newObject } from '../src/core/defaults.ts';
 import { photoStats } from '../src/photo/stats.ts';
 import type { Plane } from '../src/core/raster.ts';
 import type { Produce } from '../src/core/edits.ts';
 import type { PerspectiveGeometry } from '../src/core/perspective.ts';
+import { createEmbeddingCache, type EmbeddingCache } from '../src/session/embedding-cache.ts';
 
 Object.defineProperty(globalThis, 'NOISY_DEV', { value: false, configurable: true });
 
@@ -19,6 +21,7 @@ function driverRig(failures: readonly string[] = [], options: {
   readonly fetchModels?: AnalysisService['fetchModels'];
   readonly models?: Parameters<typeof createDriver>[1]['models'];
   readonly serviceUnavailable?: boolean;
+  readonly embeddingCache?: EmbeddingCache;
 } = {}) {
   const id = '00000000-0000-4000-8000-000000000001';
   const asset = 'a'.repeat(64);
@@ -38,12 +41,13 @@ function driverRig(failures: readonly string[] = [], options: {
       original: { name: 'fixture.png', mediaType: 'image/png', size: guide.size } },
     analysis: { ...stats, depth: null, plate: null, autoSubject: 'pending' } });
   const events: string[] = [];
+  const sequences: string[][] = [];
   let now = 0, heavy = false, decoderAlive = false, opens = 0, heavyReleases = 0;
   let listener: SequenceListener | null = null;
   let plateWanted = false;
   let changed = (): void => {};
   const service: AnalysisService = {
-    runSequence(_scene, stages, _input, on) { if (stages[0].kind !== 'inpaint') assert.equal(decoderAlive, false); heavy = true; listener = on; events.push(`sequence.spawn:${stages[0].kind}`); },
+    runSequence(_scene, stages, _input, on) { if (stages[0].kind !== 'inpaint') assert.equal(decoderAlive, false); heavy = true; listener = on; sequences.push(stages.map((stage) => stage.kind)); events.push(`sequence.spawn:${stages[0].kind}`); },
     cancelHeavy() { heavyReleases++; if (heavy) events.push('sequence.cancel'); heavy = false; },
     openDecoder(input) {
       assert.equal(heavy, false, 'sequence terminated before decoder opens');
@@ -71,10 +75,15 @@ function driverRig(failures: readonly string[] = [], options: {
   const driver = createDriver({ read: () => ({ doc: { ...doc, objects: plateWanted ? [object] : doc.objects, motion: { ...doc.motion, enabled: plateWanted } }, masterPixels: master }),
     products, produce: (product) => produced.push(product), changed: () => changed() }, {
     clock: { now: () => now }, diag: { events: diagnostics, log: (event) => diagnostics.push({ ...event, t: now }) }, service: options.serviceUnavailable ? null : service, threads: 2,
-    prepareGuide: async () => guide, models: options.models ?? { kind: 'ready', ids: [model], depth: model, inpaint: model, count: 1 },
+    prepareGuide: async () => guide, models: options.models ?? { kind: 'ready', ids: [model], depth: model, encode: model, inpaint: model, count: 1 },
+    ...(options.embeddingCache === undefined ? {} : { embeddingCache: options.embeddingCache }),
   });
   return {
-    driver, events, master, products, produced,
+    driver, events, sequences, master, products, produced,
+    masterAsset(hex: string) {
+      if (!isAssetId(hex)) throw new Error('Invalid master asset.');
+      doc = { ...doc, frame: { ...doc.frame, master: { ...doc.frame.master, asset: hex } } };
+    },
     liveSubject(withSubject = true) {
       doc = { ...doc, objects: withSubject ? [object] : [], analysis: { ...doc.analysis, depth: { model,
         map: { asset, format: 'f32', size: guide.size }, stats: { p10: .1, median: .5, p90: .9 } } } };
@@ -91,7 +100,7 @@ function driverRig(failures: readonly string[] = [], options: {
       if (listener === null) throw new Error('No sequence running.');
       const on = listener;
       heavy = false; events.push('sequence.terminate');
-      on.onEmbeddings({ model, tensors: [
+      if (sequences.at(-1)?.includes('encode')) on.onEmbeddings({ model, tensors: [
         { name: 'image_embeddings.0', dims: [1, 32, 256, 256], data: new Float32Array(0) },
         { name: 'image_embeddings.1', dims: [1, 64, 128, 128], data: new Float32Array(0) },
         { name: 'image_embeddings.2', dims: [1, 256, 64, 64], data: new Float32Array(0) },
@@ -135,6 +144,136 @@ test('every model failure kind has short recovery copy and retains its full deta
   }
 });
 
+test('five project opens restore master embeddings without another encoder session', async () => {
+  const held = new Map<string, Parameters<EmbeddingCache['put']>[1]>();
+  const cache: EmbeddingCache = {
+    async get(master, model) { const value = held.get(master); return value?.model === model ? value : null; },
+    async put(master, value) { held.set(master, value); },
+  };
+  const r = driverRig([], { embeddingCache: cache }); await flush();
+  const assets = ['1', '2', '3', '4', '5'].map((hex) => hex.repeat(64));
+  for (const asset of assets) {
+    r.advance(2001); r.masterAsset(asset);
+    await r.driver.sceneReady(r.driver.beginImport(), r.master);
+    assert.deepEqual(r.sequences.at(-1), ['depth', 'encode']);
+    r.complete(); await flush();
+    assert.equal(r.driver.snapshot().decoderReady, true);
+  }
+  assert.equal(held.size, 5);
+  for (const asset of assets) {
+    r.advance(2001); r.masterAsset(asset);
+    await r.driver.sceneReady(r.driver.beginImport(), r.master);
+    assert.deepEqual(r.sequences.at(-1), ['depth'], 'reopening an encoded master never requests encode');
+    r.complete(); await flush();
+    assert.equal(r.driver.snapshot().decoderReady, true, 'cached embeddings still warm the decoder');
+  }
+  assert.equal(r.sequences.filter((stages) => stages.includes('encode')).length, 5);
+  r.driver.beginImport();
+});
+
+test('stalled embedding persistence does not gate decoder readiness or later photos', async () => {
+  const write = Promise.withResolvers<void>();
+  let writes = 0;
+  const cache: EmbeddingCache = {
+    async get() { return null; },
+    put() { writes++; return write.promise; },
+  };
+  const r = driverRig([], { embeddingCache: cache });
+  try {
+    await flush();
+    await r.driver.sceneReady(r.driver.beginImport(), r.master);
+    r.complete(); await flush();
+    assert.equal(writes, 1, 'persistence started but is still pending');
+    assert.equal(r.driver.snapshot().decoderReady, true, 'completed inference warms before the optional write settles');
+    assert.equal(r.driver.snapshot().status, 'Ready to tap');
+    r.advance(2001);
+    await r.driver.sceneReady(r.driver.beginImport(), r.master);
+    r.complete(); await flush();
+    assert.equal(writes, 2);
+    assert.equal(r.driver.snapshot().decoderReady, true, 'another photo can complete with persistence pending');
+  } finally {
+    r.driver.beginImport();
+    write.resolve(); await flush();
+  }
+  assert.equal(r.driver.snapshot().decoderReady, false, 'late write completion cannot restore a replaced decoder');
+});
+
+test('a finite corrupted cache payload makes the opened photo encode again', async () => {
+  const master = 'a'.repeat(64), model = `depth-anything-v2-small@${'a'.repeat(64)}`;
+  if (!isAssetId(master) || !isModelId(model)) throw new Error('Invalid cache fixture identities.');
+  const value: SamEmbeddings = { model, tensors: [
+    { name: 'image_embeddings.0', dims: [1, 32, 256, 256], data: new Float32Array(32 * 256 * 256).fill(1) },
+    { name: 'image_embeddings.1', dims: [1, 64, 128, 128], data: new Float32Array(64 * 128 * 128).fill(1) },
+    { name: 'image_embeddings.2', dims: [1, 256, 64, 64], data: new Float32Array(256 * 64 * 64).fill(1) },
+  ] };
+  let stored: Uint8Array<ArrayBuffer> | null = null;
+  const storage = { async open() { return {
+    async match() { return stored === null ? undefined : new Response(stored.slice()); },
+    async put(_key: RequestInfo | URL, response: Response) { stored = new Uint8Array(await response.arrayBuffer()); },
+  }; } };
+  await createEmbeddingCache(storage).put(master, value);
+  if (stored === null) assert.fail('The embedding fixture was not persisted.');
+  const bytes: Uint8Array<ArrayBuffer> = stored;
+  const headerLength = new DataView(bytes.buffer).getUint32(0, true);
+  const tensorStart = Math.ceil((4 + headerLength) / 4) * 4;
+  new DataView(bytes.buffer).setFloat32(tensorStart, 1.5, true);
+  const r = driverRig([], { embeddingCache: createEmbeddingCache(storage) });
+  try {
+    await flush();
+    await r.driver.sceneReady(r.driver.beginImport(), r.master);
+    assert.deepEqual(r.sequences.at(-1), ['depth', 'encode'], 'corruption is a miss, so the real driver requests a fresh encoding');
+    r.complete(); await flush();
+    assert.equal(r.driver.snapshot().decoderReady, true);
+  } finally { r.driver.beginImport(); }
+});
+
+test('throwing or rejected optional persistence leaves the completed photo ready', async (t) => {
+  for (const failure of ['throw', 'reject'] as const) {
+    await t.test(failure, async () => {
+      const cache: EmbeddingCache = {
+        async get() { return null; },
+        put() {
+          if (failure === 'throw') throw new Error('optional storage threw');
+          return Promise.reject(new Error('optional storage rejected'));
+        },
+      };
+      const r = driverRig([], { embeddingCache: cache });
+      try {
+        await flush();
+        await r.driver.sceneReady(r.driver.beginImport(), r.master);
+        assert.doesNotThrow(() => r.complete());
+        await flush();
+        assert.equal(r.driver.snapshot().decoderReady, true);
+        assert.equal(r.driver.snapshot().status, 'Ready to tap');
+      } finally { r.driver.beginImport(); }
+    });
+  }
+});
+
+test('a decoder deadline retries warmup once on a replacement', async () => {
+  const timeout = { kind: 'timeout', op: 'decode', visibleMs: 30_000 } satisfies AnalysisError;
+  const diagnostics: unknown[] = [];
+  let opens = 0, releases = 0, heavyReleases = 0, ready = false;
+  const id = '00000000-0000-4000-8000-000000000001';
+  if (!isSceneId(id)) throw new Error('Invalid decoder fixture id.');
+  const mask = { format: 'u8', size: { width: 1, height: 1 }, data: new Uint8Array([255]) } satisfies Plane<'u8'>;
+  const candidate = { mask, score: 1 };
+  const result = await warmDecoder({
+    open() {
+      const attempt = opens++;
+      return { scene: id, async decode() {
+        return attempt === 0 ? { ok: false, error: timeout }
+          : { ok: true, value: { candidates: [candidate, candidate, candidate] } };
+      }, release() { releases++; } };
+    },
+    releaseHeavy: () => { heavyReleases++; }, signal: new AbortController().signal,
+    now: () => 0, report: (error) => diagnostics.push(error), onReady: () => { ready = true; },
+  });
+  assert.deepEqual(result, { kind: 'ready' });
+  assert.deepEqual([opens, releases, heavyReleases, ready], [2, 1, 1, true]);
+  assert.deepEqual(diagnostics, [timeout]);
+});
+
 test('unknown model fetch throws and rejections stay generic and are logged once without serialization', async () => {
   const cyclic: { cause?: unknown } = {}; cyclic.cause = cyclic;
   for (const error of [new Error('private model@digest'), '{"kind":"integrity","model":"private@digest"}', null, undefined, 1n, cyclic]) {
@@ -172,6 +311,35 @@ test('a new import retries failed model loading and can recover without duplicat
   assert.equal(r.driver.snapshot().modelsReady, true);
   assert.equal(r.driver.snapshot().status, 'Waiting to analyze');
   assert.equal(r.driver.diagnostics().events.length, 1);
+});
+
+test('analysis failures show recovery copy and preserve the exact iPad encoder error in diagnostics', async (t) => {
+  const model = `depth-anything-v2-small@${'a'.repeat(64)}`;
+  assert.ok(isModelId(model));
+  const ipadError = { kind: 'worker', op: 'encode', message: 'the encoder session could not be created: Error: no available backend found. ERR: [wasm] RangeError: Out of memory' } satisfies AnalysisError;
+  const cases = [
+    { stage: 'encode', error: ipadError, recovery: 'Reload this page to try again.' },
+    { stage: 'depth', error: { kind: 'download', model, status: 'offline' }, recovery: 'Check your connection and reopen this photo.' },
+    { stage: 'depth', error: { kind: 'download', model, status: 503 }, recovery: 'Reload this page to load the models and try again.' },
+    { stage: 'encode', error: { kind: 'integrity', model }, recovery: 'Reload this page to load a fresh copy of the models.' },
+    { stage: 'encode', error: { kind: 'quota' }, recovery: 'Free some device storage and reload this page.' },
+    { stage: 'depth', error: { kind: 'timeout', op: 'depth', visibleMs: 60_000 }, recovery: 'Reopen this photo to try again.' },
+    { stage: 'inpaint', error: { kind: 'cancelled' }, recovery: 'Reopen this photo to try again.' },
+  ] satisfies { stage: Stage; error: AnalysisError; recovery: string }[];
+  for (const { stage, error, recovery } of cases) {
+    await t.test(`${stage}:${error.kind}`, async () => {
+      const r = driverRig(); await flush();
+      await r.driver.sceneReady(r.driver.beginImport(), r.master);
+      const listener = r.staleListener(); assert.ok(listener);
+      listener.onFailed(stage, error);
+      assert.equal(r.driver.snapshot().status, `Analysis failed at ${stage}: ${recovery}`);
+      assert.deepEqual(r.driver.snapshot().alive, { heavy: false, decoder: false });
+      const logged = r.driver.diagnostics().events.filter((event) => event.event === 'analysis.failed');
+      assert.equal(logged.length, 1);
+      assert.equal(logged[0]?.op, stage);
+      assert.equal(logged[0]?.error, error, 'the original error stays in diagnostics without serialization');
+    });
+  }
 });
 
 const liveGeometry: PerspectiveGeometry = { aperture: { center: { x: 0, y: 0 }, width: 1, height: .75 }, crop: .04, neutralDistance: 1, nearFactor: 1.1, farFactor: 2 };

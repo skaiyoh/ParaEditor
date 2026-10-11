@@ -89,6 +89,8 @@ function Piece({ context, register, ready }: {
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewer = useRef<Viewer | null>(null);
   const [poster, setPoster] = useState('');
+  const [posterAspect, setPosterAspect] = useState(1);
+  const [masterAspect, setMasterAspect] = useState<number | null>(null);
   const [sentence, setSentence] = useState('Opening piece…');
   const [failed, setFailed] = useState(false);
   const [live, setLive] = useState(false);
@@ -152,6 +154,8 @@ function Piece({ context, register, ready }: {
         hasPoster = true; setPoster(content.posterUrl);
         const piece = await content.loadPiece(controller.signal);
         if (controller.signal.aborted || canvas.current === null) return;
+        const { width, height } = piece.document.frame.master.size;
+        setMasterAspect(width / height);
         const current = context.createViewer({ canvas: canvas.current, piece });
         viewer.current = current; register(current); unsubscribe = current.subscribe(update);
         setPermissionNeeded(current.tiltNeedsPermission());
@@ -200,13 +204,21 @@ function Piece({ context, register, ready }: {
     } catch { setSentence('The piece could not be unpublished. Try again.'); setRemoving(false); }
   };
   return <main class="gallery-piece" data-touch={touch} aria-label="Published piece">
-    <img class="gallery-media" data-testid="gallery-poster" src={poster || undefined} hidden={!poster || live} alt="Published piece" />
-    <canvas ref={canvas} class="gallery-media" data-testid="gallery-canvas" hidden={failed} style={{ visibility: live ? 'visible' : 'hidden' }} role="img" aria-label="Live published piece" />
     <header class="gallery-piece-top"><a class="icon-button" href="/gallery" data-testid="gallery-back" aria-label="All pieces" title="All pieces"><Icon name="back" /></a>
       {publishedAt !== null && <time dateTime={publishedAt}>{timeLabel(publishedAt)}</time>}
       {owned && <button ref={removeButton} class="gallery-remove" type="button" data-testid="gallery-unpublish" onClick={() => setConfirm(true)}>Unpublish</button>}
     </header>
-    <p class="gallery-piece-status" data-testid="gallery-status" role="status" hidden={!sentence}>{sentence}</p>
+    <div class="gallery-piece-stage">
+      <div class="gallery-picture" style={{ '--piece-aspect': masterAspect ?? posterAspect }}>
+        <img class="gallery-media" data-testid="gallery-poster" src={poster || undefined} hidden={!poster || live} alt="Published piece"
+          onLoad={(event) => {
+            const image = event.currentTarget;
+            if (image.naturalWidth > 0 && image.naturalHeight > 0) setPosterAspect(image.naturalWidth / image.naturalHeight);
+          }} />
+        <canvas ref={canvas} class="gallery-media" data-testid="gallery-canvas" hidden={failed} style={{ visibility: live ? 'visible' : 'hidden' }} role="img" aria-label="Live published piece" />
+      </div>
+      <p class="gallery-piece-status" data-testid="gallery-status" role="status" hidden={!sentence}>{sentence}</p>
+    </div>
     {confirm && <section class="gallery-confirm" aria-label="Unpublish piece" onKeyDown={(event) => {
       if (event.key === 'Escape' && !removing) { setConfirm(false); removeButton.current?.focus(); }
     }}><p>Remove this piece from the gallery?</p><div><button ref={confirmButton} type="button" disabled={removing} onClick={() => { void unpublish(); }}>{removing ? 'Unpublishing…' : 'Unpublish'}</button>

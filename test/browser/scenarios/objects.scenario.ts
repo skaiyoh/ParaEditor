@@ -409,10 +409,15 @@ export const scenarios: readonly Scenario[] = [
         const button = (row: string, action: string): string => `${row} [data-testid="layer-${action}"]`;
         const ancestorScrolls: number[][] = [];
         const clickControl = async (selector: string): Promise<void> => {
-          if (!phone && await page.evaluate(z.boolean(), (selector) => {
+          // Open the Layers panel or phone tab when the control sits in it hidden. RS1b collapses the phone sheet on a row
+          // selection and on Escape; the phone reopen uses a DOM click so the pointer (and the row's hover) stays put.
+          if (await page.evaluate(z.boolean(), (selector) => {
             const panel = document.querySelector(selector)?.closest('[data-testid=panel-layers]');
-            return panel instanceof HTMLElement && panel.hidden;
-          }, selector)) await page.click('[data-testid=tool-layers]');
+            return panel instanceof HTMLElement && (panel.hidden || panel.getBoundingClientRect().height === 0);
+          }, selector)) {
+            if (phone) await page.evaluate(z.literal(true), () => { document.querySelector<HTMLElement>('[data-testid=tool-layers]')?.click(); return true; });
+            else await page.click('[data-testid=tool-layers]');
+          }
           await page.evaluate(z.literal(true), revealLayerControl, selector);
           await page.click(selector);
           if (phone) ancestorScrolls.push(await page.evaluate(z.array(z.number()), () => {
@@ -424,9 +429,10 @@ export const scenarios: readonly Scenario[] = [
             return values;
           }));
         };
-        // Layers is a closed secondary node in the shared portrait inspector.
-        if (phone) await clickControl('[aria-controls="node-layers"]');
+        // RS1b: Layers is a tab of the phone sheet; clickControl opens it when the row is hidden.
         await clickControl(`${first} .layer-select`);
+        // RS1b collapses the phone sheet when a row is selected; reopen it without moving the pointer.
+        if (phone && await page.evaluate(z.boolean(), () => document.querySelector('[data-testid="tool-layers"]')?.getAttribute('aria-expanded') !== 'true')) await page.evaluate(z.literal(true), () => { document.querySelector<HTMLElement>('[data-testid=tool-layers]')?.click(); return true; });
         const targets = await page.evaluate(z.object({ selects: z.array(z.object({ width: z.number(), height: z.number() })),
           icons: z.array(z.object({ width: z.number(), height: z.number() })), opacity: z.string(), hover: z.boolean() }), (selector) => {
           const row = document.querySelector(selector);
@@ -447,8 +453,8 @@ export const scenarios: readonly Scenario[] = [
         t.equal(`${frame}: action ids distinguish row and inspector placements`, await page.evaluate(z.array(z.number()), () =>
           ['layer-hide', 'layer-delete', 'object-hide', 'object-delete'].map((id) => document.querySelectorAll(`[data-testid="${id}"]`).length)), [2, 2, 1, 1]);
         const beginRename = async (): Promise<void> => {
-          if (phone) await clickControl('[data-testid="layer-rename"]');
-          else await clickControl(`${first} [data-testid="layer-rename"]`);
+          // RS1b: the phone Layers tab uses the full-tier rows; rename through the selected row's name (clickControl reopens the tab).
+          await clickControl(`${first} [data-testid="layer-rename"]`);
           await page.waitFor('inline layer name', z.literal(true), () => document.querySelector('[data-testid="layer-name-input"]') === null ? null : true);
           await page.evaluate(z.literal(true), () => {
             const input = document.querySelector('[data-testid="layer-name-input"]');

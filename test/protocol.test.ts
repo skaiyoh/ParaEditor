@@ -12,6 +12,7 @@ import type { Result } from '../src/core/result.ts';
 import type { DepthStats, TapPoint } from '../src/core/types.ts';
 import {
   parseDecodeReply,
+  parseDecodeLifecycleReply,
   parseDecodeRequest,
   parseSequenceReply,
   parseSequenceRequest,
@@ -114,6 +115,8 @@ const VALID_SEQUENCE_REPLIES: Record<string, unknown> = {
 
 const VALID_DECODE_REQUESTS: Record<string, unknown> = {
   init: { type: 'init', ortBase: '/vendor/ort/1.30.0/', embeddings: embeddings(), guide: rgb8(8, 6) },
+  initialize: { type: 'initialize', requestId: 11, ortBase: '/vendor/ort/1.30.0/', embeddings: embeddings(), guide: rgb8(8, 6) },
+  dispose: { type: 'dispose', requestId: 12 },
   'decode one point': { type: 'decode', jobId: 0, points: [tap] },
   'decode three points': {
     type: 'decode',
@@ -763,10 +766,14 @@ type ExpectedSequenceReply =
   | { readonly type: 'depth'; readonly map: Plane<'f32'>; readonly stats: DepthStats; readonly timings: StageTimings }
   | { readonly type: 'embeddings'; readonly embeddings: SamEmbeddings; readonly timings: StageTimings }
   | { readonly type: 'plate'; readonly image: Rgb8; readonly timings: StageTimings }
-  | { readonly type: 'failed'; readonly stage: HeavyStage['kind']; readonly message: string };
+  | { readonly type: 'failed'; readonly stage: HeavyStage['kind']; readonly message: string; readonly fatal?: boolean | undefined };
 type ExpectedDecodeRequest =
+  | { readonly type: 'control'; readonly port: MessagePort }
   | { readonly type: 'init'; readonly ortBase: string; readonly embeddings: SamEmbeddings; readonly guide: Rgb8 }
-  | { readonly type: 'decode'; readonly jobId: number; readonly points: NonEmpty<TapPoint> };
+  | { readonly type: 'initialize'; readonly requestId: number; readonly ortBase: string; readonly embeddings: SamEmbeddings; readonly guide: Rgb8 }
+  | { readonly type: 'decode'; readonly jobId: number; readonly points: NonEmpty<TapPoint> }
+  | { readonly type: 'release' }
+  | { readonly type: 'dispose'; readonly requestId: number };
 type ExpectedDecodeReply =
   | { readonly type: 'decoded'; readonly jobId: number; readonly result: DecodeResult; readonly timings: StageTimings }
   | { readonly type: 'failed'; readonly jobId: number; readonly message: string };
@@ -785,4 +792,56 @@ test("the parsed types equal the protocol's shapes written out by hand", () => {
     true satisfies Equal<HeavyStage['kind'], 'depth' | 'encode' | 'inpaint'>,
   ];
   assert.deepEqual(checks, checks.map(() => true));
+});
+
+test('decoder release is a strict payload-free request, as built and after cloning', () => {
+  for (const request of [{ type: 'release' }, structuredClone({ type: 'release' })]) {
+    const parsed = parseDecodeRequest(request);
+    assert.ok(parsed.ok, parsed.ok ? '' : parsed.error.detail);
+    assert.deepEqual(parsed.value, request);
+    assert.ok(Object.isFrozen(parsed.value));
+  }
+  assertFailsAt(parseDecodeRequest({ type: 'release', jobId: 0 }), ['jobId']);
+  assertFailsAt(parseDecodeRequest({ type: 'release', embeddings: embeddings() }), ['embeddings']);
+});
+
+test('a decoder lifetime control endpoint is a transferred MessagePort, with a strict request envelope', () => {
+  const channel = new MessageChannel();
+  const transferred: unknown = structuredClone({ type: 'control', port: channel.port2 }, { transfer: [channel.port2] });
+  let received: MessagePort | null = null;
+  try {
+    const parsed = parseDecodeRequest(transferred);
+    assert.ok(parsed.ok);
+    assert.equal(parsed.value.type, 'control');
+    if (parsed.value.type !== 'control') return assert.fail('not a control request');
+    received = parsed.value.port;
+    assert.ok(received instanceof MessagePort);
+    assert.ok(Object.isFrozen(parsed.value));
+    assertFailsAt(parseDecodeRequest({ type: 'control', port: channel.port1, extra: true }), ['extra']);
+    for (const port of [null, {}, { [Symbol.toStringTag]: 'MessagePort' }]) {
+      assertFailsAt(parseDecodeRequest({ type: 'control', port }), ['port']);
+    }
+  } finally { channel.port1.close(); channel.port2.close(); received?.close(); }
+});
+
+test('private lifecycle acknowledgements validate identity and completion without changing the public decode reply parser', () => {
+  for (const value of [
+    { type: 'initialized', requestId: 3, message: null },
+    { type: 'initialized', requestId: 4, message: 'the embeddings did not match' },
+    { type: 'disposed', requestId: 5 },
+  ]) {
+    for (const received of [value, structuredClone(value)]) {
+      const parsed = parseDecodeLifecycleReply(received);
+      assert.ok(parsed.ok, parsed.ok ? '' : parsed.error.detail);
+      assert.deepEqual(parsed.value, received);
+      assert.ok(Object.isFrozen(parsed.value));
+      assert.equal(parseDecodeReply(received).ok, false);
+    }
+  }
+  for (const requestId of [-1, 0.1, '1', Number.NaN]) {
+    assertFailsAt(parseDecodeLifecycleReply({ type: 'initialized', requestId, message: null }), ['requestId']);
+    assertFailsAt(parseDecodeRequest({ type: 'dispose', requestId }), ['requestId']);
+  }
+  assertFailsAt(parseDecodeLifecycleReply({ type: 'disposed', requestId: 1, message: null }), ['message']);
+  assertFailsAt(parseDecodeLifecycleReply({ type: 'initialized', requestId: 1 }), ['message']);
 });
