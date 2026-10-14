@@ -15,6 +15,7 @@ import { PaintBar, PaintSize, PaintTools } from './paint-tools.tsx';
 import { RemixContainer, type RemixFocus } from './remix-container.tsx';
 import type { RemixModel } from './remix-model.ts';
 import { Share } from './share.tsx';
+import { GALLERY_ONLINE } from './gallery-online.ts';
 import { Icon } from './icons.tsx';
 import { installKeyTexture } from './key-texture.ts';
 import { ColorPicker, displayColor, useColorPalette, type PendingColor } from './color-picker.tsx';
@@ -694,7 +695,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
           {selected?.recolor.kind === 'none' && <Icon name="original" />}
         </span>;
       })()} onColorApplied={onColorApplied}
-      share={<Share session={session} onNotice={setShareNotice} onStatus={setShareStatus} />}
+      share={GALLERY_ONLINE ? <Share session={session} onNotice={setShareNotice} onStatus={setShareStatus} /> : null}
       facts={<><h3 class="panel-heading">Scene</h3><dl class="scene-facts">
         <div><dt>Analysis</dt><dd data-testid="analysis-backend">{scene === null ? 'No photo' : analysis.backend.kind === 'gpu' ? `GPU · ${analysis.backend.name}` : 'on device'}</dd></div>
         <div><dt>Master</dt><dd>{scene === null ? 'No photo' : `${scene.master.width} × ${scene.master.height}`}</dd></div>
@@ -738,7 +739,7 @@ export function DemoApp({ session, isolated, buildId, bootError }: {
               <button type="button" disabled={scene === null || busy} onClick={() => session.reset()}><Icon name="reset" />Reset</button>
             </div>
             <CompareControls session={session} />
-            <Share session={session} onNotice={setShareNotice} onStatus={setShareStatus} />
+            {GALLERY_ONLINE && <Share session={session} onNotice={setShareNotice} onStatus={setShareStatus} />}
             <section class="scene-info" aria-labelledby="scene-heading">
               <h3 id="scene-heading" class="panel-heading">Scene</h3>
               <dl class="scene-facts">

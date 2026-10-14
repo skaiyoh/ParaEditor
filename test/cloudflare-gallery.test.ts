@@ -40,7 +40,7 @@ function harness(admin?: string, galleryPage = false) {
       const page = keys.slice(0, limit ?? 2), last = page.at(-1); return { objects: page.map((key) => ({ key })), truncated: keys.length > page.length, ...(last === undefined ? {} : { cursor: last }) }; },
   };
   const handler = createHandler({ routes: { '/': { kind: 'asset', headers: { 'X-Gallery-Test': 'root', 'Cache-Control': 'immutable' } },
-    ...(galleryPage ? { '/gallery.html': { kind: 'asset', headers: { 'X-Gallery-Test': 'page', 'Cache-Control': 'no-cache' } } } : {}) }, errors: { 'Cache-Control': 'no-store' } });
+    ...(galleryPage ? { '/gallery.html': { kind: 'asset', headers: { 'X-Gallery-Test': 'page', 'Cache-Control': 'no-cache' } } } : {}) }, errors: { 'Cache-Control': 'no-store' }, store: 'online' });
   const fetched: string[] = [];
   const env = { PROJECTS: bucket, ...(admin === undefined ? {} : { GALLERY_ADMIN_KEY: admin }),
     ASSETS: { async fetch(request: Request) {

@@ -240,12 +240,29 @@ function Piece({ context, register, ready }: {
   </main>;
 }
 
-export function mountGalleryUi(context: GalleryUiContext): { ready: Promise<void>; viewer(): Viewer | null; dispose(): void } {
+function installPageStyle(): void {
   if (document.querySelector('link[href="/assets-static/app.css"]') === null) {
     const style = document.createElement('link'); style.rel = 'stylesheet'; style.href = '/assets-static/app.css';
     document.head.append(style);
   }
   installKeyTexture();
+}
+
+/** Every gallery URL of a build without the gallery (gallery-online.ts): no list, no piece, no request. */
+export function mountGalleryOffline({ root, editorUrl }: { readonly root: HTMLElement; readonly editorUrl: string }): { dispose(): void } {
+  installPageStyle();
+  root.dataset['testid'] = 'gallery'; root.dataset['state'] = 'offline';
+  render(<main class="gallery-page" aria-label="Gallery">
+    <header class="gallery-strip"><div><h1>Gallery</h1></div>
+      <nav class="gallery-actions" aria-label="Gallery actions"><a class="gallery-key" data-testid="gallery-scenes" href="/scenes.html">3D scenes</a>
+        <MakeOne href={editorUrl} /></nav></header>
+    <div class="gallery-message" data-testid="gallery-offline"><p role="status">The gallery is offline.</p></div>
+  </main>, root);
+  return { dispose() { render(null, root); } };
+}
+
+export function mountGalleryUi(context: GalleryUiContext): { ready: Promise<void>; viewer(): Viewer | null; dispose(): void } {
+  installPageStyle();
   context.root.dataset['testid'] = 'gallery';
   delete context.root.dataset['failure']; delete context.root.dataset['input'];
   context.root.dataset['state'] = 'loading';

@@ -34,8 +34,8 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Build development and production
-        # The tests check the header contract of a build with no GPU configured;
-        # the configured production build is made just before the deploy.
+        # The workflow passes no GPU URL, so production analysis stays on the device,
+        # and this production build is the one the deploy step publishes.
         run: |
           npm run build
           npm run build:production
@@ -44,15 +44,9 @@ jobs:
           # serve.test.ts and serve-production.test.ts can hang the runner (plan/findings.tsv F13); they run on the Mac before each export.
           mapfile -t tests < <(find test -maxdepth 1 -name '*.test.ts' ! -name 'drive-chrome.test.ts' ! -name 'serve.test.ts' ! -name 'serve-production.test.ts' | sort)
           node --test --test-timeout=60000 "${tests[@]}" test/cloudflare-credentials.test.mjs
-      - name: Build production with the GPU URL
-        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-        env:
-          NOISY_GPU_URL: ${{ vars.NOISY_GPU_URL }}
-        run: npm run build:production
       - name: Deploy and verify Cloudflare
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
-          NOISY_GPU_URL: ${{ vars.NOISY_GPU_URL }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}

@@ -9,6 +9,12 @@ type Route =
 export type HostingConfig = {
   readonly routes: Readonly<Record<string, Route>>;
   readonly errors: HeaderMap;
+  /**
+   * Whether `/api/projects*` and `/api/gallery*` reach their handlers. Anything but
+   * 'online', an omitted value included, keeps both offline: the handlers are never
+   * called, whatever the environment binds. The deployed worker is offline.
+   */
+  readonly store?: 'online' | 'offline';
 };
 type ObjectInfo = { readonly size: number; readonly httpEtag: string; readonly uploaded: Date };
 export type HostingEnv = Partial<ProjectsEnv> & Partial<GalleryEnv> & {
@@ -90,8 +96,28 @@ export function createHandler(config: HostingConfig): { fetch(request: Request, 
       headers: { ...config.errors, ...extra },
     });
   }
+  // Offline statuses match the local production server's: the editor's store probe,
+  // GET /api/projects, gets a bodiless 204, which the client reads as "no store" for
+  // the rest of the page load; every other store or gallery request gets 404, which
+  // says the resource does not exist here, where a 503 would claim a passing outage.
+  function offline(request: Request, pathname: string): Response {
+    if (request.method === 'GET' && pathname === '/api/projects') {
+      const headers = Object.fromEntries(Object.entries(config.routes['/']?.headers ?? config.errors).filter(([name]) => name.toLowerCase() !== 'content-type'));
+      return new Response(null, { status: 204, headers });
+    }
+    const sentence = pathname.startsWith('/api/gallery') ? 'The gallery is offline.' : 'The project store is offline.';
+    return error(request, 404, JSON.stringify({ error: sentence }), { 'Content-Type': 'application/json' });
+  }
+  const online = config.store === 'online';
   return {
     async fetch(request, env) {
+      if (!online) {
+        // Decoded when it can be, so an escaped spelling of either prefix is caught too.
+        const raw = new URL(request.url).pathname;
+        let path = raw;
+        try { path = decodeURIComponent(raw); } catch { /* The raw path still names the prefix. */ }
+        if (path.startsWith('/api/projects') || path.startsWith('/api/gallery')) return offline(request, path);
+      }
       let pathname: string;
       try { pathname = decodeURIComponent(new URL(request.url).pathname); }
       catch {

@@ -299,6 +299,7 @@ Every content-hashed bundle is under `/assets/`, and the runtime under a directo
 `build.json` also carries `gpu` (empty by default) and the generated `headers` contract.
 The app reads `gpu` once at boot; the server applies the configured origin to the source header contract without widening other directives.
 The hosted prepare step takes `NOISY_GPU_URL` from the environment, falling back to the production build configuration, and writes the same GPU URL and policy into the hosted `build.json` and routing worker.
+The deploy workflow passes no `NOISY_GPU_URL`, so the deployed `build.json` has an empty `gpu`, the CSP admits no GPU origin, and analysis runs on the device; `test/headers.test.ts` holds the workflow to that.
 For local hosted preparation, load `.local/cloudflare.env` into the environment before running the command.
 
 `build.json` records the build for tests and drivers:
@@ -1413,7 +1414,7 @@ The import checker recognizes projects as a leaf.
 One GET /api/projects probe runs when the page's project session is created.
 All writes, loads, deletes and list refreshes wait for that probe.
 A 204 or 404 permanently disables the store for that page load, cancels pending saves and leaves an empty Projects panel reporting No project store on this server.
-The local production server returns a bodyless 204 for this GET only; 404 remains supported for a hosted server whose store is not deployed yet.
+The local production server and the hosted Worker (see Hosted store and gallery) both return a bodyless 204 for this GET only; the client also accepts 404.
 Photo imports and editing keep working without project requests after that initial probe.
 Other failures retain Not saved and permit later save/refresh attempts.
 The initial successful probe supplies the list without a duplicate refresh while it is in flight.
@@ -1488,11 +1489,25 @@ In dev mode, tools/serve.mjs persists atomic files under `<results>/projects/<id
 scene.json contains the transport document, mask sizes, revision and server updatedAt; photo and thumbnail are binary, photo.json holds the content type, and masks/<asset> contains raw bytes.
 Legacy fixture metadata without a revision reads as revision zero; new scene PUTs must supply the revision.
 The existing path fault grammar accepts `/api/projects` for HTTP 500, slow, stalled, byte-inverted corrupt or connection-ending truncated API responses, including mutation acknowledgements.
-Production mode exposes only the bodyless GET absence probe and writes no project files; every other method or path under `/api/projects` remains 404 until the hosted Worker supplies the API.
-The local production server therefore cannot save projects before that Worker is connected.
+Production mode exposes only the bodyless GET absence probe and writes no project files; every other method or path under `/api/projects` is 404, so the local production server saves no projects.
 test/serve-projects.test.ts exercises this contract through real HTTP, and projects.autosave is the real-page dev scenario.
 
-The hosted Pages Worker dispatches `/api/projects` before its static route table.
+### Hosted store and gallery
+
+The deployed Pages Worker keeps the shared project store and the public gallery offline.
+`tools/cloudflare/prepare.mjs` writes `store: 'offline'` into the hosting config, and `tools/cloudflare/worker.ts` treats any value but `'online'` as offline.
+Offline, the Worker answers before its static route table and reads nothing from its environment: GET `/api/projects` gets the bodiless 204 absence probe, so the editor runs with no project store, as under the local production server.
+Every other request whose path, decoded when it can be, starts with `/api/projects` or `/api/gallery` gets 404 for any method, with `{"error":"The project store is offline."}` or `{"error":"The gallery is offline."}`.
+The `PROJECTS` R2 binding and the `NEON_DATABASE_URL` secret stay bound, and the data they hold stays in place; no handler reads them.
+Pages keeps every deployment reachable at its own hash URL, running the Worker it was deployed with, and binding changes reach only later deployments.
+The store is therefore offline everywhere only once every deployment made before this change is deleted, and a rollback to one of those would bring it back online.
+A production build offers no gallery: `src/ui/gallery-online.ts` turns the gallery on in dev builds only, so a production editor hides its Share panel, and the gallery page, at `/gallery` and at each `/gallery/<id>`, shows "The gallery is offline." without a gallery request.
+`test/cloudflare-hosting.test.ts` holds the Worker's offline contract, and GitHub deployment's `verify.mjs` checks it over HTTP before promotion.
+`hosted.offline` checks the editor and the gallery page against the local production server, or against a deployment when `tools/drive-chrome.mjs` runs with `--base-url`.
+
+The store and gallery handlers remain, tested through a hosting config with `store: 'online'`.
+They have no authentication, so no deployment turns them on until owner access exists.
+Online, the Worker dispatches `/api/projects` before its static route table.
 One shared space has no login: Neon stores `projects(id, name, updated_at, scene, masks, revision)` and persistent `tombstones(id)`, while the `PROJECTS` R2 binding stores photo, masks and thumbnail beneath `projects/<id>/`.
 Photos retain their original content type in R2 HTTP metadata and are limited to 24 MiB on the hosted API; the other byte limits match the fixture.
 The Worker reuses the scene serializer, returns the transport revision with document and masks, and never includes the database timestamp in scene JSON.
@@ -1501,8 +1516,6 @@ Parameterized Neon HTTP queries use the pooled connection host's `/sql` endpoint
 Scene upserts and deletion use a READ COMMITTED HTTP batch whose first statement obtains a per-id PostgreSQL transaction advisory lock, so revision/tombstone checks see the previous holder's committed work.
 R2 cannot join that transaction: binary PUTs check tombstones before and after writing, and a late upload removes its prefix when deletion wins; tombstoned resources remain unreadable even during cleanup.
 `deploy.mjs projects`, `migrate` and `secrets` are one-time Mac setup commands; migration is idempotent and the mode-600 `.local/cloudflare.env` supplies the Pages secret in both environments.
-GitHub deployment runs the existing `verify.mjs` before promotion, including an isolated-id store round trip with binary equality, revision conflict, deletion and tombstone checks alongside the static/model contract.
-`hosted.projects` exercises import, editing, save, reload, reopening and deletion through the production UI; it uses its own id and preserves other shared projects.
 
 ## Module map and the import graph
 
