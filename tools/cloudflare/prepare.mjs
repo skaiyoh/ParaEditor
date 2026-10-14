@@ -105,7 +105,8 @@ export async function prepare({ source = path.join(ROOT, 'build/production'), ou
   const contract = gpuHeaders(await loadHeaderContract(path.join(ROOT, 'headers.json')), gpu);
   const routes = Object.fromEntries(['/', ...assets.map((name) => `/${name}`)].map((url) => [url, { kind: 'asset', headers: expectedHeaders(contract, url) }]));
   for (const file of await lockedFiles()) routes[file.served] = { kind: 'model', key: path.basename(file.served), bytes: file.bytes, headers: expectedHeaders(contract, file.served) };
-  const config = { routes, errors: { ...expectedHeaders(contract, '/', { status: 404 }), 'Content-Type': 'text/plain; charset=utf-8' } };
+  // The shared project store and the public gallery stay offline until owner access exists.
+  const config = { routes, errors: { ...expectedHeaders(contract, '/', { status: 404 }), 'Content-Type': 'text/plain; charset=utf-8' }, store: 'offline' };
   // This directory is generated exclusively by this command, never a source tree.
   await rm(output, { recursive: true, force: true });
   await mkdir(output, { recursive: true });

@@ -65,6 +65,30 @@ for (const gpu of ['', 'https://gpu.nathan.fish/base']) test(`prepared hosting v
   assert.deepEqual(checked.source, contract.all);
 });
 
+test('an offline store answers the editor probe with 204, refuses every other store and gallery request with 404, and never reads the environment', async () => {
+  // Any binding read, PROJECTS and NEON_DATABASE_URL included, would mean a handler was reached.
+  const untouched = new Proxy({}, { get(_target, key) { throw new Error(`The offline store read env.${String(key)}.`); } }) as HostingEnv;
+  const { 'Content-Type': _html, ...probeHeaders } = config.routes['/'].headers;
+  for (const path of ['/api/projects', '/api/%70rojects']) {
+    const probe = await request(path, undefined, untouched);
+    assert.equal(probe.status, 204, path); assert.equal(await probe.text(), ''); headers(probe, probeHeaders);
+    assert.equal(probe.headers.get('Content-Type'), null);
+  }
+  const id = '00000000-0000-4000-8000-000000000001';
+  const projects = ['/api/projects', `/api/projects/${id}`, `/api/projects/${id}/scene`, `/api/projects/${id}/photo`, `/api/%70rojects/${id}/scene`, '/api/projects%ZZ', '/api/projectsX'];
+  const gallery = ['/api/gallery', `/api/gallery/${id}`, `/api/gallery/${id}/poster`, `/api/gallery/${id}/publish`, '/api/%67allery', '/api/gallery/%ZZ'];
+  for (const path of [...projects, ...gallery]) {
+    for (const method of ['GET', 'HEAD', 'POST', 'PUT', 'DELETE']) {
+      if (method === 'GET' && path === '/api/projects') continue;
+      const response = await request(path, { method, ...(method === 'POST' || method === 'PUT' ? { body: 'x' } : {}) }, untouched);
+      assert.equal(response.status, 404, `${method} ${path}`);
+      headers(response, { ...config.errors, 'Content-Type': 'application/json' });
+      const sentence = gallery.includes(path) ? 'The gallery is offline.' : 'The project store is offline.';
+      assert.equal(await response.text(), method === 'HEAD' ? '' : `${JSON.stringify({ error: sentence })}\n`, `${method} ${path}`);
+    }
+  }
+});
+
 test('hosting serves direct index.html and limits paths and methods before calling storage', async () => {
   const index = await request('/index.html');
   assert.equal(index.status, 200); assert.equal(await index.text(), 'asset:/'); headers(index, config.routes['/index.html'].headers);

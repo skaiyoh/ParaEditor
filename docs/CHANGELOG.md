@@ -130,6 +130,7 @@
 
 ### Changed
 
+- `2026-10-14` - The deployed worker keeps the shared project store and the public gallery offline: GET `/api/projects` answers 204, so the editor runs with no project store, and every other `/api/projects*` or `/api/gallery*` request answers 404 without reaching a handler. Production builds hide Publish, and the gallery page, at `/gallery` and each `/gallery/<id>`, shows the gallery as offline. The deploy workflow no longer passes `NOISY_GPU_URL`, so production analysis stays on the device. `verify.mjs` checks the offline contract in place of the store and gallery round trips, and the `hosted.offline` scenario replaces `hosted.projects`.
 - `2026-10-10` - Aligned current product/operational documentation with the iPad creative photo-to-motion direction and adversarial feature review; added separate [implementation](../plan/handoffs/claude-orchestrator.md) and [UI](../plan/handoffs/ui-redesign.md) handoffs, corrected stale hybrid/perspective/schema facts, and labeled retained planning history. This entry records documentation only, not newly shipped app features or physical-device verification.
 - `2026-10-01` - `headers.json` caches `/vendor/ort/*` as immutable and sends `/models/*` as `no-store`, and the dev server sends any response the fault state altered as `no-store`.
 - `2026-10-01` - The dev server's default directory for `/vendor/ort/` is the build's own copy, `<root>/vendor/ort`, instead of a top-level `vendor/ort`.

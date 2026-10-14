@@ -8,17 +8,10 @@ import { isAssetId, type AssetId } from '../src/core/ids.ts';
 import { encodeRaster } from '../src/core/asset-codec.ts';
 import { compositionDocumentSchema } from '../src/core/composition-schema.ts';
 import { migrateV4ToV5 } from '../src/core/composition.ts';
-import { z } from '../src/core/zod.ts';
 import * as gallery from '../src/projects/gallery.ts';
 import { assetId, legacyFiveClusterDocument as fiveClusterDocument, legacyMinimalDocument as minimalDocument, uuid } from './fixtures/documents.ts';
 import { localEffect, newComposition } from './fixtures/composition.ts';
 import { startServer, tempDir, type Server } from './support/cli.ts';
-
-// JavaScript verifier exports cross into this test through a checked boundary.
-const verifierModule: unknown = await import(new URL('../tools/cloudflare/verify.mjs', import.meta.url).href);
-const { withGalleryDraft } = z.object({
-  withGalleryDraft: z.function({ input: [z.unknown()], output: z.promise(z.void()) }),
-}).parse(verifierModule);
 
 // A genuine 2 x 1 JPEG reduced from the repository's sample photo.
 const jpeg = Buffer.from('/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAAqADAAQAAAABAAAAAQAAAAD/wAARCAABAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9sAQwACAgICAgIDAgIDBQMDAwUGBQUFBQYIBgYGBgYICggICAgICAoKCgoKCgoKDAwMDAwMDg4ODg4PDw8PDw8PDw8P/9sAQwECAgIEBAQHBAQHEAsJCxAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ/90ABAAB/9oADAMBAAIRAxEAPwD109TSUp6mkr1D48//2Q==', 'base64');
@@ -195,93 +188,6 @@ test('a successful HTTP response with another endpoint shape is a typed invalid 
   globalThis.fetch = (_input, init) => nativeFetch(new URL('/api/projects', server.url), init);
   try { assert.equal(failure(await gallery.list(), 'invalid').status, 200); }
   finally { globalThis.fetch = clientFetch; }
-});
-
-const verificationCredentials = { id: 'd85237b1-9dce-4a8a-9938-d8b676f768d1', token: 'x'.repeat(43) };
-const verificationHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' };
-function checkVerificationHeaders(route: string, response: Response): void {
-  assert.equal(response.headers.get('Cache-Control'), 'no-cache', `${route}: Cache-Control`);
-}
-
-for (const creation of [
-  { name: 'cache header', credentials: verificationCredentials, status: 201, cache: 'public, max-age=60', expected: /Cache-Control/ },
-  { name: 'status', credentials: verificationCredentials, status: 200, cache: 'no-cache', expected: /\/api\/gallery/ },
-  { name: 'id', credentials: { ...verificationCredentials, id: verificationCredentials.id.toUpperCase() }, status: 201, cache: 'no-cache', expected: /regular expression/ },
-  { name: 'token', credentials: { ...verificationCredentials, token: 'x'.repeat(42) }, status: 201, cache: 'no-cache', expected: /regular expression/ },
-]) {
-  test(`gallery verifier cleans up after creation ${creation.name} validation fails`, async () => {
-    const calls: { route: string; init: RequestInit }[] = [];
-    await assert.rejects(withGalleryDraft({
-      draft: fixture(),
-      transport: async (route: string, init: RequestInit) => {
-        calls.push({ route, init });
-        return init.method === 'POST'
-          ? new Response(JSON.stringify(creation.credentials), { status: creation.status,
-            headers: { ...verificationHeaders, 'Cache-Control': creation.cache } })
-          : new Response(JSON.stringify({ ok: true }), { headers: verificationHeaders });
-      },
-      checkHeaders: checkVerificationHeaders,
-      run: () => assert.fail('Creation validation must stop the publication.'),
-    }), creation.expected);
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0]?.route, '/api/gallery');
-    assert.equal(calls[0]?.init.method, 'POST');
-    assert.equal(calls[1]?.route, `/api/gallery/${encodeURIComponent(creation.credentials.id)}`);
-    assert.equal(calls[1]?.init.method, 'DELETE');
-    assert.equal(new Headers(calls[1]?.init.headers).get('Authorization'), `Bearer ${creation.credentials.token}`);
-  });
-}
-
-test('gallery verifier preserves the original creation failure when cleanup also fails', async () => {
-  const original = new Error('Creation headers were incorrect.'), cleanup = new Error('Cleanup connection failed.');
-  let removed = false;
-  await assert.rejects(withGalleryDraft({
-    draft: fixture(),
-    transport: async (_route: string, init: RequestInit) => {
-      if (init.method === 'DELETE') { removed = true; throw cleanup; }
-      return new Response(JSON.stringify(verificationCredentials), { status: 201, headers: verificationHeaders });
-    },
-    checkHeaders: () => { throw original; },
-    run: () => assert.fail('Creation validation must stop the publication.'),
-  }), (error: unknown) => { assert.equal(error, original); return true; });
-  assert.ok(removed);
-});
-
-test('gallery verifier reports cleanup failure after an otherwise successful round trip', async () => {
-  const cleanup = new Error('Cleanup connection failed.');
-  let ran = false;
-  await assert.rejects(withGalleryDraft({
-    draft: fixture(),
-    transport: async (_route: string, init: RequestInit) => {
-      if (init.method === 'DELETE') throw cleanup;
-      return new Response(JSON.stringify(verificationCredentials), { status: 201, headers: verificationHeaders });
-    },
-    checkHeaders: checkVerificationHeaders,
-    run: async () => { ran = true; },
-  }), (error: unknown) => { assert.equal(error, cleanup); return true; });
-  assert.ok(ran);
-});
-
-test('gallery verifier deletes its real local draft after a creation header failure', async () => {
-  const original = new Error('Creation header validation failed.');
-  let deletedRoute = '';
-  let deletedHeaders: HeadersInit = {};
-  await assert.rejects(withGalleryDraft({
-    draft: fixture(),
-    transport: async (route: string, init: RequestInit) => {
-      if (init.method === 'DELETE') { deletedRoute = route; deletedHeaders = init.headers ?? {}; }
-      return await nativeFetch(new URL(route, server.url), init);
-    },
-    checkHeaders: (route: string, response: Response) => {
-      if (route === '/api/gallery') throw original;
-      checkVerificationHeaders(route, response);
-    },
-    run: () => assert.fail('Creation validation must stop the publication.'),
-  }), (error: unknown) => { assert.equal(error, original); return true; });
-  assert.match(deletedRoute, /^\/api\/gallery\/[0-9a-f-]{36}$/);
-  const deleted = await nativeFetch(new URL(`${deletedRoute}/publish`, server.url), { method: 'POST', headers: deletedHeaders });
-  assert.equal(deleted.status, 410);
-  assert.deepEqual(await deleted.json(), { error: 'The gallery piece was unpublished.' });
 });
 
 test('gallery schema enforces complete immutable asset graphs and resource limits', () => {

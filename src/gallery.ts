@@ -1,5 +1,6 @@
 import type { GalleryLoader } from './app/gallery-page.ts';
-import { mountGalleryUi } from './ui/gallery.tsx';
+import { mountGalleryOffline, mountGalleryUi } from './ui/gallery.tsx';
+import { GALLERY_ONLINE } from './ui/gallery-online.ts';
 import { bootstrapGallery, loadGallery } from './app/gallery-bootstrap.ts';
 import { galleryTokens } from './projects/gallery-tokens.ts';
 import { createGalleryDevice } from './projects/gallery-device.ts';
@@ -13,6 +14,7 @@ const load: GalleryLoader = NOISY_DEV && new URLSearchParams(location.search).ge
 function boot(): void {
   const root = document.getElementById('gallery-root');
   if (root === null) return;
+  if (!GALLERY_ONLINE) { mountGalleryOffline({ root, editorUrl: '/' }); return; }
   const app = bootstrapGallery({ root, load, mount: (ctx) => mountGalleryUi({ ...ctx, list, publishedHere, unpublish, editorUrl: '/' }) });
   if (NOISY_DEV) window.__noisyGallery = { ...app.page, list, publishedHere, unpublish, remount() { app.dispose(); boot(); } };
 }

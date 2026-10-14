@@ -53,18 +53,13 @@ test('browser foreign-request guard admits only the configured GPU origin and an
   assert.deepEqual(foreignRequests(requests, origin, '/dev/gpu').map((r) => r.url), requests.slice(3).map((r) => r.url));
 });
 
-test('deployment workflow tests a GPU-free build and carries the public GPU Actions variable into the deployed build', async () => {
+test('deployment workflow deploys the tested GPU-free production build and passes no GPU URL', async () => {
   const workflow = await readFile(new URL('../.github/workflows/deploy.yml', import.meta.url), 'utf8');
-  const step = (name: string): string => workflow.split(`- name: ${name}\n`)[1]?.split('\n      - ')[0] ?? '';
-  // The tests check the GPU-free header contract, so the tested builds carry no GPU URL.
-  assert.doesNotMatch(step('Build development and production'), /NOISY_GPU_URL/);
-  // The deployed production build and its preparation both carry the configured URL.
-  for (const name of ['Build production with the GPU URL', 'Deploy and verify Cloudflare']) {
-    assert.match(step(name), /NOISY_GPU_URL: \$\{\{ vars\.NOISY_GPU_URL \}\}/);
-  }
-  assert.ok(workflow.indexOf('- name: Build production with the GPU URL') > workflow.indexOf('- name: Test without Chrome'), 'the GPU build follows the tests');
-  assert.ok(workflow.indexOf('- name: Build production with the GPU URL') < workflow.indexOf('- name: Deploy and verify Cloudflare'), 'the GPU build precedes the deploy');
-  assert.doesNotMatch(workflow, /secrets\.NOISY_GPU_URL/);
+  // Production analysis stays on the device: no step receives a GPU URL, from a
+  // variable or a secret, so the deployed build and its CSP name no GPU host.
+  assert.doesNotMatch(workflow, /NOISY_GPU_URL/);
+  assert.equal(workflow.match(/npm run build:production/g)?.length, 1, 'one production build, the tested one');
+  assert.ok(workflow.indexOf('- name: Build development and production') < workflow.indexOf('- name: Deploy and verify Cloudflare'), 'the tested build precedes the deploy');
 });
 
 // Exercise the build and serving policy together; a URL path never widens CSP

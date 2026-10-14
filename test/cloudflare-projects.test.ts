@@ -22,6 +22,8 @@ const contract = z.object({ all: z.record(z.string(), z.string()), errors: z.rec
 const config = {
   routes: { '/': { kind: 'asset', headers: { ...contract.all, 'Cache-Control': 'no-cache', 'Content-Type': 'text/html; charset=utf-8' } } },
   errors: { ...contract.all, ...contract.errors, 'Content-Type': 'text/plain; charset=utf-8' },
+  // The handler stays tested for when owner access brings the store back online.
+  store: 'online',
 } satisfies HostingConfig;
 const handler = createHandler(config);
 const photo = new Uint8Array([0, 1, 255, 0, 128, 7]);
