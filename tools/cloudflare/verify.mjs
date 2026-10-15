@@ -49,8 +49,11 @@ async function verify() {
       ['HEAD', '/api/projects'], ['POST', '/api/projects'], ['GET', `/api/projects/${id}/scene`], ['GET', `/api/projects/${id}/photo`],
       ['PUT', `/api/projects/${id}/photo`], ['DELETE', `/api/projects/${id}`], ['GET', `/api/%70rojects/${id}/scene`],
       ['GET', '/api/gallery'], ['POST', '/api/gallery'], ['GET', `/api/gallery/${id}`], ['GET', `/api/gallery/${id}/poster`],
-      ['PUT', `/api/gallery/${id}/poster`], ['POST', `/api/gallery/${id}/publish`], ['DELETE', `/api/gallery/${id}`], ['GET', '/api/gallery/%ZZ'],
+      ['PUT', `/api/gallery/${id}/poster`], ['POST', `/api/gallery/${id}/publish`], ['DELETE', `/api/gallery/${id}`],
     ];
+    // No malformed escape such as %ZZ here: Cloudflare's edge answers it with its own bare 400
+    // before any Worker runs, so none reaches a handler; test/cloudflare-hosting.test.ts holds
+    // the Worker's own answer to one.
     for (const [method, urlPath] of refused) {
       const response = await request(urlPath, { method, ...(method === 'PUT' || method === 'POST' ? { body: new Uint8Array([1]) } : {}) });
       assert.equal(response.status, 404, `${method} ${urlPath}`);
