@@ -110,6 +110,12 @@ export const scenarios: readonly Scenario[] = [{
     const requests = t.page.requests().filter((request) => /^https?:/.test(request.url));
     const api = requests.filter((request) => new URL(request.url).pathname.startsWith('/api/')).map((request) => [request.method, new URL(request.url).pathname, request.status]);
     t.equal('the only API requests are one store probe per editor load, each answered 204', api, [['GET', '/api/projects', 204], ['GET', '/api/projects', 204]]);
-    t.equal('no request leaves the origin', requests.filter((request) => new URL(request.url).origin !== origin).map((request) => request.url), []);
+    // Cloudflare Web Analytics, which the hosted CSP admits, loads its beacon on nathan.fish; the
+    // local production server injects none. Nothing else may leave the origin.
+    const analytics = new Set(['https://static.cloudflareinsights.com', 'https://cloudflareinsights.com']);
+    t.equal('no request but Cloudflare Web Analytics leaves the origin', requests.filter((request) => {
+      const requestOrigin = new URL(request.url).origin;
+      return requestOrigin !== origin && !analytics.has(requestOrigin);
+    }).map((request) => request.url), []);
   },
 }];
