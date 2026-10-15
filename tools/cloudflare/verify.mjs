@@ -44,9 +44,15 @@ async function verify() {
     const probe = await request('/api/projects');
     assert.equal(probe.status, 204, 'GET /api/projects');
     assert.equal((await probe.arrayBuffer()).byteLength, 0, 'GET /api/projects body');
+    // nathan.fish's cache rule makes Cloudflare fetch a HEAD from the Worker as GET, so the custom
+    // domain answers this HEAD with the probe's 204 where a deployment URL gets the Worker's 404;
+    // either way the answer has no body and reaches no handler.
+    const head = await request('/api/projects', { method: 'HEAD' });
+    assert.ok([204, 404].includes(head.status), `HEAD /api/projects: ${head.status}`);
+    assert.equal((await head.arrayBuffer()).byteLength, 0, 'HEAD /api/projects body');
     const id = '00000000-0000-4000-8000-000000000000';
     const refused = [
-      ['HEAD', '/api/projects'], ['POST', '/api/projects'], ['GET', `/api/projects/${id}/scene`], ['GET', `/api/projects/${id}/photo`],
+      ['POST', '/api/projects'], ['GET', `/api/projects/${id}/scene`], ['GET', `/api/projects/${id}/photo`],
       ['PUT', `/api/projects/${id}/photo`], ['DELETE', `/api/projects/${id}`], ['GET', `/api/%70rojects/${id}/scene`],
       ['GET', '/api/gallery'], ['POST', '/api/gallery'], ['GET', `/api/gallery/${id}`], ['GET', `/api/gallery/${id}/poster`],
       ['PUT', `/api/gallery/${id}/poster`], ['POST', `/api/gallery/${id}/publish`], ['DELETE', `/api/gallery/${id}`],
@@ -57,10 +63,9 @@ async function verify() {
     for (const [method, urlPath] of refused) {
       const response = await request(urlPath, { method, ...(method === 'PUT' || method === 'POST' ? { body: new Uint8Array([1]) } : {}) });
       assert.equal(response.status, 404, `${method} ${urlPath}`);
-      if (method === 'HEAD') assert.equal((await response.arrayBuffer()).byteLength, 0);
-      else assert.deepEqual(await response.json(), { error: urlPath.startsWith('/api/gallery') ? 'The gallery is offline.' : 'The project store is offline.' }, `${method} ${urlPath}`);
+      assert.deepEqual(await response.json(), { error: urlPath.startsWith('/api/gallery') ? 'The gallery is offline.' : 'The project store is offline.' }, `${method} ${urlPath}`);
     }
-    console.log(`PASS store and gallery offline: GET /api/projects 204 with no body; ${refused.length} store and gallery requests 404.`);
+    console.log(`PASS store and gallery offline: GET /api/projects 204 and HEAD ${head.status}, both with no body; ${refused.length} store and gallery requests 404.`);
   }
   await storeOffline();
   for (const file of ['/', '/index.html', ...build.files.map((name) => `/${name}`)]) {

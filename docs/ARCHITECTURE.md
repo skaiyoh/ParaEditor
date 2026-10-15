@@ -1499,6 +1499,7 @@ The deployed Pages Worker keeps the shared project store and the public gallery 
 Offline, the Worker answers before its static route table and reads nothing from its environment: GET `/api/projects` gets the bodiless 204 absence probe, so the editor runs with no project store, as under the local production server.
 Every other request whose path, decoded when it can be, starts with `/api/projects` or `/api/gallery` gets 404 for any method, with `{"error":"The project store is offline."}` or `{"error":"The gallery is offline."}`.
 On Cloudflare, a path with a malformed escape such as `%ZZ` never reaches the Worker: the edge answers it with its own bare 400, so `verify.mjs` does not probe one.
+On nathan.fish, whose cache rule makes Cloudflare fetch a HEAD from the Worker as GET, HEAD `/api/projects` gets the probe's 204, where a deployment URL gets the Worker's 404; `verify.mjs` accepts either, with no body.
 The `PROJECTS` R2 binding and the `NEON_DATABASE_URL` secret stay bound, and the data they hold stays in place; no handler reads them.
 Pages keeps every deployment reachable at its own hash URL, running the Worker it was deployed with, and binding changes reach only later deployments.
 The store is therefore offline everywhere only once every deployment made before this change is deleted, and a rollback to one of those would bring it back online.
