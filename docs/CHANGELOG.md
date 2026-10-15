@@ -174,6 +174,7 @@
 
 ### Fixed
 - `2026-10-14` - `verify.mjs` accepts 204 as well as 404 for HEAD `/api/projects`: nathan.fish's cache rule makes Cloudflare fetch a HEAD from the Worker as GET, so the custom domain answers with the probe's 204, which failed the second offline deploy's custom-domain check after production had been promoted.
+- `2026-10-14` - `hosted.offline` admits Cloudflare Web Analytics' beacon, which the hosted CSP allows and only the deployed edge injects, so the scenario passes against nathan.fish with `--base-url`.
 - `2026-10-14` - `verify.mjs` no longer expects the Worker's offline 404 for `/api/gallery/%ZZ`: Cloudflare's edge answers a malformed escape with its own bare 400 before any Worker runs, which failed the first offline deploy's preview check and stopped its promotion.
 - `2026-10-03` - The memory harness's Start posts the `load` row of the load it was pressed in, right after the `plan` row and in the same plan write, with verdict `fresh`, the runner lock it holds, and the outbox's dropped count, so a run that reaches DONE without a reload has the `load` row the readers place it by.
 - `2026-10-03` - The memory harness's Start no longer writes a new plan over an unfinished run another page of the same storage started after this page loaded: holding the runner lock, it reads the stored run again and refuses one of this page and build with a step in flight or a step left to run, "A run is stored here: reload the page to resume it.", writing nothing, so the reload's load applies the stored run as the load verdicts say.
